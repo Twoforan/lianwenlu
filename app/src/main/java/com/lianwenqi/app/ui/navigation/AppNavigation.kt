@@ -34,6 +34,7 @@ import com.lianwenqi.app.ui.screens.CheckUpdateScreen
 import com.lianwenqi.app.ui.screens.PrefixManageScreen
 import com.lianwenqi.app.ui.screens.ReaderScreen
 import com.lianwenqi.app.ui.screens.SettingsScreen
+import com.lianwenqi.app.ui.screens.TxtImportScreen
 
 object Routes {
     const val SHELL = "shell"
@@ -44,6 +45,7 @@ object Routes {
     const val AI_TOOLS = "aitools"
     const val PREFIX_MANAGE = "prefix"
     const val UPDATE = "update"
+    const val TXT_IMPORT = "txtimport"
 
     fun book(id: Long) = "book/$id"
     fun editor(bookId: Long, chapterId: Long) = "editor/$bookId/$chapterId"
@@ -75,6 +77,16 @@ fun RootNavHost() {
 
         composable(Routes.UPDATE) {
             CheckUpdateScreen(onBack = { rootNav.popBackStack() })
+        }
+
+        composable(Routes.TXT_IMPORT) {
+            TxtImportScreen(
+                onBack = { rootNav.popBackStack() },
+                onOpenBook = { bookId ->
+                    rootNav.popBackStack()
+                    rootNav.navigate(Routes.book(bookId))
+                }
+            )
         }
 
         composable(
@@ -182,7 +194,8 @@ private fun MainShell(rootNav: NavHostController) {
                             popUpTo(tabNav.graph.startDestinationId) { saveState = true }
                             launchSingleTop = true
                         }
-                    }
+                    },
+                    onImportTxt = { rootNav.navigate(Routes.TXT_IMPORT) }
                 )
             }
             composable("ai") { AiChatScreen(initialBookId = null) }

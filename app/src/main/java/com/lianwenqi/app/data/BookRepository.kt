@@ -89,6 +89,68 @@ class BookRepository(private val db: AppDatabase) {
         bookId
     }
 
+    /**
+     * TXT 导入：建书 + 首卷（不建首章），随后由 [importVolumes] 批量写入分卷章节。
+     * 章节前缀沿用默认「第%n章」，导入后在这本书里新建章节会从最大编号顺延。
+     */
+    suspend fun createBookShell(
+        title: String,
+        intro: String,
+        coverColor: Int,
+        groupId: Long? = null
+    ): Long = db.withTransaction {
+        val bookId = bookDao.insert(
+            Book(
+                title = title,
+                intro = intro,
+                coverPath = null,
+                coverColor = coverColor,
+                groupId = groupId
+            )
+        )
+        volumeDao.insert(Volume(bookId = bookId, title = buildTitle("第%n卷", 1), sortOrder = 0))
+        bookId
+    }
+
+    /** TXT 导入：事务内批量写入分卷与章节，返回 (章节数, 首章id) */
+    suspend fun importVolumes(
+        bookId: Long,
+        volumes: List<Pair<String, List<Pair<String, String>>>> // 卷名 → (章节标题, 章节正文) 列表
+    ): Pair<Int, Long?> = db.withTransaction {
+        var chapterCount = 0
+        var firstChapterId: Long? = null
+        var lastChapterTitle: String? = null
+        volumes.forEachIndexed { vi, (volumeTitle, chapters) ->
+            // 首卷复用 createBookShell 已建的第1卷，其余新建
+            val volumeId = if (vi == 0) {
+                volumeDao.getByBook(bookId).firstOrNull()?.id
+                    ?: volumeDao.insert(Volume(bookId = bookId, title = volumeTitle, sortOrder = 0))
+            } else {
+                volumeDao.insert(
+                    Volume(bookId = bookId, title = volumeTitle, sortOrder = vi)
+                )
+            }
+            chapters.forEach { (chapterTitle, content) ->
+                val id = chapterDao.insert(
+                    Chapter(
+                        bookId = bookId,
+                        volumeId = volumeId,
+                        title = chapterTitle,
+                        content = content,
+                        sortOrder = chapterCount
+                    )
+                )
+                if (firstChapterId == null) firstChapterId = id
+                lastChapterTitle = chapterTitle
+                chapterCount++
+            }
+        }
+        if (firstChapterId != null) {
+            bookDao.touch(bookId, System.currentTimeMillis(), firstChapterId, lastChapterTitle)
+        }
+        chapterCount to firstChapterId
+    }
+
     suspend fun deleteBook(bookId: Long) = db.withTransaction {
         chapterDao.getByBook(bookId).forEach { chapterDao.deleteById(it.id) }
         volumeDao.getByBook(bookId).forEach { volumeDao.deleteById(it.id) }

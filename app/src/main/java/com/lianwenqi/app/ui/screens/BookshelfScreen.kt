@@ -96,7 +96,8 @@ private val timeFmt = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.CHINA)
 fun BookshelfScreen(
     onOpenBook: (Long) -> Unit,
     onPreviewBook: (Long, Long) -> Unit,
-    onOpenAi: () -> Unit
+    onOpenAi: () -> Unit,
+    onImportTxt: () -> Unit = {}
 ) {
     val vm = appViewModel { BookshelfViewModel(it) }
     val context = LocalContext.current
@@ -182,6 +183,11 @@ fun BookshelfScreen(
                             DropdownMenuItem(
                                 text = { Text("创建分组") },
                                 onClick = { showCreateGroup = true; showMoreMenu = false }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("导入 TXT") },
+                                leadingIcon = { Icon(Icons.Filled.FileDownload, null) },
+                                onClick = { onImportTxt(); showMoreMenu = false }
                             )
                         }
                     }
