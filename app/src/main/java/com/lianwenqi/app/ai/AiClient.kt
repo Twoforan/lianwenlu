@@ -52,17 +52,36 @@ class AiClient(
      * 读取供应商可用模型列表。
      * 失败时返回 [Result.failure]（异常为 [AiException]，内含可区分类型的 [AiError]），
      * 不再把不同性质的错误压成一句「读取模型失败：xxx」。
+     *
+     * 注意：未填 apiKey / apiKey 含非法字符（如中文）/ baseUrl 非法 都在此处提前拦截或兜底为
+     * [AiError.InvalidConfig]，绝不能抛出异常 —— 一旦异常逃出协程会直接把 App 打崩
+     * （OkHttp 对含中文的 header 会抛 IllegalArgumentException）。
      */
-    suspend fun listModels(baseUrl: String, apiKey: String): Result<List<String>> =
-        withContext(Dispatchers.IO) {
-            val base = baseUrl.trim().trimEnd('/')
+    suspend fun listModels(baseUrl: String, apiKey: String): Result<List<String>> {
+        if (apiKey.isBlank()) {
+            return Result.failure(AiException(AiError.InvalidConfig("未填写 apikey")))
+        }
+        val bad = apiKey.firstOrNull { it.code >= 0x7f || it.code <= 0x1f }
+        if (bad != null) {
+            return Result.failure(AiException(AiError.InvalidConfig("apikey 含非法字符（不支持中文或控制字符），请重新填写")))
+        }
+        val trimmedBase = baseUrl.trim()
+        if (trimmedBase.isBlank()) {
+            return Result.failure(AiException(AiError.InvalidConfig("未填写 baseUrl")))
+        }
+        if (!trimmedBase.startsWith("http://") && !trimmedBase.startsWith("https://")) {
+            return Result.failure(AiException(AiError.InvalidConfig("baseUrl 格式不正确（需以 http:// 或 https:// 开头）")))
+        }
+        return withContext(Dispatchers.IO) {
+            val base = trimmedBase.trimEnd('/')
             val url = if (base.endsWith("/models")) base else "$base/models"
-            val request = Request.Builder()
-                .url(url)
-                .header("Authorization", "Bearer $apiKey")
-                .get()
-                .build()
             try {
+                // 构造请求也放进 try：非法 url / 非法 header 都只会变成 Result.failure，不会崩 App
+                val request = Request.Builder()
+                    .url(url)
+                    .header("Authorization", "Bearer $apiKey")
+                    .get()
+                    .build()
                 client.newCall(request).execute().use { resp ->
                     val body = resp.body?.string().orEmpty()
                     if (!resp.isSuccessful) {
@@ -76,6 +95,7 @@ class AiClient(
                 Result.failure(AiException(AiError.fromThrowable(e)))
             }
         }
+    }
 
     /**
      * 发送对话请求。

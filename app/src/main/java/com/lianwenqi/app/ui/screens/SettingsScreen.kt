@@ -105,9 +105,11 @@ class SettingsViewModel(private val container: AppContainer) : ViewModel() {
 
     fun fetchModels(provider: Provider, onResult: (List<String>, String?) -> Unit) =
         viewModelScope.launch {
-            configRepository.fetchRemoteModels(provider)
+            // 兜底再包一层：即使底层意外抛出（如非法配置），也只把错误交给 UI，绝不让异常逃出协程崩 App
+            runCatching { configRepository.fetchRemoteModels(provider) }
+                .getOrElse { Result.failure(it) }
                 .onSuccess { onResult(it, null) }
-                // 失败时展示按类型区分后的提示（鉴权 / 超时 / 服务器错误…），不再是统一的「读取模型失败」
+                // 失败时展示按类型区分后的提示（未填 key / 非法字符 / 鉴权 / 超时 / 服务器错误…）
                 .onFailure { onResult(emptyList(), (it as? AiException)?.error?.userMessage ?: it.message) }
         }
 
@@ -139,7 +141,9 @@ fun SettingsScreen(
     val aiFollowBook by vm.aiFollowBook.collectAsState()
     val aiOutlineFirstRound by vm.aiOutlineFirstRound.collectAsState()
 
-    var tab by remember { mutableStateOf(0) }
+    // 默认停在「通用」页：点击底部「设置」以及从 AI 工具 / 前缀词管理 / 检查更新等子页面返回时，
+    // 都会回到该页（返回时本页重新组合，记住的 tab 复位为默认值 2）
+    var tab by remember { mutableStateOf(2) }
     var editProvider by remember { mutableStateOf<Provider?>(null) }
     var showProviderDialog by remember { mutableStateOf(false) }
     var addModelFor by remember { mutableStateOf<Provider?>(null) }
@@ -453,7 +457,8 @@ private fun ProvidersTab(
                                     val ok = err == null
                                     testOk[p.id] = ok
                                     testResults[p.id] = when {
-                                        err != null -> "连接失败：$err"
+                                        // 直接展示错误原因（未填写 API Key / 含非法字符 / 鉴权失败 / 超时…）
+                                        err != null -> err
                                         list.isEmpty() -> "连接成功，但未读取到模型（请检查 apiKey / baseUrl）"
                                         else -> "连接成功，读取到 ${list.size} 个模型"
                                     }
