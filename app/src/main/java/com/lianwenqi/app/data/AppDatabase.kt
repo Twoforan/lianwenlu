@@ -12,6 +12,7 @@ import com.lianwenqi.app.data.dao.BookDao
 import com.lianwenqi.app.data.dao.BookGroupDao
 import com.lianwenqi.app.data.dao.ChapterDao
 import com.lianwenqi.app.data.dao.ChatDao
+import com.lianwenqi.app.data.dao.MemoryChunkDao
 import com.lianwenqi.app.data.dao.OutlineDao
 import com.lianwenqi.app.data.dao.PromptDao
 import com.lianwenqi.app.data.dao.ProviderDao
@@ -22,6 +23,7 @@ import com.lianwenqi.app.data.entity.BookGroup
 import com.lianwenqi.app.data.entity.Chapter
 import com.lianwenqi.app.data.entity.ChatMessage
 import com.lianwenqi.app.data.entity.ChatSession
+import com.lianwenqi.app.data.entity.MemoryChunk
 import com.lianwenqi.app.data.entity.OutlineItem
 import com.lianwenqi.app.data.entity.Prompt
 import com.lianwenqi.app.data.entity.Provider
@@ -38,9 +40,10 @@ import com.lianwenqi.app.data.entity.Volume
         Provider::class,
         AiModel::class,
         ChatSession::class,
-        ChatMessage::class
+        ChatMessage::class,
+        MemoryChunk::class
     ],
-    version = 11,
+    version = 12,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
@@ -54,6 +57,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun providerDao(): ProviderDao
     abstract fun aiModelDao(): AiModelDao
     abstract fun chatDao(): ChatDao
+    abstract fun memoryChunkDao(): MemoryChunkDao
 
     companion object {
         @Volatile
@@ -139,13 +143,39 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /** v12：长期记忆（书本向量化）——书籍正文切块后的向量片段 */
+        private val MIGRATION_11_12 = object : Migration(11, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS memory_chunk (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "bookId INTEGER NOT NULL, " +
+                        "volumeId INTEGER, " +
+                        "chapterId INTEGER NOT NULL, " +
+                        "chunkIndex INTEGER NOT NULL, " +
+                        "text TEXT NOT NULL, " +
+                        "hash TEXT NOT NULL, " +
+                        "chapterUpdatedAt INTEGER NOT NULL, " +
+                        "dim INTEGER NOT NULL, " +
+                        "vector BLOB NOT NULL, " +
+                        "createdAt INTEGER NOT NULL)"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_memory_chunk_bookId ON memory_chunk (bookId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_memory_chunk_chapterId ON memory_chunk (chapterId)")
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS index_memory_chunk_chapterId_chunkIndex " +
+                        "ON memory_chunk (chapterId, chunkIndex)"
+                )
+            }
+        }
+
         fun get(context: Context): AppDatabase =
             INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
                     context.applicationContext,
                     AppDatabase::class.java,
                     "lianwenqi.db"
-                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11).build().also { INSTANCE = it }
+                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12).build().also { INSTANCE = it }
             }
     }
 }

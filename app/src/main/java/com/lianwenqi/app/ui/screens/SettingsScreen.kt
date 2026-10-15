@@ -130,6 +130,7 @@ class SettingsViewModel(private val container: AppContainer) : ViewModel() {
 fun SettingsScreen(
     onOpenAiTools: () -> Unit = {},
     onOpenPrefix: () -> Unit = {},
+    onOpenMemory: () -> Unit = {},
     onOpenUpdate: () -> Unit = {}
 ) {
     val vm = appViewModel { SettingsViewModel(it) }
@@ -267,6 +268,31 @@ fun SettingsScreen(
                                 Text("AI工具")
                                 Text(
                                     "写入大纲等 AI 辅助工具",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Icon(
+                                Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Spacer(Modifier.height(12.dp))
+                        HorizontalDivider()
+                        Spacer(Modifier.height(12.dp))
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable(onClick = onOpenMemory)
+                                .padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text("长期记忆（书本向量化）")
+                                Text(
+                                    "书籍正文向量化后，发送时按本章梗概与提示词语义检索相关片段作为参考资料",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )

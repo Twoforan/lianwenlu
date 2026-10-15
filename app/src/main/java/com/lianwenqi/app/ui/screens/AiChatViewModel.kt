@@ -6,8 +6,10 @@ import com.lianwenqi.app.AppContainer
 import com.lianwenqi.app.data.AiChapterImporter
 import com.lianwenqi.app.data.AiOutlineImporter
 import com.lianwenqi.app.data.ChatEvent
+import com.lianwenqi.app.data.MemoryGateway
 import com.lianwenqi.app.data.SendChatMessageUseCase
 import com.lianwenqi.app.data.SendChatRequest
+import com.lianwenqi.app.data.VectorizeProgress
 import com.lianwenqi.app.data.entity.AiModel
 import com.lianwenqi.app.data.entity.Book
 import com.lianwenqi.app.data.entity.BookGroup
@@ -121,6 +123,27 @@ class AiChatViewModel(
     val sending = MutableStateFlow(false)
     val errorMessage = MutableStateFlow<String?>(null)
     val input = MutableStateFlow("")
+
+    /**
+     * 「记忆检索」勾选框（导航栏 AI 聊天页与侧边 AI 助手共用，状态持久化）：
+     * 勾选后发送时用「本章梗概 + 当前提示词」检索本书已向量化的正文块，
+     * 命中片段作为临时参考资料注入本轮请求（不进前缀、不落库）。
+     */
+    val memoryRetrievalEnabled: StateFlow<Boolean> =
+        prefs.memoryRetrievalEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    fun toggleMemoryRetrieval() = viewModelScope.launch {
+        prefs.setMemoryRetrievalEnabled(!memoryRetrievalEnabled.value)
+    }
+
+    /**
+     * A3 关闭时：正文有更新且已勾选记忆检索 → 发送前弹窗询问「是否向量化到最新章节」。
+     * 用户答「是」后先续跑向量化再发送；答「否」直接用已有进度发送。
+     */
+    val pendingMemoryAsk = MutableStateFlow<MemoryVectorizeAsk?>(null)
+
+    /** 本次等待的向量化进度（弹窗选「是」后显示，避免界面看起来卡住） */
+    val memoryVectorizing = MutableStateFlow<VectorizeProgress?>(null)
 
     // ---------------- AI 工具 ----------------
 
@@ -619,7 +642,62 @@ class AiChatViewModel(
         resetGeneratingState()
     }
 
-    fun send(overrideText: String? = null, systemPrompt: String = "") = launchGenerating {
+    fun send(overrideText: String? = null, systemPrompt: String = "") = viewModelScope.launch {
+        if (shouldAskMemoryVectorize()) {
+            pendingMemoryAsk.value = MemoryVectorizeAsk(overrideText, systemPrompt)
+            return@launch
+        }
+        startSend(overrideText, systemPrompt)
+    }
+
+    /** 弹窗应答：是否向量化到最新章节（「是」先续跑，再照常发送） */
+    fun resolveMemoryAsk(vectorize: Boolean) = viewModelScope.launch {
+        val ask = pendingMemoryAsk.value ?: return@launch
+        pendingMemoryAsk.value = null
+        if (vectorize) {
+            currentMemoryBookId()?.let { bookId ->
+                container.memoryRepository.vectorize(bookId) { memoryVectorizing.value = it }
+                memoryVectorizing.value = null
+            }
+        }
+        startSend(ask.overrideText, ask.systemPrompt)
+    }
+
+    /**
+     * 勾选记忆检索时的自动向量化前置处理：
+     * A3 开启 → 后台静默续跑本书向量化（用户不可见，不阻塞本次发送）；
+     * A3 关闭 → 若正文比已向量化进度更新（或从未向量化），返回 true 交由 UI 弹窗询问。
+     */
+    private suspend fun shouldAskMemoryVectorize(): Boolean {
+        if (!memoryRetrievalEnabled.value) return false
+        val bookId = currentMemoryBookId() ?: return false
+        if (prefs.memoryAutoVectorize.first()) {
+            container.appScope.launch {
+                container.memoryRepository.vectorize(bookId) { memoryVectorizing.value = it }
+                memoryVectorizing.value = null
+            }
+            return false
+        }
+        return hasNewerContentThanVectorized(bookId)
+    }
+
+    /** 本书正文是否比已向量化进度更新（从未向量化也算作有更新） */
+    private suspend fun hasNewerContentThanVectorized(bookId: Long): Boolean {
+        val latestContent = bookRepository.getChapters(bookId)
+            .filter { it.content.isNotBlank() }
+            .maxOfOrNull { it.updatedAt } ?: return false
+        val vectorized = container.memoryRepository.latestVectorizedUpdatedAt(bookId) ?: return true
+        return vectorized < latestContent
+    }
+
+    /** 记忆检索作用的书籍：上下文单选的书 → 会话绑定的书 → 默认书 */
+    private suspend fun currentMemoryBookId(): Long? =
+        selectedBookIds.value.singleOrNull()
+            ?: _sessionId.value?.let { chatRepository.getSession(it)?.bookId }
+            ?: defaultBookId
+
+    /** 真正开始一次发送（原 [send] 的生成逻辑；弹窗确认后也走这里） */
+    private fun startSend(overrideText: String?, systemPrompt: String) = launchGenerating {
         val text = (overrideText ?: input.value).trim()
         if (text.isBlank() || sending.value) return@launchGenerating
         val modelId = activeModelId.value
@@ -827,7 +905,8 @@ class AiChatViewModel(
             writeOutlineTool = writeOutlineToolOn(),
             chapterImportTool = chapterImportToolOn(),
             prefixText = p.custom,
-            referencePrefix = p.reference
+            referencePrefix = p.reference,
+            memoryReference = memoryReferenceFor(replyToUserId)
         )
         sendChatMessage(request).collect { event ->
             when (event) {
@@ -1026,6 +1105,29 @@ class AiChatViewModel(
             if (ch.summary.isNotBlank()) append('\n').append("梗概：").append(ch.summary)
         }
     }
+
+    /**
+     * 长期记忆检索：query = 本章梗概 + 本轮用户提示词，被检索内容 = 本书已向量化的正文块。
+     * 命中片段拼成临时参考资料注入本轮请求 —— 不改会话前缀、不落库（用户不可见）。
+     * 未勾选 / 未绑定书 / 未配置 Embedding / 无命中时一律返回空串，不影响正常发送。
+     */
+    private suspend fun memoryReferenceFor(userMessageId: Long): String {
+        if (!memoryRetrievalEnabled.value) return ""
+        val bookId = currentMemoryBookId() ?: return ""
+        val userText = chatRepository.getMessage(userMessageId)?.content.orEmpty()
+        val summary = fixedChapterId?.let { bookRepository.getChapter(it)?.summary }.orEmpty()
+        val query = buildString {
+            if (summary.isNotBlank()) append("【本章梗概】").append(summary).append('\n')
+            if (userText.isNotBlank()) append("【提示词】").append(userText)
+        }
+        if (query.isBlank()) return ""
+        val hits = container.memoryRepository.retrieve(bookId, query, MemoryGateway.DEFAULT_TOP_K)
+        if (hits.isEmpty()) return ""
+        return buildString {
+            append("【长期记忆·本书相关正文片段】\n")
+            hits.forEachIndexed { i, text -> append("片段${i + 1}：").append(text).append('\n') }
+        }.trimEnd()
+    }
 }
 
 /** 前缀条目「只增不减」的更新：不存在则追加，内容有变更则原位替换，否则原样返回 */
@@ -1048,3 +1150,6 @@ sealed interface PendingImport {
     /** 导入章节梗概 */
     data class Chapters(val blocks: List<AiChapterBlock>) : PendingImport
 }
+
+/** 「正文有更新，是否向量化到最新章节？」弹窗的挂起请求（保留原发送参数，应答后继续发送） */
+data class MemoryVectorizeAsk(val overrideText: String?, val systemPrompt: String)

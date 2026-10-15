@@ -42,7 +42,12 @@ data class SendChatRequest(
     /** 会话级的「自定义前缀」（纯文本），为空则不发送 */
     val prefixText: String = "",
     /** 会话已冻结的「参考资料前缀」（书籍/大纲/章节字面文本），为空则不发送 */
-    val referencePrefix: String = ""
+    val referencePrefix: String = "",
+    /**
+     * 长期记忆检索命中片段拼成的临时参考资料（由 ViewModel 预解析）。
+     * 逐轮变化，故不写前缀、不落库，只作为本轮最后一个用户消息之前的临时 SYSTEM turn 发送。
+     */
+    val memoryReference: String = ""
 )
 
 /** 流式生成过程中对外吐出的事件 */
@@ -164,6 +169,16 @@ class SendChatMessageUseCase(
                 add(ChatTurn(ChatRole.SYSTEM, "以下是参考资料，请在写作时参考：\n$reference"))
             }
             addAll(history)
+            // 长期记忆：检索命中是「逐轮变化」的临时内容，插在稳定区（前缀 / 工具提示词 / 参考资料 / 历史）
+            // 之后、本轮 user turn 之前 —— 前面所有字节保持不变，prompt cache 不受影响。
+            if (request.memoryReference.isNotBlank()) {
+                val lastUserIndex = indexOfLast { it.role == ChatRole.USER }
+                if (lastUserIndex >= 0) {
+                    add(lastUserIndex, ChatTurn(ChatRole.SYSTEM, request.memoryReference))
+                } else {
+                    add(ChatTurn(ChatRole.SYSTEM, request.memoryReference))
+                }
+            }
             // 编辑后继续：历史以助手消息结尾时，补一个「继续」的轮次
             if (history.lastOrNull()?.role != ChatRole.USER) {
                 add(ChatTurn(ChatRole.USER, "请基于以上内容继续往下写。"))

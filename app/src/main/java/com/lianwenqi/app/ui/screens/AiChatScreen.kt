@@ -168,6 +168,9 @@ fun AiChatScreen(initialBookId: Long?) {
     val chapterToolEnabled by vm.chapterToolEnabled.collectAsState()
     val pendingImports by vm.pendingImports.collectAsState()
     val importToast by vm.importToast.collectAsState()
+    val memoryRetrieval by vm.memoryRetrievalEnabled.collectAsState()
+    val memoryAsk by vm.pendingMemoryAsk.collectAsState()
+    val memoryVectorizing by vm.memoryVectorizing.collectAsState()
 
     var showBooks by remember { mutableStateOf(false) }
     var showChapters by remember { mutableStateOf(false) }
@@ -175,7 +178,6 @@ fun AiChatScreen(initialBookId: Long?) {
     var showAiTools by remember { mutableStateOf(false) }
     var showSessions by remember { mutableStateOf(false) }
     var renamingSession by remember { mutableStateOf<ChatSession?>(null) }
-    var showModelMenu by remember { mutableStateOf(false) }
     var showPrompts by remember { mutableStateOf(false) }
     var manifestState by remember { mutableIntStateOf(0) }
 
@@ -192,7 +194,20 @@ fun AiChatScreen(initialBookId: Long?) {
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
             TopAppBar(
-                title = { Text("AI 聊天") },
+                title = {
+                    // 模型选择移到标题右侧，与「AI 聊天」同排
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("AI 聊天")
+                        Spacer(Modifier.width(8.dp))
+                        ModelSelectorChip(
+                            models = models,
+                            providers = providers,
+                            activeId = activeModelId,
+                            maxLabelWidth = 110.dp,
+                            onSelect = { vm.setModel(it) }
+                        )
+                    }
+                },
                 actions = {
                     IconButton(onClick = { vm.newSession() }) {
                         Icon(Icons.Filled.Add, contentDescription = "新对话")
@@ -332,7 +347,7 @@ fun AiChatScreen(initialBookId: Long?) {
             }
             val manifestCount = manifestChapters.size + manifestOutline.size
 
-            // 底部工具条：模型选择 / 常用提示词 / AI工具，右侧文件清单；超出宽度可横向滑动
+            // 底部工具条：常用提示词 / AI工具，右侧文件清单；超出宽度可横向滑动
             Row(
                 Modifier
                     .fillMaxWidth()
@@ -341,34 +356,6 @@ fun AiChatScreen(initialBookId: Long?) {
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                Box {
-                    AssistChip(
-                        onClick = { showModelMenu = true },
-                        label = {
-                            Text(
-                                models.firstOrNull { it.id == activeModelId }?.displayName ?: "选择模型",
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.widthIn(max = 120.dp)
-                            )
-                        }
-                    )
-                    // 选择模型时下拉仍显示全称：备注（显示名）+ 供应商
-                    DropdownMenu(expanded = showModelMenu, onDismissRequest = { showModelMenu = false }) {
-                        if (models.isEmpty()) {
-                            DropdownMenuItem(text = { Text("请先在设置中添加模型") },
-                                onClick = { showModelMenu = false })
-                        }
-                        models.forEach { m ->
-                            DropdownMenuItem(
-                                text = {
-                                    Text("${m.displayName}  (${providers.firstOrNull { it.id == m.providerId }?.name ?: ""})")
-                                },
-                                onClick = { vm.setModel(m.id); showModelMenu = false }
-                            )
-                        }
-                    }
-                }
                 FilterChip(
                     selected = showPrompts,
                     onClick = {
@@ -378,6 +365,12 @@ fun AiChatScreen(initialBookId: Long?) {
                         if (showPrompts) manifestState = 0
                     },
                     label = { Text("常用提示词") }
+                )
+                // 长期记忆检索：勾选后发送时按「本章梗概 + 提示词」检索本书正文片段注入参考资料
+                FilterChip(
+                    selected = memoryRetrieval,
+                    onClick = { vm.toggleMemoryRetrieval() },
+                    label = { Text("记忆检索") }
                 )
                 // AI 工具多选（被工具页关闭的工具不出现在列表里）
                 if (outlineToolEnabled || chapterToolEnabled) {
@@ -607,6 +600,34 @@ fun AiChatScreen(initialBookId: Long?) {
             vm.clearImportToast()
         }
     }
+    // A3 关闭时：正文有更新，发送前询问是否向量化到最新章节
+    memoryAsk?.let {
+        AlertDialog(
+            onDismissRequest = { vm.resolveMemoryAsk(false) },
+            title = { Text("正文有更新") },
+            text = {
+                Text(
+                    "本书正文比已向量化的进度更新，是否向量化到最新章节？\n\n" +
+                        "选「是」：先续跑向量化，再用最新进度检索参考资料；\n" +
+                        "选「否」：只用之前已向量化的进度检索。\n\n" +
+                        "检索结果只作为本轮临时参考资料，不写入会话前缀、不在对话中显示。"
+                )
+            },
+            confirmButton = { TextButton(onClick = { vm.resolveMemoryAsk(true) }) { Text("是") } },
+            dismissButton = { TextButton(onClick = { vm.resolveMemoryAsk(false) }) { Text("否") } }
+        )
+    }
+    // 向量化进行中的轻提示（避免等待时界面看起来卡住）
+    LaunchedEffect(memoryVectorizing?.bookId, memoryVectorizing?.done) {
+        memoryVectorizing?.let { p ->
+            val where = listOf(p.volumeTitle, p.chapterTitle).filter { it.isNotBlank() }.joinToString(" ")
+            Toast.makeText(
+                toastContext,
+                if (where.isBlank()) "正在向量化本书…" else "正在向量化本书：$where（${p.done}/${p.total}）",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
     if (showSessions) {
         // 0 全部 / 1 跟书 / 2 跟章节 / 3 未绑定
         var kind by remember { mutableIntStateOf(0) }
@@ -665,11 +686,21 @@ fun AiChatScreen(initialBookId: Long?) {
                         modifier = Modifier.fillMaxWidth()
                     )
                     Spacer(Modifier.height(8.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        FilterChip(selected = kind == 0, onClick = { kind = 0 }, label = { Text("全部") })
-                        FilterChip(selected = kind == 1, onClick = { kind = 1 }, label = { Text("跟书") })
-                        FilterChip(selected = kind == 2, onClick = { kind = 2 }, label = { Text("跟章节") })
-                        FilterChip(selected = kind == 3, onClick = { kind = 3 }, label = { Text("未绑定") })
+                    // 类型筛选：窄屏时横向滚动，标签强制单行，避免「未绑定」被挤成多行
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        FilterChip(selected = kind == 0, onClick = { kind = 0 },
+                            label = { Text("全部", maxLines = 1, softWrap = false) })
+                        FilterChip(selected = kind == 1, onClick = { kind = 1 },
+                            label = { Text("跟书", maxLines = 1, softWrap = false) })
+                        FilterChip(selected = kind == 2, onClick = { kind = 2 },
+                            label = { Text("跟章节", maxLines = 1, softWrap = false) })
+                        FilterChip(selected = kind == 3, onClick = { kind = 3 },
+                            label = { Text("未绑定", maxLines = 1, softWrap = false) })
                     }
                     Spacer(Modifier.height(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -858,6 +889,7 @@ private fun AiAssistantPanel(
     val pendingReplyTo by vm.pendingReplyToId.collectAsState()
     val streamingContent by vm.streamingContent.collectAsState()
     val streamingReasoning by vm.streamingReasoning.collectAsState()
+    val memoryRetrieval by vm.memoryRetrievalEnabled.collectAsState()
 
     // 当前打开的章节不进入上下文
     val contextChapters = chapters.filter { it.id != chapterId }
@@ -865,7 +897,7 @@ private fun AiAssistantPanel(
     val allSelected = contextChapters.isNotEmpty() && selChapters.containsAll(contextChapters.map { it.id })
     val allOutlineSelected = outline.isNotEmpty() && selOutline.containsAll(outline.map { it.id })
 
-    // 底部按钮对应的展开面板：context / outline / model / prompt
+    // 底部按钮对应的展开面板：context / outline / prompt
     var openPanel by remember { mutableStateOf<String?>(null) }
     // 文件清单的展开状态（0 收起 / 1 表格 / 2 txt）；与上方展开面板互斥
     var manifestState by remember { mutableIntStateOf(0) }
@@ -898,7 +930,29 @@ private fun AiAssistantPanel(
                     .padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("AI 助手", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                Text("AI 助手", fontWeight = FontWeight.Bold)
+                Spacer(Modifier.width(8.dp))
+                // 模型选择移到标题右侧
+                ModelSelectorChip(
+                    models = models,
+                    providers = providers,
+                    activeId = activeModelId,
+                    maxLabelWidth = 96.dp,
+                    onSelect = { vm.setModel(it) }
+                )
+                Spacer(Modifier.weight(1f))
+                // 新建对话移到关闭按钮左侧
+                IconButton(
+                    onClick = {
+                        focusManager.clearFocus()
+                        keyboard?.hide()
+                        openPanel = null
+                        manifestState = 0
+                        vm.newSession()
+                    }
+                ) {
+                    Icon(Icons.Filled.Add, contentDescription = "新开对话")
+                }
                 IconButton(onClick = onDismiss) {
                     Icon(Icons.Filled.Close, contentDescription = "关闭")
                 }
@@ -1002,18 +1056,14 @@ private fun AiAssistantPanel(
                     onToggle = { vm.toggleOutline(it) },
                     onToggleCategory = { vm.toggleOutlineCategory(it) }
                 )
-
-                "model" -> ModelPicker(
-                    models = models,
-                    providers = providers,
-                    activeId = activeModelId,
-                    onSelect = { vm.setModel(it); openPanel = null }
-                )
             }
 
             // 按钮行
             Row(
-                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+                Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp, vertical = 6.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 SelectorButton("上下文", openPanel == "context") {
@@ -1024,23 +1074,8 @@ private fun AiAssistantPanel(
                     openPanel = if (openPanel == "outline") null else "outline"
                     manifestState = 0
                 }
-                SelectorButton("模型选择", openPanel == "model") {
-                    openPanel = if (openPanel == "model") null else "model"
-                    manifestState = 0
-                }
-                Spacer(Modifier.weight(1f))
-                // 「＋」新开对话：跟章节 → 绑定本章节；跟书 → 绑定本书
-                IconButton(
-                    onClick = {
-                        focusManager.clearFocus()
-                        keyboard?.hide()
-                        openPanel = null
-                        manifestState = 0
-                        vm.newSession()
-                    }
-                ) {
-                    Icon(Icons.Filled.Add, contentDescription = "新开对话")
-                }
+                // 长期记忆检索（与「上下文 / 大纲」同排的勾选框）
+                SmallChip("记忆检索", memoryRetrieval) { vm.toggleMemoryRetrieval() }
             }
 
             if (editingUserMsgId > 0L) {
@@ -1521,43 +1556,45 @@ private fun OutlinePicker(
     }
 }
 
-/** 模型单选 */
+/**
+ * 顶部紧凑的模型选择入口：显示当前模型名（超长省略），点击弹出下拉。
+ * 下拉里展示全称「备注（显示名）+ 供应商」，与主界面模型下拉一致。
+ */
 @Composable
-private fun ModelPicker(
+private fun ModelSelectorChip(
     models: List<AiModel>,
     providers: List<Provider>,
     activeId: Long,
+    maxLabelWidth: Dp = 120.dp,
     onSelect: (Long) -> Unit
 ) {
-    Column(Modifier.padding(bottom = 8.dp)) {
-        PickerBox(
-            title = "选择模型",
-            trailing = {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        AssistChip(
+            onClick = { expanded = true },
+            label = {
                 Text(
-                    models.firstOrNull { it.id == activeId }?.displayName ?: "未选择",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    models.firstOrNull { it.id == activeId }?.displayName ?: "选择模型",
                     maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.widthIn(max = maxLabelWidth)
                 )
             }
-        ) {
-            Column(Modifier.heightIn(max = 240.dp).verticalScroll(rememberScrollState())) {
-                if (models.isEmpty()) {
-                    Text(
-                        "请先在设置中添加模型",
-                        Modifier.padding(14.dp),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                models.forEach { m ->
-                    ChapterRow(
-                        label = "${m.displayName}  (${providers.firstOrNull { it.id == m.providerId }?.name ?: ""})",
-                        selected = m.id == activeId,
-                        startPadding = 6.dp
-                    ) { onSelect(m.id) }
-                }
+        )
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            if (models.isEmpty()) {
+                DropdownMenuItem(
+                    text = { Text("请先在设置中添加模型") },
+                    onClick = { expanded = false }
+                )
+            }
+            models.forEach { m ->
+                DropdownMenuItem(
+                    text = {
+                        Text("${m.displayName}  (${providers.firstOrNull { it.id == m.providerId }?.name ?: ""})")
+                    },
+                    onClick = { onSelect(m.id); expanded = false }
+                )
             }
         }
     }

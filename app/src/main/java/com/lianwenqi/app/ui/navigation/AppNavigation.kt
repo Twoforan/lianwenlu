@@ -31,6 +31,8 @@ import com.lianwenqi.app.ui.screens.BookSearchScreen
 import com.lianwenqi.app.ui.screens.BookshelfScreen
 import com.lianwenqi.app.ui.screens.ChapterEditorScreen
 import com.lianwenqi.app.ui.screens.CheckUpdateScreen
+import com.lianwenqi.app.ui.screens.MemoryProgressScreen
+import com.lianwenqi.app.ui.screens.MemorySettingsScreen
 import com.lianwenqi.app.ui.screens.PrefixManageScreen
 import com.lianwenqi.app.ui.screens.ReaderScreen
 import com.lianwenqi.app.ui.screens.SettingsScreen
@@ -43,6 +45,8 @@ object Routes {
     const val BOOK_SEARCH = "booksearch/{bookId}"
     const val AI_TOOLS = "aitools"
     const val PREFIX_MANAGE = "prefix"
+    const val MEMORY = "memory"
+    const val MEMORY_PROGRESS = "memoryprogress"
     const val UPDATE = "update"
 
     fun book(id: Long) = "book/$id"
@@ -71,6 +75,17 @@ fun RootNavHost() {
 
         composable(Routes.PREFIX_MANAGE) {
             PrefixManageScreen(onBack = { rootNav.popBackStack() })
+        }
+
+        composable(Routes.MEMORY) {
+            MemorySettingsScreen(
+                onBack = { rootNav.popBackStack() },
+                onOpenProgress = { rootNav.navigate(Routes.MEMORY_PROGRESS) }
+            )
+        }
+
+        composable(Routes.MEMORY_PROGRESS) {
+            MemoryProgressScreen(onBack = { rootNav.popBackStack() })
         }
 
         composable(Routes.UPDATE) {
@@ -190,6 +205,7 @@ private fun MainShell(rootNav: NavHostController) {
                 SettingsScreen(
                     onOpenAiTools = { rootNav.navigate(Routes.AI_TOOLS) },
                     onOpenPrefix = { rootNav.navigate(Routes.PREFIX_MANAGE) },
+                    onOpenMemory = { rootNav.navigate(Routes.MEMORY) },
                     onOpenUpdate = { rootNav.navigate(Routes.UPDATE) }
                 )
             }

@@ -12,6 +12,7 @@ import com.lianwenqi.app.data.entity.BookGroup
 import com.lianwenqi.app.data.entity.Chapter
 import com.lianwenqi.app.data.entity.ChatMessage
 import com.lianwenqi.app.data.entity.ChatSession
+import com.lianwenqi.app.data.entity.MemoryChunk
 import com.lianwenqi.app.data.entity.OutlineItem
 import com.lianwenqi.app.data.entity.Prompt
 import com.lianwenqi.app.data.entity.Provider
@@ -172,6 +173,40 @@ interface OutlineDao {
 
     @Query("DELETE FROM outline_item WHERE id = :id")
     suspend fun deleteById(id: Long)
+}
+
+/** 某章已向量化块的哈希与生成时的章节更新时间，用于增量判定 */
+data class ChunkHashRow(val hash: String, val chapterUpdatedAt: Long)
+
+/** 长期记忆：书籍正文向量块的读写 */
+@Dao
+interface MemoryChunkDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAll(chunks: List<MemoryChunk>)
+
+    @Query("DELETE FROM memory_chunk WHERE chapterId = :chapterId")
+    suspend fun deleteByChapter(chapterId: Long)
+
+    @Query("DELETE FROM memory_chunk WHERE bookId = :bookId")
+    suspend fun deleteByBook(bookId: Long)
+
+    @Query("SELECT * FROM memory_chunk WHERE bookId = :bookId")
+    suspend fun getByBook(bookId: Long): List<MemoryChunk>
+
+    @Query("SELECT hash, chapterUpdatedAt FROM memory_chunk WHERE chapterId = :chapterId")
+    suspend fun hashesOf(chapterId: Long): List<ChunkHashRow>
+
+    @Query("SELECT COUNT(DISTINCT chapterId) FROM memory_chunk WHERE bookId = :bookId")
+    suspend fun countDistinctChapter(bookId: Long): Int
+
+    @Query("SELECT MAX(chapterUpdatedAt) FROM memory_chunk WHERE bookId = :bookId")
+    suspend fun latestChapterUpdatedAt(bookId: Long): Long?
+
+    @Query("SELECT DISTINCT chapterId FROM memory_chunk WHERE bookId = :bookId")
+    suspend fun vectorizedChapterIds(bookId: Long): List<Long>
+
+    @Query("SELECT DISTINCT chapterId FROM memory_chunk WHERE bookId = :bookId")
+    fun observeVectorizedChapters(bookId: Long): Flow<List<Long>>
 }
 
 @Dao

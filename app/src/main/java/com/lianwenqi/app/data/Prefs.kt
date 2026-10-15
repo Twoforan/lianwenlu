@@ -81,6 +81,15 @@ class Prefs(private val context: Context) {
         // 前缀词管理：自定义前缀（纯文本）
         val prefixCustomText = stringPreferencesKey("prefix_custom_text")
 
+        // 长期记忆（书本向量化）：向量化工具（互斥）、默认开启、自动续跑、默认勾选检索
+        val memoryToolMode = stringPreferencesKey("memory_tool_mode")
+        val memoryEmbeddingBaseUrl = stringPreferencesKey("memory_embedding_base_url")
+        val memoryEmbeddingApiKey = stringPreferencesKey("memory_embedding_api_key")
+        val memoryEmbeddingModel = stringPreferencesKey("memory_embedding_model")
+        val memoryDefaultEnabled = booleanPreferencesKey("memory_default_enabled")
+        val memoryAutoVectorize = booleanPreferencesKey("memory_auto_vectorize")
+        val memoryRetrievalEnabled = booleanPreferencesKey("memory_retrieval_enabled")
+
         // 阅读器独立的样式与排版：与编辑页各存一套，互不影响
         val rFontSize = floatPreferencesKey("reader_style_font_size")
         val rFontLabel = stringPreferencesKey("reader_style_font_label")
@@ -138,6 +147,29 @@ class Prefs(private val context: Context) {
 
     /** 「自定义前缀」：纯文本，新建会话前缀时取一次并冻结在该会话中 */
     val prefixCustomText: Flow<String> = context.dataStore.data.map { it[K.prefixCustomText] ?: "" }
+
+    /** 向量化工具（互斥）：api = 厂商 Embedding API；local = 本地 GGUF 工具（本轮占位） */
+    val memoryToolMode: Flow<String> = context.dataStore.data.map { it[K.memoryToolMode] ?: "api" }
+
+    /** 厂商 Embedding API 配置 */
+    val memoryEmbeddingBaseUrl: Flow<String> =
+        context.dataStore.data.map { it[K.memoryEmbeddingBaseUrl] ?: "" }
+    val memoryEmbeddingApiKey: Flow<String> =
+        context.dataStore.data.map { it[K.memoryEmbeddingApiKey] ?: "" }
+    val memoryEmbeddingModel: Flow<String> =
+        context.dataStore.data.map { it[K.memoryEmbeddingModel] ?: "" }
+
+    /** 默认勾选记忆检索：开启后对话持续勾选，并在正文更新时后台自动向量化本书 */
+    val memoryDefaultEnabled: Flow<Boolean> =
+        context.dataStore.data.map { it[K.memoryDefaultEnabled] ?: false }
+
+    /** 勾选记忆检索时自动续跑向量化（关闭则正文有更新时每次弹窗询问） */
+    val memoryAutoVectorize: Flow<Boolean> =
+        context.dataStore.data.map { it[K.memoryAutoVectorize] ?: false }
+
+    /** 记忆检索勾选框的持久状态（会话间保持） */
+    val memoryRetrievalEnabled: Flow<Boolean> =
+        context.dataStore.data.map { it[K.memoryRetrievalEnabled] ?: false }
 
     /** 阅读器排版：与编辑页排版互相独立 */
     val readerFormat: Flow<FormatSettings> = context.dataStore.data.map {
@@ -209,6 +241,19 @@ class Prefs(private val context: Context) {
     suspend fun setPrefixContextEnabled(v: Boolean) = writePrefs { it[K.prefixContextEnabled] = v }
     suspend fun setPrefixOutlineEnabled(v: Boolean) = writePrefs { it[K.prefixOutlineEnabled] = v }
     suspend fun setPrefixCustomText(v: String) = writePrefs { it[K.prefixCustomText] = v }
+    suspend fun setMemoryToolMode(v: String) = writePrefs { it[K.memoryToolMode] = v }
+    suspend fun setMemoryEmbeddingBaseUrl(v: String) = writePrefs { it[K.memoryEmbeddingBaseUrl] = v }
+    suspend fun setMemoryEmbeddingApiKey(v: String) = writePrefs { it[K.memoryEmbeddingApiKey] = v }
+    suspend fun setMemoryEmbeddingModel(v: String) = writePrefs { it[K.memoryEmbeddingModel] = v }
+
+    /** 切换「默认勾选记忆检索」：开启时同步把检索勾选框置为勾选（体现「持续勾选」） */
+    suspend fun setMemoryDefaultEnabled(v: Boolean) = writePrefs {
+        it[K.memoryDefaultEnabled] = v
+        if (v) it[K.memoryRetrievalEnabled] = true
+    }
+
+    suspend fun setMemoryAutoVectorize(v: Boolean) = writePrefs { it[K.memoryAutoVectorize] = v }
+    suspend fun setMemoryRetrievalEnabled(v: Boolean) = writePrefs { it[K.memoryRetrievalEnabled] = v }
     suspend fun setLastOpened(bookId: Long, chapterId: Long) = writePrefs {
         it[K.lastBookId] = bookId
         it[K.lastChapterId] = chapterId

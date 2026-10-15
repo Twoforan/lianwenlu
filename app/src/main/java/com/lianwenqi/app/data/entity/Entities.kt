@@ -96,6 +96,39 @@ data class OutlineItem(
     val updatedAt: Long = System.currentTimeMillis()
 )
 
+/**
+ * 长期记忆：书籍正文切块后的向量化片段。
+ * 只存正文（不含梗概 / 大纲），发送时用「本章梗概 + 当前提示词」做语义检索，
+ * 命中片段作为临时参考资料随请求发送（不改会话前缀、不落库）。
+ */
+@Entity(
+    tableName = "memory_chunk",
+    indices = [
+        Index("bookId"),
+        Index("chapterId"),
+        Index(value = ["chapterId", "chunkIndex"], unique = true)
+    ]
+)
+data class MemoryChunk(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val bookId: Long,
+    val volumeId: Long? = null,
+    val chapterId: Long,
+    /** 章节内的块序号，从 0 开始 */
+    val chunkIndex: Int,
+    /** 块正文，用于检索命中后拼参考资料 */
+    val text: String,
+    /** 块文本的稳定短哈希，用于增量判定（命中即跳过） */
+    val hash: String,
+    /** 向量化时该章节的 updatedAt，正文再次变更即失效重算 */
+    val chapterUpdatedAt: Long,
+    /** 向量维度，校验一致性；换模型导致维度变化时需重跑 */
+    val dim: Int,
+    /** 向量数据（FloatArray 小端编码） */
+    val vector: ByteArray,
+    val createdAt: Long = System.currentTimeMillis()
+)
+
 /** 提示词库 */
 @Entity(tableName = "prompt")
 data class Prompt(
