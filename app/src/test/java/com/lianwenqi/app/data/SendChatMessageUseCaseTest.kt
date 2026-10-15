@@ -250,69 +250,38 @@ class SendChatMessageUseCaseTest {
         assertTrue(events.none { it is ChatEvent.Done })
     }
 
-    // ---------------- 场景 5：长期记忆检索结果注入位 ----------------
+    // ---------------- 场景 5：长期记忆参考资料随用户消息落库 ----------------
 
     private fun assistantMessage(id: Long, content: String) =
         ChatMessage(id = id, sessionId = 1L, role = ChatRole.ASSISTANT, content = content, replyToId = 1L)
 
     @Test
-    fun memoryReference_insertedRightBeforeLastUserTurn_withLeadingBytesUntouched() = runTest {
+    fun memoryReferenceKeptInPromptExtra_isReplayedAsPartOfHistory() = runTest {
+        val memory = "【长期记忆·本书相关正文片段】\n片段1：旧桥段"
         val history = listOf(
-            userMessage(id = 1L, content = "你好"),
-            assistantMessage(id = 2L, content = "回答"),
-            userMessage(id = 3L, content = "继续写")
+            ChatMessage(
+                id = 1L, sessionId = 1L, role = ChatRole.USER,
+                content = "继续写", promptExtra = memory
+            )
         )
-        val memory = "【记忆检索】相关片段"
-
-        // 不勾选时的请求（作为前缀字节基线）
-        val baseChat = FakeChatGateway(messages = history)
-        val baseModel = FakeModelGateway(result = AiResult.ok("好的"))
-        SendChatMessageUseCase(baseChat, baseModel)(request(replyToUserId = 3L, historyEndId = 3L)).toList()
-        val baseline = baseModel.lastRequest!!.turns
-
-        // 勾选时的请求
         val chat = FakeChatGateway(messages = history)
         val model = FakeModelGateway(result = AiResult.ok("好的"))
-        SendChatMessageUseCase(chat, model)(
-            request(replyToUserId = 3L, historyEndId = 3L).copy(memoryReference = memory)
-        ).toList()
-        val turns = model.lastRequest!!.turns
-
-        // 临时 SYSTEM turn 落在「最后一个 user turn」之前，最后一条仍是本轮用户消息
-        assertEquals(4, turns.size)
-        assertEquals(
-            listOf(ChatRole.USER, ChatRole.ASSISTANT, ChatRole.SYSTEM, ChatRole.USER),
-            turns.map { it.role }
-        )
-        assertEquals(memory, turns[2].content)
-        assertEquals("继续写", turns.last().content)
-        // 检索结果之前的所有轮次与不勾选时逐字节一致（prompt cache 不受影响）
-        assertEquals(baseline.take(2), turns.take(2))
-    }
-
-    @Test
-    fun memoryReference_appendedBeforeContinueTurnWhenHistoryHasNoUser() = runTest {
-        val chat = FakeChatGateway(messages = listOf(assistantMessage(id = 1L, content = "上文回答")))
-        val model = FakeModelGateway(result = AiResult.ok("好的"))
-        SendChatMessageUseCase(chat, model)(
-            request(replyToUserId = 0L, historyEndId = 1L).copy(memoryReference = "【记忆检索】片段")
-        ).toList()
-
-        val turns = model.lastRequest!!.turns
-        assertEquals(listOf(ChatRole.ASSISTANT, ChatRole.SYSTEM, ChatRole.USER), turns.map { it.role })
-        assertEquals("【记忆检索】片段", turns[1].content)
-        assertEquals("请基于以上内容继续往下写。", turns.last().content)
-    }
-
-    @Test
-    fun blankMemoryReference_doesNotInsertTurn() = runTest {
-        val chat = FakeChatGateway(messages = listOf(userMessage(id = 1L, content = "你好")))
-        val model = FakeModelGateway(result = AiResult.ok("好的"))
-        SendChatMessageUseCase(chat, model)(
-            request(replyToUserId = 1L, historyEndId = 1L).copy(memoryReference = "")
-        ).toList()
+        SendChatMessageUseCase(chat, model)(request(replyToUserId = 1L, historyEndId = 1L)).toList()
 
         val turns = model.lastRequest!!.turns
         assertEquals(listOf(ChatRole.USER), turns.map { it.role })
+        // 检索结果作为历史对话的一部分随用户消息发送（与落库时逐字节一致）
+        assertEquals("继续写\n\n$memory", turns.single().content)
+    }
+
+    @Test
+    fun historyEndingWithAssistant_appendsContinueUserTurn() = runTest {
+        val chat = FakeChatGateway(messages = listOf(assistantMessage(id = 1L, content = "上文回答")))
+        val model = FakeModelGateway(result = AiResult.ok("好的"))
+        SendChatMessageUseCase(chat, model)(request(replyToUserId = 0L, historyEndId = 1L)).toList()
+
+        val turns = model.lastRequest!!.turns
+        assertEquals(listOf(ChatRole.ASSISTANT, ChatRole.USER), turns.map { it.role })
+        assertEquals("请基于以上内容继续往下写。", turns.last().content)
     }
 }

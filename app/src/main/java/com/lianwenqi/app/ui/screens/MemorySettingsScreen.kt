@@ -223,18 +223,28 @@ fun MemorySettingsScreen(
             HorizontalDivider()
             Spacer(Modifier.height(12.dp))
 
+            // 「默认勾选记忆检索」开启时强制开启该项，开关置灰不可操作
+            val autoVectorizeToggle: ((Boolean) -> Unit)? =
+                if (defaultEnabled) null else { v -> vm.setAutoVectorize(v) }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("勾选向量提示词时自动向量化")
+                    Text("勾选记忆检索时自动向量化")
                     Text(
-                        "开启后，勾选记忆检索时按数据库中本书的最新进度自动续跑向量化；" +
-                            "关闭则正文有更新时每次弹窗询问是否向量化到最新章节 —— " +
-                            "选「是」用最新进度，选「否」沿用已有进度。两种结果都只影响本轮参考资料，用户不可见。",
+                        if (defaultEnabled) {
+                            "已由「默认勾选记忆检索」强制开启，暂不可关闭；关闭上一项后可自行控制。"
+                        } else {
+                            "开启后，勾选记忆检索时按数据库中本书的最新进度自动续跑向量化；" +
+                                "关闭则本书正文有更新时每次弹窗询问是否向量化到最新章节。"
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                Switch(checked = autoVectorize, onCheckedChange = { vm.setAutoVectorize(it) })
+                Switch(
+                    checked = defaultEnabled || autoVectorize,
+                    enabled = !defaultEnabled,
+                    onCheckedChange = autoVectorizeToggle
+                )
             }
 
             Spacer(Modifier.height(12.dp))
@@ -280,13 +290,15 @@ private val EMBEDDING_HELP_TEXT = """
 向量化原理
 · 向量模型会把一段文本转成一串高维小数（向量）。语义越接近的文本，向量方向也越接近。
 · 发送消息时，把「本章梗概 + 当前提示词」也向量化，再与本书已向量化的正文块算余弦相似度，取最相近的若干块作为参考资料随请求发出。
-· 这些参考资料只在本轮生效：不写进会话前缀、不落库，因此不会破坏原有前缀的缓存命中。
+· 检索到的参考资料会随本轮消息一起写入历史对话（不写入会话前缀，因此前缀字节结构不变），下一轮及以后可作为历史被模型看到。
 
-各厂商计价（示例，实际价格以官网为准）
-· OpenAI text-embedding-3-small：约 $0.02 / 百万 token，1536 维。
-· 通义 text-embedding-v3：按量计费，中文效果较好，维度可选。
-· 智谱 embedding-3：按量计费，兼容 OpenAI 接口格式。
-· 硅基流动等平台也提供同构的 /embeddings 接口，可自行填写 baseUrl。
+各厂商计价（按字数估算，示例价格，实际以官网为准）
+· 为便于估算，以下按「1 token ≈ 1 个汉字」把官网的 token 单价换算成「每千字」价格。
+· OpenAI text-embedding-3-small：约 ¥0.0001 / 千字（官网 $0.02 / 百万 token），1536 维。
+· 通义 text-embedding-v3：约 ¥0.0005 / 千字，中文效果较好，维度可选。
+· 智谱 embedding-3：约 ¥0.0005 / 千字，兼容 OpenAI 接口格式。
+· 硅基流动等平台的 bge-m3 等模型：约 ¥0.0001 ~ ¥0.001 / 千字，可自行填写 baseUrl。
+· 一本书按 100 万字估算，全部向量化一次通常只需几分钱。
 
 本地工具（本轮占位）
 · 使用开源模型在手机本地推理，免 API 费用，但需要下载模型（约 15 MB ~ 209 MB），并占用存储与电量。

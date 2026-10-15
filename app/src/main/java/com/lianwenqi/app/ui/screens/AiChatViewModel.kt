@@ -127,13 +127,53 @@ class AiChatViewModel(
     /**
      * 「记忆检索」勾选框（导航栏 AI 聊天页与侧边 AI 助手共用，状态持久化）：
      * 勾选后发送时用「本章梗概 + 当前提示词」检索本书已向量化的正文块，
-     * 命中片段作为临时参考资料注入本轮请求（不进前缀、不落库）。
+     * 命中片段作为附带提示词随本轮用户消息一起落库，成为历史对话的一部分（不写会话前缀）。
      */
     val memoryRetrievalEnabled: StateFlow<Boolean> =
         prefs.memoryRetrievalEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
+    /** 勾选记忆检索时的提示（Toast 用，展示后由 UI 清空） */
+    val memoryToast = MutableStateFlow<String?>(null)
+
+    fun clearMemoryToast() {
+        memoryToast.value = null
+    }
+
+    /** 未选择书籍时不允许开启记忆检索 */
+    val pendingEmptyVectorizeAsk = MutableStateFlow(false)
+
+    /**
+     * 切换记忆检索：
+     * - 取消勾选：直接关闭；
+     * - 勾选：必须先有书籍（未选书时提示，不勾选）；本书从未向量化时弹窗询问是否向量化全书，
+     *   选「可以」则开始向量化全书并勾选，选「不可以」则不勾选。
+     */
     fun toggleMemoryRetrieval() = viewModelScope.launch {
-        prefs.setMemoryRetrievalEnabled(!memoryRetrievalEnabled.value)
+        if (memoryRetrievalEnabled.value) {
+            prefs.setMemoryRetrievalEnabled(false)
+            return@launch
+        }
+        val bookId = currentMemoryBookId()
+        if (bookId == null) {
+            memoryToast.value = "请先选择书籍，再进行记忆检索"
+            return@launch
+        }
+        if (container.memoryRepository.latestVectorizedUpdatedAt(bookId) == null) {
+            // 本书还没有任何向量化结果：先问用户是否开启向量化
+            pendingEmptyVectorizeAsk.value = true
+        } else {
+            prefs.setMemoryRetrievalEnabled(true)
+        }
+    }
+
+    /** 「当前书本没有向量化」弹窗应答：可以 → 勾选并向量化全书；不可以 → 保持不勾选 */
+    fun resolveEmptyVectorizeAsk(confirm: Boolean) = viewModelScope.launch {
+        pendingEmptyVectorizeAsk.value = false
+        if (!confirm) return@launch
+        val bookId = currentMemoryBookId() ?: return@launch
+        prefs.setMemoryRetrievalEnabled(true)
+        container.memoryRepository.vectorize(bookId) { memoryVectorizing.value = it }
+        memoryVectorizing.value = null
     }
 
     /**
@@ -736,8 +776,10 @@ class AiChatViewModel(
         // 「＋本章梗概」与「本轮新勾选的大纲 / 上下文」都作为附加提示词随消息落库（气泡里不显示），
         // 成为历史对话的一部分（挂在消息尾端，不进最前面的参考资料预设块）。
         // 下一轮从数据库重建历史时与上一轮实际发送的内容逐字节一致 → 前缀不被改写 → 缓存命中稳定。
+        // 长期记忆检索命中片段同样挂在本轮用户消息尾端落库（进入历史对话的上下文部分最后），不写会话前缀。
         val prefix = prepareSessionPrefix(sid)
-        val extra = listOf(prefix.newReference, chapterBlockSuffix())
+        val memoryRef = memoryReferenceForText(text)
+        val extra = listOf(prefix.newReference, chapterBlockSuffix(), memoryRef)
             .filter { it.isNotBlank() }
             .joinToString("\n\n")
         val userId = chatRepository.addMessage(
@@ -905,8 +947,7 @@ class AiChatViewModel(
             writeOutlineTool = writeOutlineToolOn(),
             chapterImportTool = chapterImportToolOn(),
             prefixText = p.custom,
-            referencePrefix = p.reference,
-            memoryReference = memoryReferenceFor(replyToUserId)
+            referencePrefix = p.reference
         )
         sendChatMessage(request).collect { event ->
             when (event) {
@@ -1108,13 +1149,13 @@ class AiChatViewModel(
 
     /**
      * 长期记忆检索：query = 本章梗概 + 本轮用户提示词，被检索内容 = 本书已向量化的正文块。
-     * 命中片段拼成临时参考资料注入本轮请求 —— 不改会话前缀、不落库（用户不可见）。
+     * 命中片段拼成附带提示词，随本轮用户消息一起落库（进入历史对话的上下文部分最后），
+     * 从而在后续轮次里也能被模型看到；不写会话前缀，前缀字节结构不变。
      * 未勾选 / 未绑定书 / 未配置 Embedding / 无命中时一律返回空串，不影响正常发送。
      */
-    private suspend fun memoryReferenceFor(userMessageId: Long): String {
+    private suspend fun memoryReferenceForText(userText: String): String {
         if (!memoryRetrievalEnabled.value) return ""
         val bookId = currentMemoryBookId() ?: return ""
-        val userText = chatRepository.getMessage(userMessageId)?.content.orEmpty()
         val summary = fixedChapterId?.let { bookRepository.getChapter(it)?.summary }.orEmpty()
         val query = buildString {
             if (summary.isNotBlank()) append("【本章梗概】").append(summary).append('\n')

@@ -246,13 +246,26 @@ class Prefs(private val context: Context) {
     suspend fun setMemoryEmbeddingApiKey(v: String) = writePrefs { it[K.memoryEmbeddingApiKey] = v }
     suspend fun setMemoryEmbeddingModel(v: String) = writePrefs { it[K.memoryEmbeddingModel] = v }
 
-    /** 切换「默认勾选记忆检索」：开启时同步把检索勾选框置为勾选（体现「持续勾选」） */
+    /**
+     * 切换「默认勾选记忆检索」：
+     * 开启时同步把检索勾选框置为勾选（体现「持续勾选」），并强制开启「自动向量化」（此时用户不可关闭）；
+     * 关闭时把所有记忆检索勾选一并取消。
+     */
     suspend fun setMemoryDefaultEnabled(v: Boolean) = writePrefs {
         it[K.memoryDefaultEnabled] = v
-        if (v) it[K.memoryRetrievalEnabled] = true
+        if (v) {
+            it[K.memoryRetrievalEnabled] = true
+            it[K.memoryAutoVectorize] = true
+        } else {
+            it[K.memoryRetrievalEnabled] = false
+        }
     }
 
-    suspend fun setMemoryAutoVectorize(v: Boolean) = writePrefs { it[K.memoryAutoVectorize] = v }
+    suspend fun setMemoryAutoVectorize(v: Boolean) = writePrefs {
+        // 「默认勾选记忆检索」开启时该项被强制开启，用户不可关闭
+        if (!v && (it[K.memoryDefaultEnabled] ?: false)) return@writePrefs
+        it[K.memoryAutoVectorize] = v
+    }
     suspend fun setMemoryRetrievalEnabled(v: Boolean) = writePrefs { it[K.memoryRetrievalEnabled] = v }
     suspend fun setLastOpened(bookId: Long, chapterId: Long) = writePrefs {
         it[K.lastBookId] = bookId

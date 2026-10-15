@@ -184,7 +184,13 @@ fun SettingsScreen(
                         onEdit = { editPrompt = it; showPromptDialog = true },
                         onDelete = { vm.deletePrompt(it.id) }
                     )
-                    else -> Column(Modifier.padding(16.dp)) {
+                    // 通用设置项较多（含「检查更新」等），必须可纵向滚动，否则小屏看不到底部条目
+                    else -> Column(
+                        Modifier
+                            .fillMaxSize()
+                            .verticalScroll(rememberScrollState())
+                            .padding(16.dp)
+                    ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text("夜间模式", Modifier.weight(1f))
                             Switch(checked = night, onCheckedChange = { vm.setNight(it) })
@@ -292,7 +298,7 @@ fun SettingsScreen(
                             Column(Modifier.weight(1f)) {
                                 Text("长期记忆（书本向量化）")
                                 Text(
-                                    "书籍正文向量化后，发送时按本章梗概与提示词语义检索相关片段作为参考资料",
+                                    "书籍正文向量化后，发送时按本章梗概与提示词语义检索相关片段，作为参考资料写入本轮对话",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )

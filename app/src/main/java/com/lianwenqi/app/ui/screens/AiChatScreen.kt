@@ -171,6 +171,8 @@ fun AiChatScreen(initialBookId: Long?) {
     val memoryRetrieval by vm.memoryRetrievalEnabled.collectAsState()
     val memoryAsk by vm.pendingMemoryAsk.collectAsState()
     val memoryVectorizing by vm.memoryVectorizing.collectAsState()
+    val memoryEmptyAsk by vm.pendingEmptyVectorizeAsk.collectAsState()
+    val memoryToastMsg by vm.memoryToast.collectAsState()
 
     var showBooks by remember { mutableStateOf(false) }
     var showChapters by remember { mutableStateOf(false) }
@@ -628,6 +630,29 @@ fun AiChatScreen(initialBookId: Long?) {
             ).show()
         }
     }
+    // 本书从未向量化时勾选记忆检索：先问是否向量化全书，再决定是否勾选
+    if (memoryEmptyAsk) {
+        AlertDialog(
+            onDismissRequest = { vm.resolveEmptyVectorizeAsk(false) },
+            title = { Text("当前书本没有向量化") },
+            text = {
+                Text(
+                    "当前书本还没有向量化，是否开启向量化？\n\n" +
+                        "选「可以」：开始向量化全书，并勾选记忆检索；\n" +
+                        "选「不可以」：取消记忆检索勾选。"
+                )
+            },
+            confirmButton = { TextButton(onClick = { vm.resolveEmptyVectorizeAsk(true) }) { Text("可以") } },
+            dismissButton = { TextButton(onClick = { vm.resolveEmptyVectorizeAsk(false) }) { Text("不可以") } }
+        )
+    }
+    // 记忆检索相关提示（如未选择书籍）
+    LaunchedEffect(memoryToastMsg) {
+        memoryToastMsg?.let {
+            Toast.makeText(toastContext, it, Toast.LENGTH_SHORT).show()
+            vm.clearMemoryToast()
+        }
+    }
     if (showSessions) {
         // 0 全部 / 1 跟书 / 2 跟章节 / 3 未绑定
         var kind by remember { mutableIntStateOf(0) }
@@ -890,6 +915,9 @@ private fun AiAssistantPanel(
     val streamingContent by vm.streamingContent.collectAsState()
     val streamingReasoning by vm.streamingReasoning.collectAsState()
     val memoryRetrieval by vm.memoryRetrievalEnabled.collectAsState()
+    val memoryEmptyAsk by vm.pendingEmptyVectorizeAsk.collectAsState()
+    val memoryToastMsg by vm.memoryToast.collectAsState()
+    val memoryVectorizing by vm.memoryVectorizing.collectAsState()
 
     // 当前打开的章节不进入上下文
     val contextChapters = chapters.filter { it.id != chapterId }
@@ -1216,6 +1244,42 @@ private fun AiAssistantPanel(
                 }
             }
             Spacer(Modifier.height(8.dp))
+        }
+    }
+
+    // 本书从未向量化时勾选记忆检索：先问是否向量化全书，再决定是否勾选
+    val panelContext = LocalContext.current
+    if (memoryEmptyAsk) {
+        AlertDialog(
+            onDismissRequest = { vm.resolveEmptyVectorizeAsk(false) },
+            title = { Text("当前书本没有向量化") },
+            text = {
+                Text(
+                    "当前书本还没有向量化，是否开启向量化？\n\n" +
+                        "选「可以」：开始向量化全书，并勾选记忆检索；\n" +
+                        "选「不可以」：取消记忆检索勾选。"
+                )
+            },
+            confirmButton = { TextButton(onClick = { vm.resolveEmptyVectorizeAsk(true) }) { Text("可以") } },
+            dismissButton = { TextButton(onClick = { vm.resolveEmptyVectorizeAsk(false) }) { Text("不可以") } }
+        )
+    }
+    // 记忆检索相关提示（如未选择书籍）
+    LaunchedEffect(memoryToastMsg) {
+        memoryToastMsg?.let {
+            Toast.makeText(panelContext, it, Toast.LENGTH_SHORT).show()
+            vm.clearMemoryToast()
+        }
+    }
+    // 向量化进行中的轻提示
+    LaunchedEffect(memoryVectorizing?.bookId, memoryVectorizing?.done) {
+        memoryVectorizing?.let { p ->
+            val where = listOf(p.volumeTitle, p.chapterTitle).filter { it.isNotBlank() }.joinToString(" ")
+            Toast.makeText(
+                panelContext,
+                if (where.isBlank()) "正在向量化本书…" else "正在向量化本书：$where（${p.done}/${p.total}）",
+                Toast.LENGTH_SHORT
+            ).show()
         }
     }
 }
