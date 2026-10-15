@@ -142,10 +142,12 @@ class SendChatMessageUseCase(
             .filter { it.id <= request.historyEndId }
             .filter { it.role == ChatRole.USER || it.role == ChatRole.ASSISTANT }
             .let { if (maxContext > 0) it.takeLast(maxContext) else it }
-            // 拼回这条消息隐藏的附加提示词（如「＋本章梗概」），保证与当初发送的字节一致
+            // 拼回这条消息隐藏的附加提示词（如「＋本章梗概」「长期记忆检索片段」），保证与当初发送的字节一致。
+            // 顺序上附加提示词放在用户指令**之前**：让「用户的要求」始终是本轮最后一句话，
+            // 否则参考资料（尤其检索到的本书正文片段）会被模型当成要续写的内容，直接把片段原样吐回来。
             .map {
                 val extra = it.promptExtra
-                ChatTurn(it.role, if (extra.isBlank()) it.content else it.content + "\n\n" + extra)
+                ChatTurn(it.role, if (extra.isBlank()) it.content else extra + "\n\n" + it.content)
             }
         val turns = buildList {
             // 「自定义前缀」：纯文本，作为最前面的系统提示词随请求发送

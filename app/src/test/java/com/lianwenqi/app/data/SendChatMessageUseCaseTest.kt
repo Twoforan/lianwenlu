@@ -270,8 +270,9 @@ class SendChatMessageUseCaseTest {
 
         val turns = model.lastRequest!!.turns
         assertEquals(listOf(ChatRole.USER), turns.map { it.role })
-        // 检索结果作为历史对话的一部分随用户消息发送（与落库时逐字节一致）
-        assertEquals("继续写\n\n$memory", turns.single().content)
+        // 检索结果作为历史对话的一部分随用户消息发送（与落库时逐字节一致），
+        // 且置于用户指令之前，保证本轮最后一句话仍是用户的要求
+        assertEquals("$memory\n\n继续写", turns.single().content)
     }
 
     @Test

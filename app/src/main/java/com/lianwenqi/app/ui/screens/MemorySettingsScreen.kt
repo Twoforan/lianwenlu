@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -15,11 +16,14 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
@@ -35,13 +39,17 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lianwenqi.app.AppContainer
+import com.lianwenqi.app.ai.AiException
 import com.lianwenqi.app.ui.appViewModel
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -73,6 +81,27 @@ class MemorySettingsViewModel(private val container: AppContainer) : ViewModel()
     val autoVectorize: StateFlow<Boolean> =
         prefs.memoryAutoVectorize.stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
+    /** 「选择向量模型」：从 baseUrl 读取到的模型列表（名称像向量模型的排在前面） */
+    val modelOptions = MutableStateFlow<List<String>>(emptyList())
+    val loadingModels = MutableStateFlow(false)
+    val modelError = MutableStateFlow<String?>(null)
+
+    fun fetchModels() = viewModelScope.launch {
+        loadingModels.value = true
+        modelError.value = null
+        val base = prefs.memoryEmbeddingBaseUrl.first()
+        val key = prefs.memoryEmbeddingApiKey.first()
+        container.aiClient.listModels(base, key)
+            .onSuccess { ids ->
+                modelOptions.value = ids.sortedWith(compareBy({ if (it.isEmbeddingLike()) 0 else 1 }, { it }))
+                if (ids.isEmpty()) modelError.value = "未读取到模型，请检查供应商与 apiKey"
+            }
+            .onFailure { e ->
+                modelError.value = (e as? AiException)?.error?.userMessage ?: e.message ?: "读取模型失败"
+            }
+        loadingModels.value = false
+    }
+
     fun setApiEnabled(v: Boolean) = viewModelScope.launch {
         prefs.setMemoryToolMode(if (v) MODE_API else MODE_OFF)
     }
@@ -101,12 +130,18 @@ fun MemorySettingsScreen(
     val savedModel by vm.model.collectAsState()
     val defaultEnabled by vm.defaultEnabled.collectAsState()
     val autoVectorize by vm.autoVectorize.collectAsState()
+    val modelOptions by vm.modelOptions.collectAsState()
+    val loadingModels by vm.loadingModels.collectAsState()
+    val modelError by vm.modelError.collectAsState()
 
     // 输入框用本地状态，避免每次写入 DataStore 后回传造成光标跳动
     var editBaseUrl by remember { mutableStateOf<String?>(null) }
     var editApiKey by remember { mutableStateOf<String?>(null) }
-    var editModel by remember { mutableStateOf<String?>(null) }
     var showHelp by remember { mutableStateOf(false) }
+    // 供应商预设（仅作展示，选中即回填 baseUrl）
+    var vendorLabel by remember { mutableStateOf("自定义") }
+    var showVendorMenu by remember { mutableStateOf(false) }
+    var showModelPicker by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -152,6 +187,37 @@ fun MemorySettingsScreen(
             }
             if (apiEnabled) {
                 Spacer(Modifier.height(8.dp))
+                // 供应商预设（只列提供 OpenAI 兼容 /embeddings 接口的厂商）：选中即回填 baseUrl
+                OutlinedButton(onClick = { showVendorMenu = true }, modifier = Modifier.fillMaxWidth()) {
+                    Text("供应商：$vendorLabel", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                DropdownMenu(expanded = showVendorMenu, onDismissRequest = { showVendorMenu = false }) {
+                    embeddingVendorPresets.forEach { v ->
+                        DropdownMenuItem(
+                            text = {
+                                Column {
+                                    Text(v.label)
+                                    Text(
+                                        v.baseUrl,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            },
+                            onClick = {
+                                vendorLabel = v.label
+                                editBaseUrl = v.baseUrl
+                                vm.setBaseUrl(v.baseUrl)
+                                showVendorMenu = false
+                            }
+                        )
+                    }
+                    DropdownMenuItem(
+                        text = { Text("自定义") },
+                        onClick = { vendorLabel = "自定义"; showVendorMenu = false }
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
                 OutlinedTextField(
                     value = editBaseUrl ?: savedBaseUrl,
                     onValueChange = { editBaseUrl = it; vm.setBaseUrl(it) },
@@ -159,6 +225,11 @@ fun MemorySettingsScreen(
                     placeholder = { Text("例如 https://api.openai.com/v1") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
+                )
+                Text(
+                    "接口地址：${embeddingEndpoint(savedBaseUrl)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(
@@ -169,14 +240,16 @@ fun MemorySettingsScreen(
                     modifier = Modifier.fillMaxWidth()
                 )
                 Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = editModel ?: savedModel,
-                    onValueChange = { editModel = it; vm.setModel(it) },
-                    label = { Text("向量模型名") },
-                    placeholder = { Text("例如 text-embedding-3-small") },
-                    singleLine = true,
+                OutlinedButton(
+                    onClick = { showModelPicker = true; vm.fetchModels() },
                     modifier = Modifier.fillMaxWidth()
-                )
+                ) {
+                    Text(
+                        if (savedModel.isBlank()) "选择向量模型" else "向量模型：$savedModel",
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
 
             Spacer(Modifier.height(12.dp))
@@ -210,8 +283,8 @@ fun MemorySettingsScreen(
                 Column(Modifier.weight(1f)) {
                     Text("默认勾选记忆检索")
                     Text(
-                        "开启后对话持续勾选记忆检索，并在本书正文有更新时自动向量化本书；" +
-                            "关闭则每次由用户手动勾选。",
+                        "开启后对已向量化的书籍持续勾选记忆检索，并在本书正文有更新时自动向量化本书；" +
+                            "未选择书籍或本书尚未向量化时不勾选。关闭则取消勾选，改为每次手动勾选。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -284,6 +357,66 @@ fun MemorySettingsScreen(
             confirmButton = { TextButton(onClick = { showHelp = false }) { Text("知道了") } }
         )
     }
+
+    if (showModelPicker) {
+        AlertDialog(
+            onDismissRequest = { showModelPicker = false },
+            title = { Text("选择向量模型") },
+            text = {
+                Column(
+                    Modifier
+                        .heightIn(max = 360.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    when {
+                        loadingModels -> Text("正在读取模型…")
+                        modelError != null -> Text(
+                            modelError.orEmpty(),
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        modelOptions.isEmpty() -> Text("未读取到模型，请先填写 baseUrl 与 apiKey 后点「刷新」")
+                        else -> modelOptions.forEach { name ->
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .clickable { vm.setModel(name); showModelPicker = false }
+                                    .padding(vertical = 10.dp, horizontal = 4.dp)
+                            ) {
+                                Text(name, style = MaterialTheme.typography.bodyMedium)
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { vm.fetchModels() }) { Text("刷新") } },
+            dismissButton = { TextButton(onClick = { showModelPicker = false }) { Text("取消") } }
+        )
+    }
+}
+
+/** 提供 OpenAI 兼容 /embeddings 接口的常见供应商（选中后自动填入 baseUrl） */
+private data class EmbeddingVendorPreset(val label: String, val baseUrl: String)
+
+private val embeddingVendorPresets = listOf(
+    EmbeddingVendorPreset("OpenAI", "https://api.openai.com/v1"),
+    EmbeddingVendorPreset("通义千问（兼容模式）", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+    EmbeddingVendorPreset("智谱 GLM", "https://open.bigmodel.cn/api/paas/v4"),
+    EmbeddingVendorPreset("硅基流动 SiliconFlow", "https://api.siliconflow.cn/v1")
+)
+
+/** 实际请求的接口地址：baseUrl + /embeddings（已以 /embeddings 结尾时不重复追加） */
+private fun embeddingEndpoint(baseUrl: String): String {
+    val base = baseUrl.trim().trimEnd('/')
+    if (base.isBlank()) return "（请先填写 baseUrl）"
+    return if (base.endsWith("/embeddings")) base else "$base/embeddings"
+}
+
+/** 名称像向量模型的（选择列表里优先展示） */
+private fun String.isEmbeddingLike(): Boolean {
+    val s = lowercase()
+    return listOf("embedding", "embed", "bge", "m3", "gte", "vector").any { s.contains(it) }
 }
 
 private val EMBEDDING_HELP_TEXT = """

@@ -248,13 +248,13 @@ class Prefs(private val context: Context) {
 
     /**
      * 切换「默认勾选记忆检索」：
-     * 开启时同步把检索勾选框置为勾选（体现「持续勾选」），并强制开启「自动向量化」（此时用户不可关闭）；
-     * 关闭时把所有记忆检索勾选一并取消。
+     * 开启时强制打开「自动向量化」（此时用户不可关闭）；勾选状态不在此写入，
+     * 由运行期按「当前书籍是否已向量化」推导（未选择书籍 / 尚未向量化的书籍不勾选）；
+     * 关闭时把用户手动勾选的记忆检索一并取消。
      */
     suspend fun setMemoryDefaultEnabled(v: Boolean) = writePrefs {
         it[K.memoryDefaultEnabled] = v
         if (v) {
-            it[K.memoryRetrievalEnabled] = true
             it[K.memoryAutoVectorize] = true
         } else {
             it[K.memoryRetrievalEnabled] = false

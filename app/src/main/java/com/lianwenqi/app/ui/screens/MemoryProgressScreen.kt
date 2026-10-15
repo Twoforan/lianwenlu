@@ -1,5 +1,6 @@
 package com.lianwenqi.app.ui.screens
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,7 +16,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowDropDown
-import androidx.compose.material3.Button
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -27,6 +28,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -46,6 +48,7 @@ import com.lianwenqi.app.data.BookRepository
 import com.lianwenqi.app.data.SortMode
 import com.lianwenqi.app.data.VectorizeProgress
 import com.lianwenqi.app.data.entity.Book
+import com.lianwenqi.app.data.entity.BookGroup
 import com.lianwenqi.app.ui.appViewModel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -73,11 +76,15 @@ class MemoryProgressViewModel(private val container: AppContainer) : ViewModel()
     val books: StateFlow<List<Book>> = bookRepo.observeBooks(SortMode.TIME, false)
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
+    /** 分组列表（下拉筛选用） */
+    val groups: StateFlow<List<BookGroup>> = bookRepo.observeGroups()
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
     private val _progress = MutableStateFlow<List<BookMemoryProgress>>(emptyList())
     val progress: StateFlow<List<BookMemoryProgress>> = _progress
 
-    /** 书本筛选：null = 全部 */
-    val selectedBookId = MutableStateFlow<Long?>(null)
+    /** 分组筛选：null = 全部书籍，-1 = 未分组，其余为分组 id */
+    val selectedGroupId = MutableStateFlow<Long?>(null)
 
     /** 正在进行的向量化进度；为空表示空闲 */
     val vectorizing = MutableStateFlow<VectorizeProgress?>(null)
@@ -90,8 +97,8 @@ class MemoryProgressViewModel(private val container: AppContainer) : ViewModel()
         }
     }
 
-    fun select(bookId: Long?) {
-        selectedBookId.value = bookId
+    fun selectGroup(groupId: Long?) {
+        selectedGroupId.value = groupId
     }
 
     fun startVectorize(bookId: Long) {
@@ -121,18 +128,26 @@ class MemoryProgressViewModel(private val container: AppContainer) : ViewModel()
     }
 }
 
-/** 向量化进度：可按书筛选，展示「已向量化至 第X卷 第Y章 / 共N章」，仅统计正文 */
+/** 向量化进度：可按分组筛选，展示「已向量化至 第X卷 第Y章 / 共N章」，仅统计正文 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MemoryProgressScreen(onBack: () -> Unit) {
     val vm = appViewModel { MemoryProgressViewModel(it) }
-    val books by vm.books.collectAsState()
+    val groups by vm.groups.collectAsState()
     val progress by vm.progress.collectAsState()
-    val selectedBookId by vm.selectedBookId.collectAsState()
+    val selectedGroupId by vm.selectedGroupId.collectAsState()
     val vectorizing by vm.vectorizing.collectAsState()
 
     var menuOpen by remember { mutableStateOf(false) }
-    val filtered = if (selectedBookId == null) progress else progress.filter { it.book.id == selectedBookId }
+    var askBook by remember { mutableStateOf<Book?>(null) }
+    // 分组筛选：null = 全部书籍，-1 = 未分组，其余为分组 id
+    val filtered = progress.filter { p ->
+        when (selectedGroupId) {
+            null -> true
+            -1L -> p.book.groupId == null
+            else -> p.book.groupId == selectedGroupId
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -154,7 +169,7 @@ fun MemoryProgressScreen(onBack: () -> Unit) {
             Box(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
                 OutlinedButton(onClick = { menuOpen = true }) {
                     Text(
-                        books.firstOrNull { it.id == selectedBookId }?.title ?: "全部书籍",
+                        filterLabel(selectedGroupId, groups),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -163,37 +178,34 @@ fun MemoryProgressScreen(onBack: () -> Unit) {
                 DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                     DropdownMenuItem(
                         text = { Text("全部书籍") },
-                        onClick = { vm.select(null); menuOpen = false }
+                        onClick = { vm.selectGroup(null); menuOpen = false }
                     )
-                    books.forEach { book ->
+                    // 各个分组
+                    groups.forEach { g ->
                         DropdownMenuItem(
-                            text = { Text(book.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                            onClick = { vm.select(book.id); menuOpen = false }
+                            text = { Text(g.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                            onClick = { vm.selectGroup(g.id); menuOpen = false }
                         )
                     }
+                    // 未分组
+                    DropdownMenuItem(
+                        text = { Text("未分组") },
+                        onClick = { vm.selectGroup(-1L); menuOpen = false }
+                    )
                 }
             }
 
-            // 选定了单本书时可手动触发 / 续跑向量化
-            if (selectedBookId != null) {
-                val running = vectorizing?.bookId == selectedBookId
+            // 向量化进行中 / 出错时的状态（点击书本后触发）
+            vectorizing?.let { p ->
                 Column(Modifier.padding(horizontal = 16.dp)) {
-                    Button(
-                        onClick = { selectedBookId?.let { vm.startVectorize(it) } },
-                        enabled = !running
-                    ) {
-                        Text(if (running) "向量化中…" else "开始 / 继续向量化")
-                    }
-                    vectorizing?.takeIf { it.bookId == selectedBookId }?.let { p ->
-                        Spacer(Modifier.height(6.dp))
-                        val where = listOf(p.volumeTitle, p.chapterTitle).filter { it.isNotBlank() }
-                        Text(
-                            if (p.chapterTitle.isBlank()) "准备中…"
-                            else "正在处理 ${where.joinToString(" ")}（${p.done}/${p.total}）",
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                    }
-                    vectorizing?.error?.let { err ->
+                    Spacer(Modifier.height(6.dp))
+                    val where = listOf(p.volumeTitle, p.chapterTitle).filter { it.isNotBlank() }
+                    Text(
+                        if (p.chapterTitle.isBlank()) "准备中…"
+                        else "正在处理 ${where.joinToString(" ")}（${p.done}/${p.total}）",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    p.error?.let { err ->
                         Spacer(Modifier.height(4.dp))
                         Text(
                             err,
@@ -217,7 +229,13 @@ fun MemoryProgressScreen(onBack: () -> Unit) {
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     items(filtered, key = { it.book.id }) { item ->
-                        Card(Modifier.fillMaxWidth()) {
+                        val running = vectorizing?.bookId == item.book.id
+                        Card(
+                            Modifier
+                                .fillMaxWidth()
+                                // 点击书籍询问是否向量化；向量化进行中时不可点
+                                .clickable(enabled = vectorizing == null) { askBook = item.book }
+                        ) {
                             Column(Modifier.padding(12.dp)) {
                                 Text(
                                     item.book.title,
@@ -231,13 +249,22 @@ fun MemoryProgressScreen(onBack: () -> Unit) {
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
+                                if (running) {
+                                    Spacer(Modifier.height(4.dp))
+                                    Text(
+                                        "向量化中…",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
                             }
                         }
                     }
                     item {
                         Row(Modifier.fillMaxWidth()) {
                             Text(
-                                "仅统计书籍正文；梗概与大纲不参与向量化",
+                                "点击书籍可开始 / 继续向量化（已向量化的章节会自动跳过）；" +
+                                    "仅统计书籍正文，梗概与大纲不参与向量化",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -247,6 +274,29 @@ fun MemoryProgressScreen(onBack: () -> Unit) {
             }
         }
     }
+    askBook?.let { book ->
+        AlertDialog(
+            onDismissRequest = { askBook = null },
+            title = { Text("向量化") },
+            text = {
+                Text(
+                    "是否向量化《${book.title}》？\n\n" +
+                        "将从全书正文开始向量化，已向量化的章节会自动跳过。"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { askBook = null; vm.startVectorize(book.id) }) { Text("确定") }
+            },
+            dismissButton = { TextButton(onClick = { askBook = null }) { Text("取消") } }
+        )
+    }
+}
+
+/** 分组筛选按钮文案：null=全部书籍，-1=未分组，其余取分组名（找不到时回退「全部书籍」） */
+private fun filterLabel(selectedGroupId: Long?, groups: List<BookGroup>): String = when (selectedGroupId) {
+    null -> "全部书籍"
+    -1L -> "未分组"
+    else -> groups.firstOrNull { it.id == selectedGroupId }?.name ?: "全部书籍"
 }
 
 private fun progressLine(p: BookMemoryProgress): String {

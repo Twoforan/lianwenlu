@@ -33,6 +33,7 @@ import com.lianwenqi.app.util.AiOutlineBlock
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -42,6 +43,7 @@ import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -125,12 +127,35 @@ class AiChatViewModel(
     val input = MutableStateFlow("")
 
     /**
-     * 「记忆检索」勾选框（导航栏 AI 聊天页与侧边 AI 助手共用，状态持久化）：
-     * 勾选后发送时用「本章梗概 + 当前提示词」检索本书已向量化的正文块，
+     * 「记忆检索」勾选框（导航栏 AI 聊天页与侧边 AI 助手共用）。
+     * 勾选后发送时用「本章梗概」检索本书已向量化的正文块，
      * 命中片段作为附带提示词随本轮用户消息一起落库，成为历史对话的一部分（不写会话前缀）。
+     *
+     * 勾选状态：开启「默认勾选记忆检索」时，仅当当前有书**且该书已向量化**才勾选
+     * （未选择书籍 / 尚未向量化的书籍一律不勾选）；否则取用户手动勾选的持久值。
+     *
+     * 默认勾选开启期间用户仍可取消（[memoryRoundCancelled]）：取消只作用于当前这一轮，
+     * 下一轮 / 新一轮对话开始时自动恢复勾选。
      */
-    val memoryRetrievalEnabled: StateFlow<Boolean> =
-        prefs.memoryRetrievalEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    private val memoryBookIdFlow: Flow<Long?> = combine(selectedBookIds, _sessionId) { ids, sid ->
+        ids.singleOrNull()
+            ?: sid?.let { chatRepository.getSession(it)?.bookId }
+            ?: defaultBookId
+    }
+
+    private val bookVectorizedFlow: Flow<Boolean> = memoryBookIdFlow.flatMapLatest { id ->
+        if (id == null) flowOf(false)
+        else container.memoryRepository.observeVectorizedChapterIds(id).map { it.isNotEmpty() }
+    }
+
+    /** 默认勾选开启期间，「本轮被用户手动取消」的标记（一轮结束或换会话时复位） */
+    private val memoryRoundCancelled = MutableStateFlow(false)
+
+    val memoryRetrievalEnabled: StateFlow<Boolean> = combine(
+        prefs.memoryRetrievalEnabled, prefs.memoryDefaultEnabled, memoryBookIdFlow, bookVectorizedFlow, memoryRoundCancelled
+    ) { manual, defaultOn, bookId, vectorized, cancelledThisRound ->
+        if (defaultOn) bookId != null && vectorized && !cancelledThisRound else manual
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
     /** 勾选记忆检索时的提示（Toast 用，展示后由 UI 清空） */
     val memoryToast = MutableStateFlow<String?>(null)
@@ -139,20 +164,27 @@ class AiChatViewModel(
         memoryToast.value = null
     }
 
-    /** 未选择书籍时不允许开启记忆检索 */
+    /** 未选择书籍 / 未向量化时的确认弹窗 */
     val pendingEmptyVectorizeAsk = MutableStateFlow(false)
 
     /**
      * 切换记忆检索：
-     * - 取消勾选：直接关闭；
+     * - 取消勾选：「默认勾选记忆检索」开启时也允许取消，但只作用于当前这一轮
+     *   （下一轮 / 新一轮对话自动恢复勾选）；未开启该设置时直接关闭持久勾选；
      * - 勾选：必须先有书籍（未选书时提示，不勾选）；本书从未向量化时弹窗询问是否向量化全书，
      *   选「可以」则开始向量化全书并勾选，选「不可以」则不勾选。
      */
     fun toggleMemoryRetrieval() = viewModelScope.launch {
         if (memoryRetrievalEnabled.value) {
+            if (prefs.memoryDefaultEnabled.first()) {
+                memoryRoundCancelled.value = true
+                memoryToast.value = "已取消本轮记忆检索，下一轮将自动恢复勾选"
+                return@launch
+            }
             prefs.setMemoryRetrievalEnabled(false)
             return@launch
         }
+        memoryRoundCancelled.value = false
         val bookId = currentMemoryBookId()
         if (bookId == null) {
             memoryToast.value = "请先选择书籍，再进行记忆检索"
@@ -627,6 +659,8 @@ class AiChatViewModel(
 
     fun openSession(id: Long) {
         _sessionId.value = id
+        // 进入（新一轮）对话：本轮取消标记复位，默认勾选重新生效
+        memoryRoundCancelled.value = false
         viewModelScope.launch {
             chatRepository.getSession(id)?.bookId?.let { loadBookContext(it) }
         }
@@ -669,6 +703,8 @@ class AiChatViewModel(
         pendingReplyToId.value = 0L
         streamingContent.value = ""
         streamingReasoning.value = ""
+        // 一轮结束：手动的「本轮取消」失效，下一轮按「默认勾选记忆检索」重新勾上
+        memoryRoundCancelled.value = false
     }
 
     /** 停止在途生成：取消协程，进而中断正在等待的 HTTP 请求 */
@@ -705,17 +741,18 @@ class AiChatViewModel(
 
     /**
      * 勾选记忆检索时的自动向量化前置处理：
-     * A3 开启 → 后台静默续跑本书向量化（用户不可见，不阻塞本次发送）；
-     * A3 关闭 → 若正文比已向量化进度更新（或从未向量化），返回 true 交由 UI 弹窗询问。
+     * A3 开启 → 仅在正文确实比已向量化进度更新时才后台静默续跑（无变化则完全不启动，
+     *   避免每轮发送都空跑一遍全书向量化、连带刷出一串「正在向量化本书」提示）；
+     * A3 关闭 → 若正文比已向量化进度更新，返回 true 交由 UI 弹窗询问。
      */
     private suspend fun shouldAskMemoryVectorize(): Boolean {
         if (!memoryRetrievalEnabled.value) return false
         val bookId = currentMemoryBookId() ?: return false
+        if (!hasNewerContentThanVectorized(bookId)) return false
         if (prefs.memoryAutoVectorize.first()) {
-            container.appScope.launch {
-                container.memoryRepository.vectorize(bookId) { memoryVectorizing.value = it }
-                memoryVectorizing.value = null
-            }
+            // 后台静默续跑：不写 memoryVectorizing，界面上不出现任何「正在向量化」提示
+            // （约定：向量化 / 检索 / 组装参考资料对用户全部不可见，用户只看得到写文模型的回答）
+            container.appScope.launch { container.memoryRepository.vectorize(bookId) { } }
             return false
         }
         return hasNewerContentThanVectorized(bookId)
@@ -1148,7 +1185,8 @@ class AiChatViewModel(
     }
 
     /**
-     * 长期记忆检索：query = 本章梗概 + 本轮用户提示词，被检索内容 = 本书已向量化的正文块。
+     * 长期记忆检索：query = 本章梗概（约定：提交给向量化 api 的就是本章梗概；
+     * 无梗概的场景如导航栏 AI 对话，才回退用本轮提示词），被检索内容 = 本书已向量化的正文块。
      * 命中片段拼成附带提示词，随本轮用户消息一起落库（进入历史对话的上下文部分最后），
      * 从而在后续轮次里也能被模型看到；不写会话前缀，前缀字节结构不变。
      * 未勾选 / 未绑定书 / 未配置 Embedding / 无命中时一律返回空串，不影响正常发送。
@@ -1157,17 +1195,17 @@ class AiChatViewModel(
         if (!memoryRetrievalEnabled.value) return ""
         val bookId = currentMemoryBookId() ?: return ""
         val summary = fixedChapterId?.let { bookRepository.getChapter(it)?.summary }.orEmpty()
-        val query = buildString {
-            if (summary.isNotBlank()) append("【本章梗概】").append(summary).append('\n')
-            if (userText.isNotBlank()) append("【提示词】").append(userText)
-        }
+        val query = summary.ifBlank { userText }
         if (query.isBlank()) return ""
         val hits = container.memoryRepository.retrieve(bookId, query, MemoryGateway.DEFAULT_TOP_K)
         if (hits.isEmpty()) return ""
         return buildString {
-            append("【长期记忆·本书相关正文片段】\n")
+            append("【参考资料·本书相关正文片段】\n")
             hits.forEachIndexed { i, text -> append("片段${i + 1}：").append(text).append('\n') }
-        }.trimEnd()
+            // 结尾再点一次：这些片段是「检索结果」，只供写文模型参考，
+            // 必须由写文模型加工后回答用户，不能把片段本身当成回答输出
+            append("（以上片段来自本书已写正文，仅供写作参考，请勿照抄或复述；请按用户的具体要求作答。）")
+        }
     }
 }
 

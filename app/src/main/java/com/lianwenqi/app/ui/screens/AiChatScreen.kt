@@ -619,8 +619,9 @@ fun AiChatScreen(initialBookId: Long?) {
             dismissButton = { TextButton(onClick = { vm.resolveMemoryAsk(false) }) { Text("否") } }
         )
     }
-    // 向量化进行中的轻提示（避免等待时界面看起来卡住）
-    LaunchedEffect(memoryVectorizing?.bookId, memoryVectorizing?.done) {
+    // 向量化进行中的轻提示（避免等待时界面看起来卡住）。
+    // 只以书籍为键：一轮向量化只提示一次，不再随每章进度重复弹出一串 toast
+    LaunchedEffect(memoryVectorizing?.bookId) {
         memoryVectorizing?.let { p ->
             val where = listOf(p.volumeTitle, p.chapterTitle).filter { it.isNotBlank() }.joinToString(" ")
             Toast.makeText(
@@ -1271,8 +1272,8 @@ private fun AiAssistantPanel(
             vm.clearMemoryToast()
         }
     }
-    // 向量化进行中的轻提示
-    LaunchedEffect(memoryVectorizing?.bookId, memoryVectorizing?.done) {
+    // 向量化进行中的轻提示（只以书籍为键，一轮只提示一次）
+    LaunchedEffect(memoryVectorizing?.bookId) {
         memoryVectorizing?.let { p ->
             val where = listOf(p.volumeTitle, p.chapterTitle).filter { it.isNotBlank() }.joinToString(" ")
             Toast.makeText(
