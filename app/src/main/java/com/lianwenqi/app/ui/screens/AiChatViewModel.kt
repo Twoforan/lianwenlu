@@ -1276,7 +1276,14 @@ class AiChatViewModel(
         } finally {
             memorySearchState.value = MemorySearchState.DONE
         }
-        if (hits.isEmpty()) return ""
+        if (hits.isEmpty()) {
+            // 检索一无所获：若本书向量还是「上一个向量化工具 / 模型」写入的，
+            // 说明换源后没重新向量化（旧向量与当前查询向量算不了余弦），明确提示用户
+            if (container.memoryRepository.vectorSourceStale(bookId)) {
+                memoryToast.value = "本书向量由其它向量化工具生成，请先重新向量化后再使用记忆检索"
+            }
+            return ""
+        }
         return buildString {
             append("【参考资料·本书相关正文片段】\n")
             hits.forEachIndexed { i, text -> append("片段${i + 1}：").append(text).append('\n') }

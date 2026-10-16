@@ -209,6 +209,10 @@ interface MemoryChunkDao {
     @Query("SELECT dim FROM memory_chunk WHERE bookId = :bookId LIMIT 1")
     suspend fun anyDim(bookId: Long): Int?
 
+    /** 本书任意一块的哈希（取第一块）；未向量化返回 null。用于判断已存向量是否由当前向量化源写入 */
+    @Query("SELECT hash FROM memory_chunk WHERE bookId = :bookId LIMIT 1")
+    suspend fun anyHash(bookId: Long): String?
+
     @Query("SELECT DISTINCT chapterId FROM memory_chunk WHERE bookId = :bookId")
     fun observeVectorizedChapters(bookId: Long): Flow<List<Long>>
 }

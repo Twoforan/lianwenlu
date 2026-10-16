@@ -19,6 +19,15 @@ interface EmbeddingGateway {
 
     /** 当前向量维度；0 表示未知（用于判断与库中已存向量是否一致） */
     suspend fun dimension(): Int
+
+    /**
+     * 当前向量化源的签名（工具 + 模型），如 `api|https://...|text-embedding-3-small`、`local|512`。
+     *
+     * 不同源产出的向量不在同一向量空间，换了源就必须整本重向量化。
+     * [com.lianwenqi.app.data.MemoryRepository] 会把签名并进块哈希前缀，
+     * 使「换源」能像「正文改动」一样被现有的增量判定识别出来，且不依赖任何网络请求。
+     */
+    suspend fun signature(): String
 }
 
 /**
@@ -38,8 +47,17 @@ class RemoteEmbeddingGateway(
     override suspend fun rerank(query: String, candidates: List<String>): Result<FloatArray> =
         Result.success(FloatArray(candidates.size))
 
-    /** 厂商模型的维度只有真正请求了才知道，这里不额外发请求，统一视为未知 */
+    /**
+     * 厂商模型的维度只有请求一次才知道，这里不额外发请求，统一视为未知。
+     * 「换模型后要不要整本重跑」改由 [signature] 判断，比探测维度更可靠：
+     * 即使新旧模型维度相同，来自不同模型的向量也不在同一向量空间，同样必须重跑。
+     */
     override suspend fun dimension(): Int = 0
+
+    override suspend fun signature(): String {
+        val cfg = config()
+        return "api|${cfg.baseUrl}|${cfg.model}"
+    }
 }
 
 /** 本地 GGUF 工具：所有推理都走 [LocalEmbeddingEngine]（llama.cpp，CPU） */
@@ -56,6 +74,9 @@ class LocalEmbeddingGateway(
     }
 
     override suspend fun dimension(): Int = engine()?.embeddingDim ?: 0
+
+    /** 本地工具：维度确定，签名带上维度即可（换本地模型时维度变化同样会被识别） */
+    override suspend fun signature(): String = "local|${dimension()}"
 
     private suspend fun requireEngine(): LocalEmbeddingEngine =
         engine() ?: throw AiException(AiError.LocalEngine("本地向量模型尚未下载或加载失败"))
@@ -91,6 +112,8 @@ class MemoryEmbeddingGateway(
         target()?.rerank(query, candidates) ?: disabled()
 
     override suspend fun dimension(): Int = target()?.dimension() ?: 0
+
+    override suspend fun signature(): String = target()?.signature() ?: "off"
 
     private fun <T> disabled(): Result<T> =
         Result.failure(AiException(AiError.InvalidConfig("未开启向量化工具")))

@@ -64,3 +64,16 @@ fun shortHash(text: String): String {
     }
     return hash.toULong().toString(16)
 }
+
+/**
+ * 把「向量化源签名」（向量化工具 + 模型）并进块哈希前缀。
+ *
+ * 不同向量化工具 / 不同模型产出的向量互相之间算不了余弦（维度可能不同，
+ * 即使维度相同也不在同一向量空间），所以只要换了源，已存向量就必须整本重跑。
+ * 并进哈希前缀后，旧哈希与新哈希自然失配，[chunkChapter] 的增量判定就会自动重跑，
+ * 不依赖任何网络探测，也不会因为库里的 dim 字段缺失而误判「无需重跑」。
+ */
+fun stampChunkHash(source: String, hash: String): String = "$source|$hash"
+
+/** 已存块哈希是否由 [source] 这个向量化源写入 */
+fun stampedBy(hash: String, source: String): Boolean = hash.startsWith("$source|")

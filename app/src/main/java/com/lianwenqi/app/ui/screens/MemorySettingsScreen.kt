@@ -1,5 +1,6 @@
 package com.lianwenqi.app.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -241,6 +242,9 @@ fun MemorySettingsScreen(
     var showModelPicker by remember { mutableStateOf(false) }
     var showDownloadDialog by remember { mutableStateOf(false) }
     var showBlockSettings by remember { mutableStateOf(false) }
+
+    // 系统返回键：停在「记忆检索区块设置」子页面时，先回到长期记忆配置页，而不是直接退出到设置页
+    BackHandler(enabled = showBlockSettings) { showBlockSettings = false }
 
     // 「记忆检索区块设置」子页面：就地替换本页内容，返回时回到本页
     if (showBlockSettings) {

@@ -28,8 +28,8 @@ android {
         applicationId = "com.lianwenqi.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 33
-        versionName = "3.1.9"
+        versionCode = 35
+        versionName = "3.2.1"
 
         vectorDrawables { useSupportLibrary = true }
 

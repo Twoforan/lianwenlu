@@ -12,6 +12,8 @@ import com.lianwenqi.app.util.chunkChapter
 import com.lianwenqi.app.util.cosineSimilarity
 import com.lianwenqi.app.util.decodeVector
 import com.lianwenqi.app.util.encodeVector
+import com.lianwenqi.app.util.stampChunkHash
+import com.lianwenqi.app.util.stampedBy
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.sync.Mutex
@@ -74,6 +76,13 @@ interface MemoryGateway {
     /** 本书已向量化内容所对应的最新章节更新时间；从未向量化返回 null */
     suspend fun latestVectorizedUpdatedAt(bookId: Long): Long?
 
+    /**
+     * 本书已存向量是否来自「其它向量化工具 / 模型」（即换了源却还没重新向量化）。
+     * 换源后库里仍是旧源的向量，与当前查询向量算不了余弦，检索会一无所获，
+     * 界面据此提示用户先重新向量化。
+     */
+    suspend fun vectorSourceStale(bookId: Long): Boolean
+
     companion object {
         const val DEFAULT_TOP_K = 5
     }
@@ -109,6 +118,11 @@ class MemoryRepository(
 
     override suspend fun latestVectorizedUpdatedAt(bookId: Long): Long? =
         chunkDao.latestChapterUpdatedAt(bookId)
+
+    override suspend fun vectorSourceStale(bookId: Long): Boolean {
+        val storedHash = chunkDao.anyHash(bookId) ?: return false
+        return !stampedBy(storedHash, gateway.signature())
+    }
 
     override suspend fun retrieve(
         bookId: Long,
@@ -199,10 +213,14 @@ class MemoryRepository(
             val chapters = chapterDao.getByBook(bookId)
             val volumeTitles = volumeDao.getByBook(bookId).associate { it.id to it.title }
             val targets = chapters.filter { it.content.isNotBlank() }
+            // 向量化源签名（向量化工具 + 模型）并进块哈希：换了源，旧哈希全部失配，整本自动重跑。
+            // 这是「本地向量 → 切回厂商 API」后仍能检索到的关键：旧向量与新查询向量算不了余弦。
+            val source = gateway.signature()
             // 换向量模型（维度变化）后，旧向量与新 vector 维度不一致会检索不到：
-            // 此时整本书强制重跑，把已存向量统一切到新维度（本地工具维度可知，远程未知则不强制）
+            // 此时整本书强制重跑，把已存向量统一切到新维度。
+            // 只有本书已经存过向量时才需要比对维度，否则必然全量重跑，没必要多打一次探测请求。
             val storedDim = chunkDao.anyDim(bookId) ?: 0
-            val targetDim = gateway.dimension()
+            val targetDim = if (storedDim != 0) gateway.dimension() else 0
             val dimChanged = storedDim != 0 && targetDim != 0 && storedDim != targetDim
             var done = 0
             var dim = 0
@@ -213,7 +231,7 @@ class MemoryRepository(
 
             for (chapter in targets) {
                 val volumeTitle = volumeTitles[chapter.volumeId] ?: ""
-                val chunks = chunkChapter(chapter.content)
+                val chunks = chunkChapter(chapter.content).map { it.copy(hash = stampChunkHash(source, it.hash)) }
                 val stored = chunkDao.hashesOf(chapter.id)
                 val upToDate = !dimChanged && stored.isNotEmpty() &&
                     stored.all { it.chapterUpdatedAt == chapter.updatedAt } &&

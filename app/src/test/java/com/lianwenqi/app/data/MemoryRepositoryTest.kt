@@ -13,6 +13,8 @@ import com.lianwenqi.app.data.entity.Volume
 import com.lianwenqi.app.util.chunkChapter
 import com.lianwenqi.app.util.decodeVector
 import com.lianwenqi.app.util.encodeVector
+import com.lianwenqi.app.util.stampChunkHash
+import com.lianwenqi.app.util.stampedBy
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.runTest
@@ -27,10 +29,14 @@ import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import okio.Buffer
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+
+/** 与 `repository()` 默认配置一致的厂商 API 源签名 */
+private const val REMOTE_SOURCE = "api|https://api.test/v1|m"
 
 /**
  * [MemoryRepository] 的增量与事务行为测试。
@@ -108,6 +114,8 @@ class MemoryRepositoryTest {
 
         override suspend fun anyDim(bookId: Long) = rows.firstOrNull { it.bookId == bookId }?.dim
 
+        override suspend fun anyHash(bookId: Long) = rows.firstOrNull { it.bookId == bookId }?.hash
+
         override fun observeVectorizedChapters(bookId: Long): Flow<List<Long>> = flowOf(emptyList())
     }
 
@@ -153,7 +161,8 @@ class MemoryRepositoryTest {
             chunks.map { c ->
                 MemoryChunk(
                     bookId = 1, volumeId = 10, chapterId = 7, chunkIndex = c.index, text = c.text,
-                    hash = c.hash, chapterUpdatedAt = updatedAt, dim = 4, vector = encodeVector(fakeVector(c.text))
+                    hash = stampChunkHash(REMOTE_SOURCE, c.hash), chapterUpdatedAt = updatedAt, dim = 4,
+                    vector = encodeVector(fakeVector(c.text))
                 )
             }
         )
@@ -198,12 +207,78 @@ class MemoryRepositoryTest {
         assertEquals(1, chunkDao.deleteByChapterCalls)
         val expected = chunkChapter(content)
         assertEquals(expected.size, chunkDao.rows.size)
-        assertEquals(expected[0].hash, chunkDao.rows[0].hash)
+        assertEquals(stampChunkHash(REMOTE_SOURCE, expected[0].hash), chunkDao.rows[0].hash)
         assertEquals(2000L, chunkDao.rows[0].chapterUpdatedAt)
         assertEquals(4, chunkDao.rows[0].dim)
         // 逐章进度带卷名与章名；最后一条是收尾汇总
         assertTrue(events.any { it.volumeTitle == "第一卷" && it.chapterTitle == "第7章" })
         assertTrue(events.last().done == 1 && events.last().total == 1 && !events.last().running)
+    }
+
+    @Test
+    fun vectorize_rewritesAllChaptersWhenVectorSourceChanged() = runTest {
+        // 库里的向量来自本地工具（签名 local|512），当前源是厂商 API：
+        // 即使正文与块哈希都没变、dim 字段也还是 4，也必须整本重跑。
+        // 否则旧向量与新的查询向量算不了余弦，记忆检索会一直检索不到任何片段。
+        val content = "第一段正文。\n\n第二段正文。"
+        val updatedAt = 1000L
+        val chunkDao = FakeChunkDao()
+        chunkDao.rows.addAll(
+            chunkChapter(content).map { c ->
+                MemoryChunk(
+                    bookId = 1, volumeId = 10, chapterId = 7, chunkIndex = c.index, text = c.text,
+                    hash = stampChunkHash("local|512", c.hash), chapterUpdatedAt = updatedAt,
+                    dim = 4, vector = encodeVector(fakeVector(c.text))
+                )
+            }
+        )
+        val gateway = object : EmbeddingGateway {
+            override suspend fun embed(texts: List<String>) =
+                Result.success(texts.map { FloatArray(8) { 1f } })
+
+            override suspend fun rerank(query: String, candidates: List<String>) =
+                Result.success(FloatArray(candidates.size))
+
+            override suspend fun dimension() = 8
+
+            override suspend fun signature() = "api|https://api.test/v1|m"
+        }
+        val repo = MemoryRepository(
+            FakeChapterDao(listOf(chapter(7, 1, 10, content, updatedAt))),
+            FakeVolumeDao(listOf(Volume(id = 10, bookId = 1, title = "第一卷"))),
+            chunkDao, gateway, { it() }
+        )
+        repo.vectorize(1)
+
+        // 旧源的向量被删掉并整章重写，哈希改由当前源签名
+        assertEquals(1, chunkDao.deleteByChapterCalls)
+        assertTrue(chunkDao.rows.isNotEmpty())
+        assertTrue(chunkDao.rows.all { stampedBy(it.hash, "api|https://api.test/v1|m") })
+    }
+
+    @Test
+    fun vectorSourceStale_isTrueWhenStoredVectorsComeFromAnotherSource() = runTest {
+        val chunkDao = FakeChunkDao()
+        chunkDao.rows.add(
+            MemoryChunk(
+                bookId = 1, volumeId = null, chapterId = 7, chunkIndex = 0, text = "片段",
+                hash = stampChunkHash("local|512", "abc"), chapterUpdatedAt = 1L, dim = 4,
+                vector = encodeVector(fakeVector("片段"))
+            )
+        )
+        // 当前源 fake|4，库里是 local|512 → 判定为「换了源还没重新向量化」
+        val repo = MemoryRepository(FakeChapterDao(emptyList()), FakeVolumeDao(emptyList()), chunkDao, FakeGateway(), { it() })
+        assertTrue(repo.vectorSourceStale(1))
+
+        chunkDao.rows.clear()
+        chunkDao.rows.add(
+            MemoryChunk(
+                bookId = 1, volumeId = null, chapterId = 7, chunkIndex = 0, text = "片段",
+                hash = stampChunkHash("fake|4", "abc"), chapterUpdatedAt = 1L, dim = 4,
+                vector = encodeVector(fakeVector("片段"))
+            )
+        )
+        assertFalse(repo.vectorSourceStale(1))
     }
 
     @Test
@@ -349,6 +424,8 @@ class MemoryRepositoryTest {
                 Result.success(FloatArray(candidates.size))
 
             override suspend fun dimension() = 2
+
+            override suspend fun signature() = "fake|2"
         }
         val result = MemoryRepository(
             FakeChapterDao(emptyList()), FakeVolumeDao(emptyList()), chunkDao, gateway, { it() }
@@ -416,4 +493,6 @@ private class FakeGateway(
         Result.success(rerankScores(candidates.size))
 
     override suspend fun dimension(): Int = dim
+
+    override suspend fun signature(): String = "fake|$dim"
 }
