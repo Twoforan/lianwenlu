@@ -16,6 +16,7 @@ import com.lianwenqi.app.data.ChatRepository
 import com.lianwenqi.app.data.ConfigRepository
 import com.lianwenqi.app.data.EmbeddingConfig
 import com.lianwenqi.app.data.MemoryRepository
+import com.lianwenqi.app.data.ManualSeeder
 import com.lianwenqi.app.data.OutlineRepository
 import com.lianwenqi.app.data.Prefs
 import com.lianwenqi.app.update.UpdateChecker
@@ -23,6 +24,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 
 /** 简单的依赖容器（ServiceLocator），供 ViewModel 获取 */
 class AppContainer(val app: Application) {
@@ -75,6 +77,10 @@ class LianWenQiApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         container = AppContainer(this)
+        // 首次启动时把内置《使用说明书》导入书架，之后可选中它向 AI 提问本 App 的用法
+        container.appScope.launch {
+            ManualSeeder.ensureSeeded(this@LianWenQiApplication, container.prefs)
+        }
     }
 }
 

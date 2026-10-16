@@ -131,13 +131,13 @@ fun SettingsScreen(
     onOpenAiTools: () -> Unit = {},
     onOpenPrefix: () -> Unit = {},
     onOpenMemory: () -> Unit = {},
+    onOpenManual: () -> Unit = {},
     onOpenUpdate: () -> Unit = {}
 ) {
     val vm = appViewModel { SettingsViewModel(it) }
     val providers by vm.providers.collectAsState()
     val models by vm.models.collectAsState()
     val prompts by vm.prompts.collectAsState()
-    val night by vm.nightMode.collectAsState()
     val activeModelId by vm.activeModelId.collectAsState()
     val aiFollowBook by vm.aiFollowBook.collectAsState()
     val aiOutlineFirstRound by vm.aiOutlineFirstRound.collectAsState()
@@ -191,9 +191,27 @@ fun SettingsScreen(
                             .verticalScroll(rememberScrollState())
                             .padding(16.dp)
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("夜间模式", Modifier.weight(1f))
-                            Switch(checked = night, onCheckedChange = { vm.setNight(it) })
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable(onClick = onOpenManual)
+                                .padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text("使用说明")
+                                Text(
+                                    "查看内置使用说明书，并可把它交给 AI，提问本应用的用法",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Icon(
+                                Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
                         Spacer(Modifier.height(12.dp))
                         HorizontalDivider()

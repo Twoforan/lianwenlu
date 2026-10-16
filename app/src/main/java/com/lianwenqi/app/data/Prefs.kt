@@ -53,6 +53,9 @@ class Prefs(private val context: Context) {
 
     private object K {
         val nightMode = booleanPreferencesKey("night_mode")
+        // 内置说明书的导入状态：上次导入时的 App 版本号 + 说明书书籍 id
+        val manualVersion = intPreferencesKey("manual_version")
+        val manualBookId = longPreferencesKey("manual_book_id")
         val sortMode = stringPreferencesKey("sort_mode")
         val sortAsc = booleanPreferencesKey("sort_asc")
         val listMode = booleanPreferencesKey("list_mode")
@@ -133,6 +136,12 @@ class Prefs(private val context: Context) {
     }
 
     val nightMode: Flow<Boolean> = context.dataStore.data.map { it[K.nightMode] ?: false }
+
+    /** 内置说明书上次导入时的 App 版本号（0 表示从未导入） */
+    val manualVersion: Flow<Int> = context.dataStore.data.map { it[K.manualVersion] ?: 0 }
+
+    /** 内置说明书在书架上的书籍 id（0 表示尚未记录） */
+    val manualBookId: Flow<Long> = context.dataStore.data.map { it[K.manualBookId] ?: 0L }
     val sortMode: Flow<String> = context.dataStore.data.map { it[K.sortMode] ?: "TIME" }
     val sortAsc: Flow<Boolean> = context.dataStore.data.map { it[K.sortAsc] ?: false }
     val listMode: Flow<Boolean> = context.dataStore.data.map { it[K.listMode] ?: true }
@@ -279,6 +288,11 @@ class Prefs(private val context: Context) {
     }
 
     suspend fun setNightMode(v: Boolean) = writePrefs { it[K.nightMode] = v }
+    /** 记录说明书导入/更新结果：书籍 id + 本次导入时的 App 版本号 */
+    suspend fun setManualMeta(bookId: Long, version: Int) = writePrefs {
+        it[K.manualBookId] = bookId
+        it[K.manualVersion] = version
+    }
     suspend fun setSortMode(v: String) = writePrefs { it[K.sortMode] = v }
     suspend fun setSortAsc(v: Boolean) = writePrefs { it[K.sortAsc] = v }
     suspend fun setListMode(v: Boolean) = writePrefs { it[K.listMode] = v }

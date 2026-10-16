@@ -55,6 +55,10 @@ interface BookDao {
     @Query("SELECT * FROM book WHERE id = :id")
     suspend fun getById(id: Long): Book?
 
+    /** 按书名精确匹配（内置说明书更新时，用于在丢失记录后重新找回这本书） */
+    @Query("SELECT * FROM book WHERE title = :title LIMIT 1")
+    suspend fun findByTitle(title: String): Book?
+
     @Query("SELECT * FROM book ORDER BY pinned DESC, updatedAt DESC")
     suspend fun getAll(): List<Book>
 
@@ -135,6 +139,10 @@ interface ChapterDao {
 
     @Query("DELETE FROM chapter WHERE id = :id")
     suspend fun deleteById(id: Long)
+
+    /** 清空某本书的全部章节（内置说明书按版本更新时整章替换用） */
+    @Query("DELETE FROM chapter WHERE bookId = :bookId")
+    suspend fun deleteByBook(bookId: Long)
 
     @Query(
         "SELECT * FROM chapter WHERE bookId = :bookId AND " +

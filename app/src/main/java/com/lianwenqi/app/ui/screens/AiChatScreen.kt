@@ -54,6 +54,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.EditNote
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
@@ -870,7 +871,11 @@ fun AiAssistantDrawer(
     visible: Boolean,
     bookId: Long,
     chapterId: Long,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    /** 把某条 AI 回答的正文写入当前章节（覆盖 + 一键排版） */
+    onWriteToChapter: (String) -> Unit,
+    /** 在当前书新建一个章节并跳转过去 */
+    onNewChapter: () -> Unit
 ) {
     Box(Modifier.fillMaxSize()) {
         AnimatedVisibility(visible = visible, enter = fadeIn(), exit = fadeOut()) {
@@ -887,7 +892,7 @@ fun AiAssistantDrawer(
             exit = slideOutHorizontally(targetOffsetX = { it }),
             modifier = Modifier.align(Alignment.CenterEnd)
         ) {
-            AiAssistantPanel(bookId, chapterId, onDismiss)
+            AiAssistantPanel(bookId, chapterId, onDismiss, onWriteToChapter, onNewChapter)
         }
     }
 }
@@ -896,7 +901,9 @@ fun AiAssistantDrawer(
 private fun AiAssistantPanel(
     bookId: Long,
     chapterId: Long,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    onWriteToChapter: (String) -> Unit,
+    onNewChapter: () -> Unit
 ) {
     val vm = appViewModel(key = "ai-quick-$bookId-$chapterId") {
         // 侧边 AI 助手：不启用 AI 工具（工具提示词不随请求发送，也不解析工具区块）
@@ -1055,7 +1062,8 @@ private fun AiAssistantPanel(
                             onSaveAndSend = { id, text, uid -> vm.saveAndContinue(id, text, uid) },
                             onSwitchVariant = { uid, mid -> vm.switchVariant(uid, mid) },
                             onToggleContent = { id, collapsed -> vm.setContentCollapsed(id, collapsed) },
-                            onStop = { vm.stopGenerating() }
+                            onStop = { vm.stopGenerating() },
+                            onWriteToChapter = onWriteToChapter
                         )
                     }
                 }
@@ -1115,6 +1123,8 @@ private fun AiAssistantPanel(
                 // 长期记忆检索（与「上下文 / 大纲」同排的勾选框）；未配置向量化工具时不可勾选
                 SmallChip("记忆检索", memoryRetrieval, { vm.toggleMemoryRetrieval() }, enabled = memoryToolReady)
                 MemorySearchIndicator(memorySearch, memoryRetrieval)
+                // 在当前书新建章节并直接跳转过去
+                SmallChip("新建章节", false, { onNewChapter() })
             }
 
             if (editingUserMsgId > 0L) {
@@ -1818,7 +1828,9 @@ private fun ChatMessageItem(
     onSaveAndSend: (Long, String, Long) -> Unit,
     onSwitchVariant: (Long, Long) -> Unit,
     onToggleContent: (Long, Boolean) -> Unit,
-    onStop: () -> Unit
+    onStop: () -> Unit,
+    /** 侧边栏 AI 助手专属：把这条回答的正文写入当前章节；为空则不显示该操作（如导航栏 AI 对话页） */
+    onWriteToChapter: ((String) -> Unit)? = null
 ) {
     when (entry) {
         is ChatEntry.User -> {
@@ -1901,7 +1913,8 @@ private fun ChatMessageItem(
                         onDelete = onDelete,
                         onSaveEdit = onSaveEdit,
                         onSaveAndSend = onSaveAndSend,
-                        onToggleContent = onToggleContent
+                        onToggleContent = onToggleContent,
+                        onWriteToChapter = onWriteToChapter
                     )
                 }
             }
@@ -1918,7 +1931,8 @@ private fun ChatMessageItem(
             onDelete = onDelete,
             onSaveEdit = onSaveEdit,
             onSaveAndSend = onSaveAndSend,
-            onToggleContent = onToggleContent
+            onToggleContent = onToggleContent,
+            onWriteToChapter = onWriteToChapter
         )
     }
 }
@@ -1936,7 +1950,8 @@ private fun AssistantBlock(
     onDelete: (Long) -> Unit,
     onSaveEdit: (Long, String) -> Unit,
     onSaveAndSend: (Long, String, Long) -> Unit,
-    onToggleContent: (Long, Boolean) -> Unit
+    onToggleContent: (Long, Boolean) -> Unit,
+    onWriteToChapter: ((String) -> Unit)? = null
 ) {
     if (msg.reasoning.isNotBlank()) {
         ThinkingBlock(msg.reasoning)
@@ -1984,7 +1999,9 @@ private fun AssistantBlock(
                 Text(
                     buildString {
                         append("消耗 $tokens tokens（输入 ${msg.promptTokens} / 输出 ${msg.completionTokens}）")
-                        if (msg.cachedTokens > 0) append(" · 缓存命中 $hit%")
+                        // 只要记录了输入 token 就展示命中率：首轮没有缓存命中时显示 0%，
+                        // 避免「第一次生成看不到缓存命中率」的观感问题
+                        if (msg.promptTokens > 0) append(" · 缓存命中 $hit%")
                     },
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -2008,6 +2025,13 @@ private fun AssistantBlock(
             MessageAction(Icons.Filled.ContentCopy, "复制") {
                 ui.pendingDeleteId = null
                 onCopy(msg.content)
+            }
+            // 侧边栏专属：把本条回答正文写入当前章节（覆盖 + 一键排版）
+            onWriteToChapter?.let { write ->
+                MessageAction(Icons.Filled.EditNote, "写入当前章节") {
+                    ui.pendingDeleteId = null
+                    write(msg.content)
+                }
             }
             MessageAction(
                 if (msg.contentCollapsed) Icons.Filled.KeyboardArrowDown else Icons.Filled.KeyboardArrowUp,

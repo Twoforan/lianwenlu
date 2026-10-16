@@ -262,6 +262,17 @@ fun ChapterEditorScreen(
         vm.onChange(title, summary, nv.text, nv.selection.start)
     }
 
+    // 「写入当前章节」待确认的 AI 正文：本章已有正文时先弹窗询问，确认后再覆盖写入
+    var pendingAiWrite by remember { mutableStateOf<String?>(null) }
+
+    // 把 AI 回答正文覆盖写入本章正文，并一键排版后落库
+    fun writeAiToChapter(text: String) {
+        keyboard?.hide()
+        val formatted = TextTool.oneKeyFormat(text, format)
+        pushChange(TextFieldValue(formatted, TextRange(formatted.length)))
+        vm.saveNow(title, summary, formatted, formatted.length)
+    }
+
     val indentUnit = "　".repeat(format.indent.coerceAtLeast(0))
 
     /**
@@ -635,7 +646,35 @@ fun ChapterEditorScreen(
             visible = aiOpen,
             bookId = bookId,
             chapterId = currentId,
-            onDismiss = { aiOpen = false }
+            onDismiss = { aiOpen = false },
+            onWriteToChapter = { text ->
+                if (content.text.isBlank()) writeAiToChapter(text) else pendingAiWrite = text
+            },
+            onNewChapter = {
+                // 新建章节并收起抽屉，直接跳转到新章节
+                vm.createChapter(null) { newId ->
+                    currentId = newId
+                    aiOpen = false
+                }
+            }
+        )
+    }
+
+    // 本章已有正文时，写入前先确认覆盖
+    pendingAiWrite?.let { text ->
+        AlertDialog(
+            onDismissRequest = { pendingAiWrite = null },
+            title = { Text("覆盖本章正文") },
+            text = { Text("本章已有正文，写入后将用这条 AI 回答覆盖整章正文并一键排版，是否继续？") },
+            confirmButton = {
+                TextButton(onClick = {
+                    writeAiToChapter(text)
+                    pendingAiWrite = null
+                }) { Text("覆盖并排版") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingAiWrite = null }) { Text("取消") }
+            }
         )
     }
 
