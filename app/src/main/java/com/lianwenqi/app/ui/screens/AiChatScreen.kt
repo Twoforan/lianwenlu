@@ -65,6 +65,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -169,10 +170,12 @@ fun AiChatScreen(initialBookId: Long?) {
     val pendingImports by vm.pendingImports.collectAsState()
     val importToast by vm.importToast.collectAsState()
     val memoryRetrieval by vm.memoryRetrievalEnabled.collectAsState()
+    val memorySearch by vm.memorySearchState.collectAsState()
     val memoryAsk by vm.pendingMemoryAsk.collectAsState()
     val memoryVectorizing by vm.memoryVectorizing.collectAsState()
     val memoryEmptyAsk by vm.pendingEmptyVectorizeAsk.collectAsState()
     val memoryToastMsg by vm.memoryToast.collectAsState()
+    val memoryToolReady by vm.memoryToolConfigured.collectAsState()
 
     var showBooks by remember { mutableStateOf(false) }
     var showChapters by remember { mutableStateOf(false) }
@@ -369,11 +372,14 @@ fun AiChatScreen(initialBookId: Long?) {
                     label = { Text("常用提示词") }
                 )
                 // 长期记忆检索：勾选后发送时按「本章梗概 + 提示词」检索本书正文片段注入参考资料
+                // 未配置向量化工具（未选向量模型 / 未启用本地工具）时不可勾选
                 FilterChip(
                     selected = memoryRetrieval,
+                    enabled = memoryToolReady,
                     onClick = { vm.toggleMemoryRetrieval() },
                     label = { Text("记忆检索") }
                 )
+                MemorySearchIndicator(memorySearch, memoryRetrieval)
                 // AI 工具多选（被工具页关闭的工具不出现在列表里）
                 if (outlineToolEnabled || chapterToolEnabled) {
                     AssistChip(
@@ -893,7 +899,8 @@ private fun AiAssistantPanel(
     onDismiss: () -> Unit
 ) {
     val vm = appViewModel(key = "ai-quick-$bookId-$chapterId") {
-        AiChatViewModel(it, bookId, chapterId)
+        // 侧边 AI 助手：不启用 AI 工具（工具提示词不随请求发送，也不解析工具区块）
+        AiChatViewModel(it, bookId, chapterId, enableAiTools = false)
     }
     val messages by vm.messages.collectAsState()
     val input by vm.input.collectAsState()
@@ -919,6 +926,8 @@ private fun AiAssistantPanel(
     val memoryEmptyAsk by vm.pendingEmptyVectorizeAsk.collectAsState()
     val memoryToastMsg by vm.memoryToast.collectAsState()
     val memoryVectorizing by vm.memoryVectorizing.collectAsState()
+    val memorySearch by vm.memorySearchState.collectAsState()
+    val memoryToolReady by vm.memoryToolConfigured.collectAsState()
 
     // 当前打开的章节不进入上下文
     val contextChapters = chapters.filter { it.id != chapterId }
@@ -1103,8 +1112,9 @@ private fun AiAssistantPanel(
                     openPanel = if (openPanel == "outline") null else "outline"
                     manifestState = 0
                 }
-                // 长期记忆检索（与「上下文 / 大纲」同排的勾选框）
-                SmallChip("记忆检索", memoryRetrieval) { vm.toggleMemoryRetrieval() }
+                // 长期记忆检索（与「上下文 / 大纲」同排的勾选框）；未配置向量化工具时不可勾选
+                SmallChip("记忆检索", memoryRetrieval, { vm.toggleMemoryRetrieval() }, enabled = memoryToolReady)
+                MemorySearchIndicator(memorySearch, memoryRetrieval)
             }
 
             if (editingUserMsgId > 0L) {
@@ -1352,9 +1362,10 @@ private fun FilterDropdown(
 
 /** 面板顶部的紧凑筛选标签 */
 @Composable
-private fun SmallChip(label: String, selected: Boolean, onClick: () -> Unit) {
+private fun SmallChip(label: String, selected: Boolean, onClick: () -> Unit, enabled: Boolean = true) {
     FilterChip(
         selected = selected,
+        enabled = enabled,
         onClick = onClick,
         modifier = Modifier.height(30.dp),
         label = {
@@ -1366,6 +1377,38 @@ private fun SmallChip(label: String, selected: Boolean, onClick: () -> Unit) {
             )
         }
     )
+}
+
+/**
+ * 「记忆检索」旁的状态指示：本地向量化工具走本机 CPU 推理，
+ * 一轮检索要向量化 query 再重排候选（首次还会加载重排模型），耗时较长。
+ * 这里如实显示检索的真实生命周期（正在检索中 → 检索完成），避免界面看起来像卡死。
+ */
+@Composable
+private fun MemorySearchIndicator(state: MemorySearchState, enabled: Boolean) {
+    if (!enabled || state == MemorySearchState.IDLE) return
+    val searching = state == MemorySearchState.SEARCHING
+    Row(
+        Modifier.height(30.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        if (searching) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(14.dp),
+                strokeWidth = 2.dp,
+                color = MaterialTheme.colorScheme.primary
+            )
+        }
+        Text(
+            if (searching) "正在检索中" else "检索完成",
+            style = MaterialTheme.typography.labelMedium,
+            color = if (searching) MaterialTheme.colorScheme.primary
+            else MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            softWrap = false
+        )
+    }
 }
 
 /** 带标题栏的圆角面板容器 */

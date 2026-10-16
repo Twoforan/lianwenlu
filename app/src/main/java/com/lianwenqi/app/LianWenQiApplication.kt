@@ -4,6 +4,12 @@ import android.app.Application
 import android.content.Context
 import com.lianwenqi.app.ai.AiClient
 import com.lianwenqi.app.ai.EmbeddingClient
+import com.lianwenqi.app.ai.EmbeddingGateway
+import com.lianwenqi.app.ai.LocalEmbeddingGateway
+import com.lianwenqi.app.ai.LocalEngineHolder
+import com.lianwenqi.app.ai.LocalModelStore
+import com.lianwenqi.app.ai.MemoryEmbeddingGateway
+import com.lianwenqi.app.ai.RemoteEmbeddingGateway
 import com.lianwenqi.app.data.AppDatabase
 import com.lianwenqi.app.data.BookRepository
 import com.lianwenqi.app.data.ChatRepository
@@ -33,16 +39,33 @@ class AppContainer(val app: Application) {
     /** 向量化专用的 Embedding 客户端（只在向量化 / 检索时调用，不参与对话请求） */
     val embeddingClient: EmbeddingClient = EmbeddingClient()
 
+    /** 本地向量化模型的文件管理：路径 / 就绪校验 / 下载（含断点续传） */
+    val localModelStore: LocalModelStore = LocalModelStore(app)
+
+    /** 本地推理引擎的懒加载持有者：模型 200MB+，首次真正推理时才开始加载 */
+    val localEngineHolder: LocalEngineHolder = LocalEngineHolder(localModelStore)
+
     /** 应用级协程域：A2 开启后正文保存触发的后台静默向量化在此执行 */
     val appScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    val memoryRepository: MemoryRepository = MemoryRepository(database, embeddingClient) {
-        EmbeddingConfig(
-            baseUrl = prefs.memoryEmbeddingBaseUrl.first(),
-            apiKey = prefs.memoryEmbeddingApiKey.first(),
-            model = prefs.memoryEmbeddingModel.first()
-        )
-    }
+    /**
+     * 向量化能力：按「向量化工具」设置分发到厂商 Embedding API 或本地 GGUF 工具。
+     * 上层（MemoryRepository）只依赖这个接口，因此切到本地工具后
+     * 「原先提交给向量 API 的内容」自动改由本地模型计算并返回。
+     */
+    private val memoryEmbeddingGateway: EmbeddingGateway = MemoryEmbeddingGateway(
+        remote = RemoteEmbeddingGateway(embeddingClient) {
+            EmbeddingConfig(
+                baseUrl = prefs.memoryEmbeddingBaseUrl.first(),
+                apiKey = prefs.memoryEmbeddingApiKey.first(),
+                model = prefs.memoryEmbeddingModel.first()
+            )
+        },
+        local = LocalEmbeddingGateway { localEngineHolder.get() },
+        mode = { prefs.memoryToolMode.first() }
+    )
+
+    val memoryRepository: MemoryRepository = MemoryRepository(database, memoryEmbeddingGateway)
 }
 
 class LianWenQiApplication : Application() {

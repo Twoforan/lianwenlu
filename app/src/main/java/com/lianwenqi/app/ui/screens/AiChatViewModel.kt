@@ -51,7 +51,13 @@ import kotlinx.coroutines.launch
 class AiChatViewModel(
     private val container: AppContainer,
     private val defaultBookId: Long? = null,
-    private val fixedChapterId: Long? = null
+    private val fixedChapterId: Long? = null,
+    /**
+     * 是否允许 AI 工具（写入大纲 / 章节梗概导入）生效。
+     * 导航栏 AI 聊天页为 true；编辑器侧边 AI 助手为 false —— 侧边对话不携带工具提示词，
+     * 也不解析工具区块（避免勾选状态被两个界面共用后，工具提示词串到侧边对话里）。
+     */
+    private val enableAiTools: Boolean = true
 ) : ViewModel() {
 
     private val bookRepository = container.bookRepository
@@ -151,14 +157,55 @@ class AiChatViewModel(
     /** 默认勾选开启期间，「本轮被用户手动取消」的标记（一轮结束或换会话时复位） */
     private val memoryRoundCancelled = MutableStateFlow(false)
 
+    /**
+     * 向量化工具是否已配置可用（API 模式需填齐 baseUrl / apiKey / 向量模型名；本地模式需已勾选）。
+     * 未配置时「记忆检索」不可勾选，「默认勾选记忆检索」也不生效。
+     */
+    val memoryToolConfigured: StateFlow<Boolean> = prefs.memoryVectorizationReady
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    /**
+     * 当前章节是否有梗概。记忆检索的 query 就是本章梗概，没有梗概则无从匹配。
+     * 编辑器侧边助手场景跟随章节变化实时刷新；导航栏 AI 对话没有「本章」，恒为 true
+     * （查询改回退用本轮提示词）。
+     */
+    private val chapterSummaryReady: Flow<Boolean> = fixedChapterId?.let { id ->
+        bookRepository.observeChapter(id).map { !it?.summary.isNullOrBlank() }
+    } ?: flowOf(true)
+
+    /** 记忆检索的可用上下文：绑定书籍、本书是否已向量化、本章是否有梗概 */
+    private data class MemoryAvailability(
+        val bookId: Long?,
+        val vectorized: Boolean,
+        val summaryReady: Boolean
+    )
+
+    private val memoryAvailability: Flow<MemoryAvailability> =
+        combine(memoryBookIdFlow, bookVectorizedFlow, chapterSummaryReady) { bookId, vectorized, summaryReady ->
+            MemoryAvailability(bookId, vectorized, summaryReady)
+        }
+
     val memoryRetrievalEnabled: StateFlow<Boolean> = combine(
-        prefs.memoryRetrievalEnabled, prefs.memoryDefaultEnabled, memoryBookIdFlow, bookVectorizedFlow, memoryRoundCancelled
-    ) { manual, defaultOn, bookId, vectorized, cancelledThisRound ->
-        if (defaultOn) bookId != null && vectorized && !cancelledThisRound else manual
+        prefs.memoryRetrievalEnabled, prefs.memoryDefaultEnabled,
+        memoryRoundCancelled, memoryToolConfigured, memoryAvailability
+    ) { manual, defaultOn, cancelledThisRound, toolReady, avail ->
+        when {
+            // 未配置向量化工具，或本章没有梗概（无从匹配）时，一律不生效
+            !toolReady || !avail.summaryReady -> false
+            defaultOn -> avail.bookId != null && avail.vectorized && !cancelledThisRound
+            else -> manual
+        }
     }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
     /** 勾选记忆检索时的提示（Toast 用，展示后由 UI 清空） */
     val memoryToast = MutableStateFlow<String?>(null)
+
+    /**
+     * 记忆检索的进行状态（供界面显示「正在检索中 / 检索完成」）。
+     * 本地向量化工具属于本机 CPU 推理，一轮检索需要向量化 query + 重排候选，
+     * 首次还会加载重排模型，耗时明显；这里如实反映检索的真实生命周期，不用定时器假装。
+     */
+    val memorySearchState = MutableStateFlow(MemorySearchState.IDLE)
 
     fun clearMemoryToast() {
         memoryToast.value = null
@@ -176,6 +223,8 @@ class AiChatViewModel(
      */
     fun toggleMemoryRetrieval() = viewModelScope.launch {
         if (memoryRetrievalEnabled.value) {
+            // 取消勾选后不再检索，旧的「检索完成」标记同步清掉，避免误导
+            memorySearchState.value = MemorySearchState.IDLE
             if (prefs.memoryDefaultEnabled.first()) {
                 memoryRoundCancelled.value = true
                 memoryToast.value = "已取消本轮记忆检索，下一轮将自动恢复勾选"
@@ -185,6 +234,17 @@ class AiChatViewModel(
             return@launch
         }
         memoryRoundCancelled.value = false
+        if (!memoryToolConfigured.value) {
+            memoryToast.value = "请先在设置中配置向量化工具（选择向量模型或启用本地工具）"
+            return@launch
+        }
+        // 记忆检索以本章梗概为查询条件，本章没有梗概就无从匹配
+        fixedChapterId?.let { chapterId ->
+            if (bookRepository.getChapter(chapterId)?.summary.isNullOrBlank()) {
+                memoryToast.value = "本章暂无梗概，无法进行记忆检索匹配"
+                return@launch
+            }
+        }
         val bookId = currentMemoryBookId()
         if (bookId == null) {
             memoryToast.value = "请先选择书籍，再进行记忆检索"
@@ -248,13 +308,13 @@ class AiChatViewModel(
         prefs.setAiChatTools(if (id in cur) cur - id else cur + id)
     }
 
-    /** 「写入大纲工具」当前是否生效：工具启用且已在聊天页勾选 */
+    /** 「写入大纲工具」当前是否生效：工具启用且已在聊天页勾选（侧边对话一律不生效） */
     private fun writeOutlineToolOn(): Boolean =
-        outlineToolEnabled.value && AI_TOOL_WRITE_OUTLINE in chatTools.value
+        enableAiTools && outlineToolEnabled.value && AI_TOOL_WRITE_OUTLINE in chatTools.value
 
-    /** 「章节梗概导入工具」当前是否生效：工具启用且已在聊天页勾选 */
+    /** 「章节梗概导入工具」当前是否生效：工具启用且已在聊天页勾选（侧边对话一律不生效） */
     private fun chapterImportToolOn(): Boolean =
-        chapterToolEnabled.value && AI_TOOL_IMPORT_CHAPTER in chatTools.value
+        enableAiTools && chapterToolEnabled.value && AI_TOOL_IMPORT_CHAPTER in chatTools.value
 
     /** 取消当前这一项导入（队列后移，继续询问下一项） */
     fun dismissPendingImport() {
@@ -1185,8 +1245,8 @@ class AiChatViewModel(
     }
 
     /**
-     * 长期记忆检索：query = 本章梗概（约定：提交给向量化 api 的就是本章梗概；
-     * 无梗概的场景如导航栏 AI 对话，才回退用本轮提示词），被检索内容 = 本书已向量化的正文块。
+     * 长期记忆检索：query = 本章梗概（编辑器场景；本章无梗概则不做检索），
+     * 导航栏 AI 对话没有「本章」，回退用本轮提示词；被检索内容 = 本书已向量化的正文块。
      * 命中片段拼成附带提示词，随本轮用户消息一起落库（进入历史对话的上下文部分最后），
      * 从而在后续轮次里也能被模型看到；不写会话前缀，前缀字节结构不变。
      * 未勾选 / 未绑定书 / 未配置 Embedding / 无命中时一律返回空串，不影响正常发送。
@@ -1194,10 +1254,28 @@ class AiChatViewModel(
     private suspend fun memoryReferenceForText(userText: String): String {
         if (!memoryRetrievalEnabled.value) return ""
         val bookId = currentMemoryBookId() ?: return ""
-        val summary = fixedChapterId?.let { bookRepository.getChapter(it)?.summary }.orEmpty()
-        val query = summary.ifBlank { userText }
+        // 编辑器侧边助手：query 一律取「本章梗概」，本章无梗概则不做检索（勾选时已提示）；
+        // 导航栏 AI 对话：没有「本章」，回退用本轮提示词。
+        val chapterId = fixedChapterId
+        val query = if (chapterId != null) {
+            bookRepository.getChapter(chapterId)?.summary.orEmpty().also { if (it.isBlank()) return "" }
+        } else {
+            userText
+        }
         if (query.isBlank()) return ""
-        val hits = container.memoryRepository.retrieve(bookId, query, MemoryGateway.DEFAULT_TOP_K)
+        // 检索耗时（本地工具为 CPU 推理，首次还要加载重排模型）：如实上报状态，界面显示「正在检索中」
+        memorySearchState.value = MemorySearchState.SEARCHING
+        val hits = try {
+            // 区块数（5-20）与范围偏好（随机匹配 / 最新章节优先 / 最早章节优先）来自「记忆检索区块设置」
+            val quota = prefs.memoryBlockQuota.first()
+            val scope = prefs.memorySearchScope.first()
+            // 侧边助手写的是当前这一章，把本章自己的块排除掉，检索才会真的去翻本书其它章节
+            container.memoryRepository.retrieve(
+                bookId, query, quota, excludeChapterId = fixedChapterId, scope = scope
+            )
+        } finally {
+            memorySearchState.value = MemorySearchState.DONE
+        }
         if (hits.isEmpty()) return ""
         return buildString {
             append("【参考资料·本书相关正文片段】\n")
@@ -1232,3 +1310,15 @@ sealed interface PendingImport {
 
 /** 「正文有更新，是否向量化到最新章节？」弹窗的挂起请求（保留原发送参数，应答后继续发送） */
 data class MemoryVectorizeAsk(val overrideText: String?, val systemPrompt: String)
+
+/** 记忆检索进行状态：界面据此显示「正在检索中」/「检索完成」 */
+enum class MemorySearchState {
+    /** 本轮没有检索（未勾选 / 尚未发送 / 已取消勾选） */
+    IDLE,
+
+    /** 正在向量化 query 并召回 / 精排候选 */
+    SEARCHING,
+
+    /** 本轮检索已结束（无论是否有命中） */
+    DONE
+}

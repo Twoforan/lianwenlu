@@ -21,14 +21,31 @@ android {
     compileSdk = 35
     buildToolsVersion = "35.0.0"
 
+    // 本地向量化（llama.cpp）需要的 NDK；仅编 arm64-v8a，模型推理在 64 位才够内存
+    ndkVersion = "27.2.12479018"
+
     defaultConfig {
         applicationId = "com.lianwenqi.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 31
-        versionName = "3.1.7"
+        versionCode = 33
+        versionName = "3.1.9"
 
         vectorDrawables { useSupportLibrary = true }
+
+        ndk { abiFilters += "arm64-v8a" }
+        externalNativeBuild {
+            cmake {
+                arguments += "-DANDROID_STL=c++_shared"
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 
     signingConfigs {

@@ -26,6 +26,9 @@ sealed class AiError(val userMessage: String) {
     /** 本地配置不合法：apiKey / baseUrl 缺失，或 apiKey 含非法字符（如中文、控制字符） */
     class InvalidConfig(message: String) : AiError(message)
 
+    /** 本地向量化工具相关：模型未下载 / 加载失败 / 本地推理失败 */
+    class LocalEngine(message: String) : AiError(message)
+
     /** 其他未归类错误 */
     class Unknown(val cause: Throwable) : AiError("未知错误：${cause.message}")
 

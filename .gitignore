@@ -16,3 +16,6 @@ app/build
 
 # IDE / 编辑器本地配置
 /.trae
+
+# Kotlin 构建缓存
+.kotlin

@@ -25,6 +25,29 @@ import kotlinx.serialization.json.Json
 
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "settings")
 
+/** 向量化工具的取值：关闭 / 厂商 Embedding API / 本地 GGUF 工具，三者互斥只能选一个 */
+object MemoryToolMode {
+    const val OFF = "off"
+    const val API = "api"
+    const val LOCAL = "local"
+}
+
+/** 记忆检索的范围偏好：给不同位置的章节加权，决定「优先从哪一段书里找参考资料」 */
+object MemorySearchScope {
+    /** 随机匹配：不看章节位置，纯按相关度匹配（默认） */
+    const val RANDOM = "random"
+
+    /** 最新章节优先：越靠后的章节越容易被选中 */
+    const val NEWEST = "newest"
+
+    /** 最早章节优先：越靠前的章节越容易被选中 */
+    const val OLDEST = "oldest"
+}
+
+/** 记忆检索区块数（注入参考资料的段数）的取值下限与上限 */
+const val MEMORY_BLOCK_QUOTA_MIN = 5
+const val MEMORY_BLOCK_QUOTA_MAX = 20
+
 /** 全局偏好设置：夜间模式、排序、排版、样式等 */
 class Prefs(private val context: Context) {
 
@@ -89,6 +112,8 @@ class Prefs(private val context: Context) {
         val memoryDefaultEnabled = booleanPreferencesKey("memory_default_enabled")
         val memoryAutoVectorize = booleanPreferencesKey("memory_auto_vectorize")
         val memoryRetrievalEnabled = booleanPreferencesKey("memory_retrieval_enabled")
+        val memoryBlockQuota = intPreferencesKey("memory_block_quota")
+        val memorySearchScope = stringPreferencesKey("memory_search_scope")
 
         // 阅读器独立的样式与排版：与编辑页各存一套，互不影响
         val rFontSize = floatPreferencesKey("reader_style_font_size")
@@ -148,8 +173,9 @@ class Prefs(private val context: Context) {
     /** 「自定义前缀」：纯文本，新建会话前缀时取一次并冻结在该会话中 */
     val prefixCustomText: Flow<String> = context.dataStore.data.map { it[K.prefixCustomText] ?: "" }
 
-    /** 向量化工具（互斥）：api = 厂商 Embedding API；local = 本地 GGUF 工具（本轮占位） */
-    val memoryToolMode: Flow<String> = context.dataStore.data.map { it[K.memoryToolMode] ?: "api" }
+    /** 向量化工具（互斥）：api = 厂商 Embedding API；local = 本地 GGUF 工具；off = 关闭 */
+    val memoryToolMode: Flow<String> =
+        context.dataStore.data.map { it[K.memoryToolMode] ?: MemoryToolMode.API }
 
     /** 厂商 Embedding API 配置 */
     val memoryEmbeddingBaseUrl: Flow<String> =
@@ -170,6 +196,33 @@ class Prefs(private val context: Context) {
     /** 记忆检索勾选框的持久状态（会话间保持） */
     val memoryRetrievalEnabled: Flow<Boolean> =
         context.dataStore.data.map { it[K.memoryRetrievalEnabled] ?: false }
+
+    /** 记忆检索注入参考资料的区块数（5-20，默认 5） */
+    val memoryBlockQuota: Flow<Int> = context.dataStore.data.map {
+        val v = it[K.memoryBlockQuota] ?: MEMORY_BLOCK_QUOTA_MIN
+        v.coerceIn(MEMORY_BLOCK_QUOTA_MIN, MEMORY_BLOCK_QUOTA_MAX)
+    }
+
+    /** 记忆检索的范围偏好（随机匹配 / 最新章节优先 / 最早章节优先） */
+    val memorySearchScope: Flow<String> =
+        context.dataStore.data.map { it[K.memorySearchScope] ?: MemorySearchScope.RANDOM }
+
+    /**
+     * 向量化工具是否已配置可用：
+     * - 厂商 Embedding API：baseUrl / apiKey / 向量模型名三者都填齐；
+     * - 本地工具：已勾选（能勾选即表示两个本地模型都已下载就绪）；
+     * - 关闭：不可用。
+     * 只有配置可用时，记忆检索才允许勾选（否则检索必然失败）。
+     */
+    val memoryVectorizationReady: Flow<Boolean> = context.dataStore.data.map { p ->
+        when (p[K.memoryToolMode] ?: MemoryToolMode.API) {
+            MemoryToolMode.API -> !p[K.memoryEmbeddingBaseUrl].isNullOrBlank() &&
+                !p[K.memoryEmbeddingApiKey].isNullOrBlank() &&
+                !p[K.memoryEmbeddingModel].isNullOrBlank()
+            MemoryToolMode.LOCAL -> true
+            else -> false
+        }
+    }
 
     /** 阅读器排版：与编辑页排版互相独立 */
     val readerFormat: Flow<FormatSettings> = context.dataStore.data.map {
@@ -267,6 +320,10 @@ class Prefs(private val context: Context) {
         it[K.memoryAutoVectorize] = v
     }
     suspend fun setMemoryRetrievalEnabled(v: Boolean) = writePrefs { it[K.memoryRetrievalEnabled] = v }
+    suspend fun setMemoryBlockQuota(v: Int) = writePrefs {
+        it[K.memoryBlockQuota] = v.coerceIn(MEMORY_BLOCK_QUOTA_MIN, MEMORY_BLOCK_QUOTA_MAX)
+    }
+    suspend fun setMemorySearchScope(v: String) = writePrefs { it[K.memorySearchScope] = v }
     suspend fun setLastOpened(bookId: Long, chapterId: Long) = writePrefs {
         it[K.lastBookId] = bookId
         it[K.lastChapterId] = chapterId

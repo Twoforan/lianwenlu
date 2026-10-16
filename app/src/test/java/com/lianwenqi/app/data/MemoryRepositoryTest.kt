@@ -1,6 +1,8 @@
 package com.lianwenqi.app.data
 
 import com.lianwenqi.app.ai.EmbeddingClient
+import com.lianwenqi.app.ai.EmbeddingGateway
+import com.lianwenqi.app.ai.RemoteEmbeddingGateway
 import com.lianwenqi.app.data.dao.ChapterDao
 import com.lianwenqi.app.data.dao.ChunkHashRow
 import com.lianwenqi.app.data.dao.MemoryChunkDao
@@ -39,17 +41,6 @@ class MemoryRepositoryTest {
     private val jsonMedia = "application/json; charset=utf-8".toMediaType()
     private var httpCalls = 0
 
-    /** 与文本稳定对应的 4 维假向量：同文本必得同向量，自身相似度为 1（必定排最前） */
-    private fun fakeVector(text: String): FloatArray {
-        val h = text.hashCode()
-        return floatArrayOf(
-            ((h and 0xff) + 1).toFloat(),
-            (((h shr 8) and 0xff) + 1).toFloat(),
-            (((h shr 16) and 0xff) + 1).toFloat(),
-            (((h shr 24) and 0xff) + 1).toFloat()
-        )
-    }
-
     private fun embeddingClient(): EmbeddingClient {
         val okhttp = OkHttpClient.Builder().addInterceptor { chain ->
             httpCalls++
@@ -76,7 +67,11 @@ class MemoryRepositoryTest {
         volumeDao: VolumeDao,
         chunkDao: MemoryChunkDao,
         config: EmbeddingConfig = EmbeddingConfig("https://api.test/v1", "sk-abc", "m")
-    ) = MemoryRepository(chapterDao, volumeDao, chunkDao, embeddingClient(), { config }, { it() })
+    ) = MemoryRepository(
+        chapterDao, volumeDao, chunkDao,
+        RemoteEmbeddingGateway(embeddingClient()) { config },
+        { it() }
+    )
 
     // ---------- fake DAO ----------
 
@@ -110,6 +105,8 @@ class MemoryRepositoryTest {
 
         override suspend fun vectorizedChapterIds(bookId: Long) =
             rows.filter { it.bookId == bookId }.map { it.chapterId }.distinct()
+
+        override suspend fun anyDim(bookId: Long) = rows.firstOrNull { it.bookId == bookId }?.dim
 
         override fun observeVectorizedChapters(bookId: Long): Flow<List<Long>> = flowOf(emptyList())
     }
@@ -265,8 +262,9 @@ class MemoryRepositoryTest {
             ),
             FakeVolumeDao(emptyList()),
             chunkDao,
-            EmbeddingClient(okhttp),
-            { EmbeddingConfig("https://api.test/v1", "sk-abc", "m") },
+            RemoteEmbeddingGateway(EmbeddingClient(okhttp)) {
+                EmbeddingConfig("https://api.test/v1", "sk-abc", "m")
+            },
             { it() }
         )
         var last: VectorizeProgress? = null
@@ -298,6 +296,73 @@ class MemoryRepositoryTest {
     }
 
     @Test
+    fun retrieve_reordersCandidatesByRerankScore() = runTest {
+        val chunkDao = FakeChunkDao()
+        val texts = listOf("甲片段", "乙片段", "丙片段")
+        chunkDao.rows.addAll(
+            texts.mapIndexed { i, text ->
+                MemoryChunk(
+                    // 三块分属不同章节，避开「每章最多 2 块」的配额
+                    bookId = 1, volumeId = null, chapterId = (7 + i).toLong(), chunkIndex = i, text = text,
+                    hash = "h$i", chapterUpdatedAt = 1L, dim = 4, vector = encodeVector(fakeVector(text))
+                )
+            }
+        )
+        // 重排分数全 0（等价于厂商 API 无重排）：顺序就是余弦召回顺序
+        val byCosine = MemoryRepository(
+            FakeChapterDao(emptyList()), FakeVolumeDao(emptyList()), chunkDao,
+            FakeGateway(), { it() }
+        ).retrieve(1, "甲片段", topK = 3)
+        // 重排给「越靠后的候选分数越高」：最终顺序应为余弦顺序的反序
+        val reranked = MemoryRepository(
+            FakeChapterDao(emptyList()), FakeVolumeDao(emptyList()), chunkDao,
+            FakeGateway(rerankScores = { n -> FloatArray(n) { it.toFloat() } }), { it() }
+        ).retrieve(1, "甲片段", topK = 3)
+
+        assertEquals(3, byCosine.size)
+        assertEquals(byCosine.reversed(), reranked)
+    }
+
+    @Test
+    fun retrieve_excludesCurrentChapterAndCapsChunksPerChapter() = runTest {
+        val chunkDao = FakeChunkDao()
+        // 所有块向量相同 → 余弦全为 1（并列），召回顺序即入库顺序，便于断言
+        fun row(chapterId: Long, index: Int, text: String) = MemoryChunk(
+            bookId = 1, volumeId = null, chapterId = chapterId, chunkIndex = index, text = text,
+            hash = "h-$chapterId-$index", chapterUpdatedAt = 1L, dim = 2,
+            vector = encodeVector(floatArrayOf(1f, 0f))
+        )
+        chunkDao.rows.addAll(
+            listOf(
+                row(7, 0, "当前章片段"),
+                row(8, 0, "第八章甲"),
+                row(8, 1, "第八章乙"),
+                row(8, 2, "第八章丙"),
+                row(9, 0, "第九章甲")
+            )
+        )
+        val gateway = object : EmbeddingGateway {
+            override suspend fun embed(texts: List<String>) =
+                Result.success(texts.map { floatArrayOf(1f, 0f) })
+
+            override suspend fun rerank(query: String, candidates: List<String>) =
+                Result.success(FloatArray(candidates.size))
+
+            override suspend fun dimension() = 2
+        }
+        val result = MemoryRepository(
+            FakeChapterDao(emptyList()), FakeVolumeDao(emptyList()), chunkDao, gateway, { it() }
+        ).retrieve(1, "任意查询", topK = 5, excludeChapterId = 7)
+
+        // 当前章（7）被排除
+        assertTrue(result.none { it == "当前章片段" })
+        // 第八章只保留 2 块，剩下的名额让给了第九章
+        assertEquals(3, result.size)
+        assertEquals(2, result.count { it.startsWith("第八章") })
+        assertTrue(result.contains("第九章甲"))
+    }
+
+    @Test
     fun retrieve_returnsEmptyWhenNoChunks() = runTest {
         val repo = repository(FakeChapterDao(emptyList()), FakeVolumeDao(emptyList()), FakeChunkDao())
         assertTrue(repo.retrieve(1, "任意查询", topK = 5).isEmpty())
@@ -323,4 +388,32 @@ class MemoryRepositoryTest {
         val v = fakeVector("任意")
         assertEquals(v.toList(), decodeVector(encodeVector(v)).toList())
     }
+}
+
+/** 与文本稳定对应的 4 维假向量：同文本必得同向量，自身相似度为 1（必定排最前） */
+private fun fakeVector(text: String): FloatArray {
+    val h = text.hashCode()
+    return floatArrayOf(
+        ((h and 0xff) + 1).toFloat(),
+        (((h shr 8) and 0xff) + 1).toFloat(),
+        (((h shr 16) and 0xff) + 1).toFloat(),
+        (((h shr 24) and 0xff) + 1).toFloat()
+    )
+}
+
+/**
+ * 测试用最小 [EmbeddingGateway]：embed 用 [fakeVector]，rerank 分数由 [rerankScores] 决定。
+ * 默认返回全 0，等价于「厂商 API 无重排」。
+ */
+private class FakeGateway(
+    private val dim: Int = 4,
+    private val rerankScores: (Int) -> FloatArray = { FloatArray(it) }
+) : EmbeddingGateway {
+    override suspend fun embed(texts: List<String>): Result<List<FloatArray>> =
+        Result.success(texts.map { fakeVector(it) })
+
+    override suspend fun rerank(query: String, candidates: List<String>): Result<FloatArray> =
+        Result.success(rerankScores(candidates.size))
+
+    override suspend fun dimension(): Int = dim
 }

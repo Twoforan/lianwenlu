@@ -205,6 +205,10 @@ interface MemoryChunkDao {
     @Query("SELECT DISTINCT chapterId FROM memory_chunk WHERE bookId = :bookId")
     suspend fun vectorizedChapterIds(bookId: Long): List<Long>
 
+    /** 本书已存向量的维度（取任意一块）；未向量化返回 null。用于检测换模型后的维度变化 */
+    @Query("SELECT dim FROM memory_chunk WHERE bookId = :bookId LIMIT 1")
+    suspend fun anyDim(bookId: Long): Int?
+
     @Query("SELECT DISTINCT chapterId FROM memory_chunk WHERE bookId = :bookId")
     fun observeVectorizedChapters(bookId: Long): Flow<List<Long>>
 }
