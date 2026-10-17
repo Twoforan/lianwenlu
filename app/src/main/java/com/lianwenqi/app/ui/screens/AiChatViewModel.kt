@@ -10,6 +10,7 @@ import com.lianwenqi.app.data.MemoryGateway
 import com.lianwenqi.app.data.SendChatMessageUseCase
 import com.lianwenqi.app.data.SendChatRequest
 import com.lianwenqi.app.data.VectorizeProgress
+import com.lianwenqi.app.data.decodeOutlineFields
 import com.lianwenqi.app.data.entity.AiModel
 import com.lianwenqi.app.data.entity.Book
 import com.lianwenqi.app.data.entity.BookGroup
@@ -104,6 +105,10 @@ class AiChatViewModel(
 
     private val _outline = MutableStateFlow<List<OutlineItem>>(emptyList())
     val outline: StateFlow<List<OutlineItem>> = _outline.asStateFlow()
+
+    /** 当前书籍被「常驻化」的大纲分类标签集合（供大纲选择筛选与适配性筛选判断） */
+    private val _pinnedOutlineCategories = MutableStateFlow<Set<String>>(emptySet())
+    val pinnedOutlineCategories: StateFlow<Set<String>> = _pinnedOutlineCategories.asStateFlow()
 
     private val _volumes = MutableStateFlow<List<Volume>>(emptyList())
     val volumes: StateFlow<List<Volume>> = _volumes.asStateFlow()
@@ -407,10 +412,12 @@ class AiChatViewModel(
             _chapters.value = emptyList()
             _outline.value = emptyList()
             _volumes.value = emptyList()
+            _pinnedOutlineCategories.value = emptySet()
         } else {
             _chapters.value = ids.flatMap { bookRepository.getChapters(it) }
             _outline.value = ids.flatMap { outlineRepository.getOutline(it) }
             _volumes.value = ids.flatMap { bookRepository.getVolumes(it) }
+            _pinnedOutlineCategories.value = ids.flatMap { prefs.pinnedOutlineCategories(it) }.toSet()
         }
     }
 
@@ -574,6 +581,14 @@ class AiChatViewModel(
             if (selectedOutlineIds.value.containsAll(all) && all.isNotEmpty()) emptySet() else all
     }
 
+    /** 整组勾选 / 取消勾选给定的大纲条目（大纲选择里的「全选」按当前筛选范围调用） */
+    fun toggleOutlines(ids: Set<Long>) {
+        if (ids.isEmpty()) return
+        selectedOutlineIds.value =
+            if (ids.all { it in selectedOutlineIds.value }) selectedOutlineIds.value - ids
+            else selectedOutlineIds.value + ids
+    }
+
     /** 大纲中某个分类（人设 / 世界观 / 故事大纲 / 灵感库 / 自定义标签）整组勾选 */
     fun toggleOutlineCategory(category: String) {
         val all = _outline.value.filter { it.category == category }.map { it.id }
@@ -689,8 +704,15 @@ class AiChatViewModel(
         selectedChapterIds.value = contextChapterIds()
         chapterAllSelected.value = true
         if (prefs.aiOutlineFirstRound.first()) {
-            // 「首轮全选大纲」：把全部大纲写进首轮前缀，后续轮次靠前缀复用不再改写
-            selectedOutlineIds.value = _outline.value.map { it.id }.toSet()
+            // 「首轮全选大纲」：把大纲写进首轮前缀，后续轮次靠前缀复用不再改写。
+            // 开启「适配性筛选」时改为只全选「常驻化」分类下的全部内容，
+            // 非常驻化分类的条目改由发送时按本章梗概动态匹配注入。
+            val adaptive = prefs.prefixAdaptiveFilterEnabled.first()
+            val pinned = _pinnedOutlineCategories.value
+            selectedOutlineIds.value = _outline.value
+                .filter { !adaptive || it.category in pinned }
+                .map { it.id }
+                .toSet()
         } else {
             val remembered = prefs.aiContextMemory(bookId)?.outlineIds.orEmpty().toSet()
             selectedOutlineIds.value = _outline.value.filter { it.id in remembered }.map { it.id }.toSet()
@@ -876,7 +898,8 @@ class AiChatViewModel(
         // 长期记忆检索命中片段同样挂在本轮用户消息尾端落库（进入历史对话的上下文部分最后），不写会话前缀。
         val prefix = prepareSessionPrefix(sid)
         val memoryRef = memoryReferenceForText(text)
-        val extra = listOf(prefix.newReference, chapterBlockSuffix(), memoryRef)
+        // 顺序：新增参考资料 → 本章梗概 → 检索片段（片段参考资料）→ 适配性筛选新增大纲资料 → 用户提示词
+        val extra = listOf(prefix.newReference, chapterBlockSuffix(), memoryRef, prefix.autoOutlineMaterial)
             .filter { it.isNotBlank() }
             .joinToString("\n\n")
         val userId = chatRepository.addMessage(
@@ -1168,6 +1191,33 @@ class AiChatViewModel(
             sp = sp.copy(checkedOutlines = outlineIds)
         }
 
+        // 「适配性筛选」：非常驻化分类下的条目，用「本章梗概」匹配其「显示标签」，
+        // 命中的条目（此前未提交过的）渲染成「新增大纲资料」，随当轮用户消息在检索片段之后、
+        // 提示词之前注入；已提交过的 id 记入 [SessionPrefix.autoOutlineIds]，后续不重复提交。
+        var autoOutlineMaterial = ""
+        if (outlineOn && prefs.prefixAdaptiveFilterEnabled.first()) {
+            val summary = fixedChapterId?.let { bookRepository.getChapter(it)?.summary.orEmpty() }.orEmpty()
+            if (summary.isNotBlank()) {
+                val pinned = _pinnedOutlineCategories.value
+                val matchedIds = _outline.value
+                    .filter { it.category !in pinned }
+                    .filter { item ->
+                        val head = outlineHeadOf(item)
+                        head.isNotBlank() && summary.contains(head)
+                    }
+                    .map { it.id }
+                val freshIds = matchedIds.filterNot { it in sp.autoOutlineIds }
+                if (freshIds.isNotEmpty()) {
+                    val freshEntries = freshIds.mapNotNull { renderOutlineEntry(it) }
+                    sp = sp.copy(autoOutlineIds = sp.autoOutlineIds + freshIds)
+                    val text = sp.renderEntries(emptyList(), freshEntries, emptyList())
+                    if (text.isNotBlank()) {
+                        autoOutlineMaterial = "以下是新增大纲资料，请在写作时参考：\n$text"
+                    }
+                }
+            }
+        }
+
         if (session != null && sp.encode() != original) {
             chatRepository.updateSessionPrefix(sid, sp.encode())
         }
@@ -1177,8 +1227,15 @@ class AiChatViewModel(
             reference = sp.renderReference(includeChapters = contextOn, includeOutlines = outlineOn),
             contextOn = contextOn,
             outlineOn = outlineOn,
-            newReference = if (appended.isBlank()) "" else "以下是新增参考资料，请在写作时参考：\n$appended"
+            newReference = if (appended.isBlank()) "" else "以下是新增参考资料，请在写作时参考：\n$appended",
+            autoOutlineMaterial = autoOutlineMaterial
         )
+    }
+
+    /** 大纲条目的「显示标签」值：内容首项的值，为空时回落条目标题 */
+    private fun outlineHeadOf(item: OutlineItem): String {
+        val fields = decodeOutlineFields(item.content)
+        return fields.firstOrNull()?.second?.ifBlank { item.title } ?: item.title
     }
 
     /** 只读取已冻结的会话前缀（重新生成 / 编辑重发等不新增用户消息的场景），不做任何写入 */
@@ -1227,7 +1284,9 @@ class AiChatViewModel(
         val contextOn: Boolean,
         val outlineOn: Boolean,
         /** 本轮新勾选内容渲染出的文本（挂到当轮用户消息尾端），无新增时为空 */
-        val newReference: String = ""
+        val newReference: String = "",
+        /** 「适配性筛选」本轮新命中的大纲资料（挂在检索片段之后、用户提示词之前），无新增时为空 */
+        val autoOutlineMaterial: String = ""
     )
 
     /**

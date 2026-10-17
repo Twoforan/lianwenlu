@@ -172,6 +172,10 @@ data class AiModel(
     val isDefault: Boolean = false,
     /** 预设提示词 */
     val systemPrompt: String = "",
+    /** 是否开启思考/推理模式；默认开启 */
+    val reasoningEnabled: Boolean = true,
+    /** 思考强度档位存储值：low / medium / high / max（低/中/高/极）；默认最高强度 */
+    val reasoningLevel: String = "max",
     /** true：用户手动创建的模型，模型标识可修改；false：来自厂商列表，模型标识只读 */
     val custom: Boolean = false
 ) {
@@ -312,7 +316,14 @@ data class SessionPrefix(
      */
     val tailBooks: List<Long> = emptyList(),
     val tailOutlines: List<Long> = emptyList(),
-    val tailChapters: List<Long> = emptyList()
+    val tailChapters: List<Long> = emptyList(),
+    /**
+     * 「适配性筛选」动态命中的大纲条目 id（只增不减）：
+     * 开启适配性筛选后，非常驻化分类下「显示标签」被本章梗概命中的条目，
+     * 其完整字段（表）作为「新增大纲资料」随当轮用户消息落库；记录 id 后，
+     * 后续重复命中的条目不再重复提交，只有新命中的才追加。
+     */
+    val autoOutlineIds: List<Long> = emptyList()
 ) {
     fun encode(): String = prefixJson.encodeToString(serializer(), this)
 

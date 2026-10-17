@@ -67,7 +67,35 @@ data class ChatCompletionRequest(
     val temperature: Float? = null,
     @SerialName("max_tokens") val maxTokens: Int? = null,
     val stream: Boolean = false,
-    @SerialName("stream_options") val streamOptions: StreamOptions? = null
+    @SerialName("stream_options") val streamOptions: StreamOptions? = null,
+    /** OpenAI 推理系（o1/o3/o4/gpt-5 等）的思考强度：low / medium / high */
+    @SerialName("reasoning_effort") val reasoningEffort: String? = null,
+    /** 开关型思考（智谱 GLM、豆包 seed 等）：thinking.type = enabled / disabled */
+    val thinking: ThinkingParam? = null,
+    /** 通义千问系的思考开关与思考预算 */
+    @SerialName("chat_template_kwargs") val chatTemplateKwargs: ChatTemplateKwargs? = null
+)
+
+/** OpenAI 兼容接口的 thinking 开关（{"type":"enabled"|"disabled"}） */
+@Serializable
+data class ThinkingParam(val type: String)
+
+/** 通义千问的思考开关（chat_template_kwargs） */
+@Serializable
+data class ChatTemplateKwargs(
+    @SerialName("enable_thinking") val enableThinking: Boolean,
+    @SerialName("thinking_budget") val thinkingBudget: Int? = null
+)
+
+/** Responses API 的思考强度（reasoning.effort） */
+@Serializable
+data class ResponsesReasoningParam(val effort: String? = null)
+
+/** Anthropic 扩展思考（thinking.type + budget_tokens） */
+@Serializable
+data class AnthropicThinking(
+    val type: String,
+    @SerialName("budget_tokens") val budgetTokens: Int? = null
 )
 
 /** 流式请求时要求服务端在最后一个分片中返回 usage（必须真正发送，故强制编码默认值） */
@@ -144,7 +172,9 @@ data class ResponsesRequest(
      * GPT 的缓存路由键：带上同一个名字，服务端会把请求尽量分派到存有你前缀缓存的那台机器，
      * 从而提高缓存命中率（名字相同的请求每分钟不要超过 15 次）。
      */
-    @SerialName("prompt_cache_key") val promptCacheKey: String? = null
+    @SerialName("prompt_cache_key") val promptCacheKey: String? = null,
+    /** 思考强度（GPT/o 系在 responses 接口下用 reasoning.effort） */
+    val reasoning: ResponsesReasoningParam? = null
 )
 
 @Serializable
@@ -196,7 +226,11 @@ data class ModelEndpoint(
     val maxTokens: Int = 2048,
     /** 携带的历史消息条数上限 */
     val maxContext: Int = 20,
-    val systemPrompt: String = ""
+    val systemPrompt: String = "",
+    /** 是否开启思考/推理模式（默认开启） */
+    val reasoningEnabled: Boolean = true,
+    /** 思考强度档位存储值：low / medium / high / max（默认最高强度） */
+    val reasoningLevel: String = ReasoningLevel.DEFAULT.storage
 )
 
 // ---------- Anthropic Messages 协议 DTO（/v1/messages） ----------
@@ -227,7 +261,9 @@ data class AnthropicRequest(
     val system: List<AnthropicBlock>? = null,
     val messages: List<AnthropicMessage>,
     val temperature: Float? = null,
-    val stream: Boolean = false
+    val stream: Boolean = false,
+    /** 扩展思考：thinking.type = enabled + budget_tokens */
+    val thinking: AnthropicThinking? = null
 )
 
 @Serializable

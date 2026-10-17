@@ -164,12 +164,64 @@ class AiClient(
             turns.forEach { add(ChatMessageDto(it.role.name.lowercase(), it.content)) }
         }
 
+    /**
+     * 按「标准化 → 查表映射 → 夹取」得到该模型在当前接口下真正要注入的思考参数。
+     * 关闭思考或模型不支持时返回空（不发送任何思考参数，保持与旧版本一致的行为）。
+     */
+    private fun reasoningFields(endpoint: ModelEndpoint, apiType: ApiType): ReasoningFields {
+        val plan = reasoningPlan(endpoint.modelName, endpoint.reasoningLevel)
+        val on = endpoint.reasoningEnabled
+        return when (plan.style) {
+            // OpenAI 推理系：只有开启时才发 reasoning_effort（o 系无法真正关闭思考，故关闭时不发）
+            ReasoningStyle.OPENAI_EFFORT -> when {
+                !on -> ReasoningFields()
+                apiType == ApiType.CHAT_COMPLETIONS ->
+                    ReasoningFields(effort = ReasoningLevel.effortValue(plan.level))
+                apiType == ApiType.RESPONSES ->
+                    ReasoningFields(reasoning = ResponsesReasoningParam(ReasoningLevel.effortValue(plan.level)))
+                else -> ReasoningFields()
+            }
+            // DeepSeek V4 系：reasoning_effort 一个参数同时控制开关与强度，关闭时发 none
+            ReasoningStyle.DEEPSEEK -> if (apiType == ApiType.CHAT_COMPLETIONS) {
+                ReasoningFields(
+                    effort = if (on) ReasoningLevel.deepseekEffortValue(plan.level) else "none"
+                )
+            } else ReasoningFields()
+            // Anthropic 扩展思考：仅 anthropic 接口生效；关闭时不发（Claude 默认不思考）
+            ReasoningStyle.ANTHROPIC -> if (on && apiType == ApiType.ANTHROPIC_MESSAGES) {
+                val budget = ReasoningLevel.budgetTokens(plan.level)
+                ReasoningFields(
+                    anthropicThinking = AnthropicThinking("enabled", budget),
+                    requiredMaxTokens = budget + REASONING_MAX_TOKENS_GAP
+                )
+            } else ReasoningFields()
+            // 通义千问：用 chat_template_kwargs 显式开关（关闭也要发 false，否则默认开启）
+            ReasoningStyle.QWEN -> if (apiType == ApiType.CHAT_COMPLETIONS) {
+                ReasoningFields(
+                    kwargs = ChatTemplateKwargs(
+                        enableThinking = on,
+                        thinkingBudget = if (on) ReasoningLevel.budgetTokens(plan.level) else null
+                    )
+                )
+            } else ReasoningFields()
+            // 开关型 thinking：显式发 enabled / disabled
+            ReasoningStyle.TOGGLE -> if (apiType == ApiType.CHAT_COMPLETIONS) {
+                ReasoningFields(thinking = ThinkingParam(if (on) "enabled" else "disabled"))
+            } else ReasoningFields()
+            ReasoningStyle.UNSUPPORTED -> ReasoningFields()
+        }
+    }
+
     private suspend fun chatCompletions(endpoint: ModelEndpoint, turns: List<ChatTurn>): AiResult {
+        val rf = reasoningFields(endpoint, ApiType.CHAT_COMPLETIONS)
         val payload = ChatCompletionRequest(
             model = endpoint.modelName,
             messages = buildMessages(endpoint, turns),
             temperature = endpoint.temperature,
-            maxTokens = endpoint.maxTokens.takeIf { it > 0 }
+            maxTokens = endpoint.maxTokens.takeIf { it > 0 },
+            reasoningEffort = rf.effort,
+            thinking = rf.thinking,
+            chatTemplateKwargs = rf.kwargs
         )
         val body = json.encodeToString(ChatCompletionRequest.serializer(), payload)
             .toRequestBody(JSON_MEDIA)
@@ -205,13 +257,17 @@ class AiClient(
         turns: List<ChatTurn>,
         onDelta: (String, String) -> Unit
     ): AiResult {
+        val rf = reasoningFields(endpoint, ApiType.CHAT_COMPLETIONS)
         val payload = ChatCompletionRequest(
             model = endpoint.modelName,
             messages = buildMessages(endpoint, turns),
             temperature = endpoint.temperature,
             maxTokens = endpoint.maxTokens.takeIf { it > 0 },
             stream = true,
-            streamOptions = StreamOptions(true)
+            streamOptions = StreamOptions(true),
+            reasoningEffort = rf.effort,
+            thinking = rf.thinking,
+            chatTemplateKwargs = rf.kwargs
         )
         val body = json.encodeToString(ChatCompletionRequest.serializer(), payload)
             .toRequestBody(JSON_MEDIA)
@@ -293,7 +349,8 @@ class AiClient(
             temperature = endpoint.temperature,
             maxOutputTokens = endpoint.maxTokens.takeIf { it > 0 },
             instructions = endpoint.systemPrompt.ifBlank { null },
-            promptCacheKey = cacheKey(endpoint)
+            promptCacheKey = cacheKey(endpoint),
+            reasoning = reasoningFields(endpoint, ApiType.RESPONSES).reasoning
         )
         val body = json.encodeToString(ResponsesRequest.serializer(), payload)
             .toRequestBody(JSON_MEDIA)
@@ -334,7 +391,8 @@ class AiClient(
             maxOutputTokens = endpoint.maxTokens.takeIf { it > 0 },
             instructions = endpoint.systemPrompt.ifBlank { null },
             stream = true,
-            promptCacheKey = cacheKey(endpoint)
+            promptCacheKey = cacheKey(endpoint),
+            reasoning = reasoningFields(endpoint, ApiType.RESPONSES).reasoning
         )
         val body = json.encodeToString(ResponsesRequest.serializer(), payload)
             .toRequestBody(JSON_MEDIA)
@@ -463,15 +521,19 @@ class AiClient(
             msgs[i] = msgs[i].copy(content = blocks)
         }
 
+        val rf = reasoningFields(endpoint, ApiType.ANTHROPIC_MESSAGES)
+        val thinking = rf.anthropicThinking
+        val baseMax = endpoint.maxTokens.takeIf { it > 0 } ?: ANTHROPIC_DEFAULT_MAX_TOKENS
         return AnthropicRequest(
             model = endpoint.modelName,
-            // Anthropic 的 max_tokens 必填；用户选「不限」时给一个足够大的值
-            maxTokens = endpoint.maxTokens.takeIf { it > 0 } ?: ANTHROPIC_DEFAULT_MAX_TOKENS,
+            // Anthropic 的 max_tokens 必填；开启思考时需大于思考预算，否则会被服务端拒绝
+            maxTokens = if (thinking != null) maxOf(baseMax, rf.requiredMaxTokens) else baseMax,
             system = system.ifEmpty { null },
             messages = msgs,
-            // Anthropic 的 temperature 取值范围是 0~1，超出会被拒绝
-            temperature = endpoint.temperature.coerceIn(0f, 1f),
-            stream = stream
+            // Anthropic 的 temperature 取值范围是 0~1；开启思考时不允许改温度（省略即用默认 1）
+            temperature = if (thinking != null) null else endpoint.temperature.coerceIn(0f, 1f),
+            stream = stream,
+            thinking = thinking
         )
     }
 
@@ -610,6 +672,9 @@ class AiClient(
         /** 用户选「不限输出」时，Anthropic 仍要求填 max_tokens，这里给一个足够大的默认值 */
         private const val ANTHROPIC_DEFAULT_MAX_TOKENS = 8192
 
+        /** 开启思考时，Anthropic 的 max_tokens 需比思考预算多出的余量，留给正文输出 */
+        private const val REASONING_MAX_TOKENS_GAP = 1024
+
         fun defaultClient(): OkHttpClient = OkHttpClient.Builder()
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(180, TimeUnit.SECONDS)
@@ -617,3 +682,19 @@ class AiClient(
             .build()
     }
 }
+
+/** 一次请求要注入的思考参数（按当前接口类型取用；全为 null 表示不注入任何思考参数） */
+private class ReasoningFields(
+    /** chat completions 的 reasoning_effort */
+    val effort: String? = null,
+    /** chat completions 的 thinking 开关（GLM / 豆包等） */
+    val thinking: ThinkingParam? = null,
+    /** chat completions 的 chat_template_kwargs（千问） */
+    val kwargs: ChatTemplateKwargs? = null,
+    /** responses 接口的 reasoning.effort */
+    val reasoning: ResponsesReasoningParam? = null,
+    /** anthropic 接口的 thinking 配置 */
+    val anthropicThinking: AnthropicThinking? = null,
+    /** 开启 anthropic 思考时，max_tokens 至少要达到的值 */
+    val requiredMaxTokens: Int = 0
+)
