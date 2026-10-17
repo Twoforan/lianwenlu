@@ -155,6 +155,7 @@ fun AiChatScreen(initialBookId: Long?) {
     val outline by vm.outline.collectAsState()
     val volumes by vm.volumes.collectAsState()
     val groups by vm.groups.collectAsState()
+    val pinnedCats by vm.pinnedOutlineCategories.collectAsState()
     val selBooks by vm.selectedBookIds.collectAsState()
     val selChapters by vm.selectedChapterIds.collectAsState()
     val selOutline by vm.selectedOutlineIds.collectAsState()
@@ -545,7 +546,9 @@ fun AiChatScreen(initialBookId: Long?) {
         OutlinePickerDialog(
             items = outline,
             selected = selOutline,
+            pinnedCategories = pinnedCats,
             onToggle = { vm.toggleOutline(it) },
+            onToggleAll = { vm.toggleOutlines(it) },
             onDismiss = { showOutline = false }
         )
     }
@@ -921,6 +924,7 @@ private fun AiAssistantPanel(
     val outline by vm.outline.collectAsState()
     val selChapters by vm.selectedChapterIds.collectAsState()
     val selOutline by vm.selectedOutlineIds.collectAsState()
+    val pinnedCats by vm.pinnedOutlineCategories.collectAsState()
     val summaryOn by vm.currentSummaryOn.collectAsState()
     val incContent by vm.includeContent.collectAsState()
     val incSummary by vm.includeSummary.collectAsState()
@@ -940,7 +944,6 @@ private fun AiAssistantPanel(
     val contextChapters = chapters.filter { it.id != chapterId }
     val modelName = models.firstOrNull { it.id == activeModelId }?.displayName ?: "未选择模型"
     val allSelected = contextChapters.isNotEmpty() && selChapters.containsAll(contextChapters.map { it.id })
-    val allOutlineSelected = outline.isNotEmpty() && selOutline.containsAll(outline.map { it.id })
 
     // 底部按钮对应的展开面板：context / outline / prompt
     var openPanel by remember { mutableStateOf<String?>(null) }
@@ -1097,8 +1100,8 @@ private fun AiAssistantPanel(
                 "outline" -> OutlinePicker(
                     items = outline,
                     selected = selOutline,
-                    allSelected = allOutlineSelected,
-                    onToggleAll = { vm.selectAllOutline() },
+                    pinnedCategories = pinnedCats,
+                    onToggleAll = { vm.toggleOutlines(it) },
                     onToggle = { vm.toggleOutline(it) },
                     onToggleCategory = { vm.toggleOutlineCategory(it) }
                 )
@@ -1614,13 +1617,24 @@ private fun ChapterRow(
 private fun OutlinePicker(
     items: List<OutlineItem>,
     selected: Set<Long>,
-    allSelected: Boolean,
-    onToggleAll: () -> Unit,
+    pinnedCategories: Set<String>,
+    onToggleAll: (Set<Long>) -> Unit,
     onToggle: (Long) -> Unit,
     onToggleCategory: (String) -> Unit
 ) {
     // 各分类（人设 / 世界观 / 故事大纲 / 灵感库 / 自定义标签）的收起状态（默认展开）
     val collapsed = remember { mutableStateMapOf<String, Boolean>() }
+    // 常驻 / 普通大纲筛选：0=全部，1=常驻，2=普通
+    var scopeFilter by remember { mutableIntStateOf(0) }
+    val visible = items.filter {
+        when (scopeFilter) {
+            1 -> it.category in pinnedCategories
+            2 -> it.category !in pinnedCategories
+            else -> true
+        }
+    }
+    val visibleIds = visible.map { it.id }.toSet()
+    val visibleAllSelected = visibleIds.isNotEmpty() && visibleIds.all { it in selected }
     Column(Modifier.padding(bottom = 8.dp)) {
         PickerBox(
             title = "选择大纲",
@@ -1633,14 +1647,18 @@ private fun OutlinePicker(
             }
         ) {
             Row(
-                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                SmallChip("全选", allSelected, onToggleAll)
+                SmallChip("全选", visibleAllSelected, { onToggleAll(visibleIds) })
+                SmallChip("全部大纲", scopeFilter == 0, { scopeFilter = 0 })
+                SmallChip("常驻大纲", scopeFilter == 1, { scopeFilter = 1 })
+                SmallChip("普通大纲", scopeFilter == 2, { scopeFilter = 2 })
             }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Column(Modifier.heightIn(max = 240.dp).verticalScroll(rememberScrollState())) {
-                if (items.isEmpty()) {
+                if (visible.isEmpty()) {
                     Text(
                         "暂无可选大纲",
                         Modifier.padding(14.dp),
@@ -1648,7 +1666,7 @@ private fun OutlinePicker(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                items.groupBy { it.category }.forEach { (category, list) ->
+                visible.groupBy { it.category }.forEach { (category, list) ->
                     val expanded = collapsed[category] != true
                     VolumeRow(
                         label = outlineCategoryLabel(category),
@@ -2710,27 +2728,38 @@ private fun ChapterPickerDialog(
     )
 }
 
-/** 大纲多选弹窗：按标签分类筛选 + 搜索标题 / 内容 */
+/** 大纲多选弹窗：按标签分类筛选 + 搜索标题 / 内容；支持常驻 / 普通大纲筛选 */
 @Composable
 private fun OutlinePickerDialog(
     items: List<OutlineItem>,
     selected: Set<Long>,
+    pinnedCategories: Set<String>,
     onToggle: (Long) -> Unit,
+    onToggleAll: (Set<Long>) -> Unit,
     onDismiss: () -> Unit
 ) {
     var search by remember { mutableStateOf("") }
     // 标签筛选：null=全部，否则为分类存储值
     var categoryFilter by remember { mutableStateOf<String?>(null) }
+    // 常驻筛选：0=全部，1=常驻，2=普通
+    var scopeFilter by remember { mutableIntStateOf(0) }
     val categories = items.map { it.category }.distinct()
 
     val filtered = items.filter { item ->
         val matchCategory = categoryFilter == null || item.category == categoryFilter
+        val matchScope = when (scopeFilter) {
+            1 -> item.category in pinnedCategories
+            2 -> item.category !in pinnedCategories
+            else -> true
+        }
         val q = search.trim()
         val matchSearch = q.isBlank() ||
             item.title.contains(q, ignoreCase = true) ||
             item.content.contains(q, ignoreCase = true)
-        matchCategory && matchSearch
+        matchCategory && matchScope && matchSearch
     }
+    val filteredIds = filtered.map { it.id }.toSet()
+    val filteredAllSelected = filteredIds.isNotEmpty() && filteredIds.all { it in selected }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -2745,13 +2774,27 @@ private fun OutlinePickerDialog(
                     modifier = Modifier.fillMaxWidth()
                 )
                 Spacer(Modifier.height(8.dp))
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    FilterChip(selected = scopeFilter == 0, onClick = { scopeFilter = 0 },
+                        label = { Text("全部大纲") })
+                    FilterChip(selected = scopeFilter == 1, onClick = { scopeFilter = 1 },
+                        label = { Text("常驻大纲") })
+                    FilterChip(selected = scopeFilter == 2, onClick = { scopeFilter = 2 },
+                        label = { Text("普通大纲") })
+                    FilterChip(selected = filteredAllSelected, onClick = { onToggleAll(filteredIds) },
+                        label = { Text("全选/取消") }, enabled = filteredIds.isNotEmpty())
+                }
+                Spacer(Modifier.height(4.dp))
                 if (categories.size > 1) {
                     Row(
                         Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         FilterChip(selected = categoryFilter == null, onClick = { categoryFilter = null },
-                            label = { Text("全部") })
+                            label = { Text("全部标签") })
                         categories.forEach { c ->
                             FilterChip(selected = categoryFilter == c, onClick = { categoryFilter = c },
                                 label = { Text(outlineCategoryLabel(c)) })

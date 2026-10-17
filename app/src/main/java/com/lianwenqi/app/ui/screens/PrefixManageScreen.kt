@@ -54,9 +54,14 @@ class PrefixManageViewModel(private val container: AppContainer) : ViewModel() {
     val customText: StateFlow<String> =
         prefs.prefixCustomText.stateIn(viewModelScope, SharingStarted.Eagerly, "")
 
+    /** 适配性筛选（默认关闭） */
+    val adaptiveFilter: StateFlow<Boolean> =
+        prefs.prefixAdaptiveFilterEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
     fun setContextEnabled(v: Boolean) = viewModelScope.launch { prefs.setPrefixContextEnabled(v) }
     fun setOutlineEnabled(v: Boolean) = viewModelScope.launch { prefs.setPrefixOutlineEnabled(v) }
     fun setCustomText(v: String) = viewModelScope.launch { prefs.setPrefixCustomText(v) }
+    fun setAdaptiveFilter(v: Boolean) = viewModelScope.launch { prefs.setPrefixAdaptiveFilterEnabled(v) }
 }
 
 /**
@@ -69,6 +74,7 @@ fun PrefixManageScreen(onBack: () -> Unit) {
     val vm = appViewModel { PrefixManageViewModel(it) }
     val contextEnabled by vm.contextEnabled.collectAsState()
     val outlineEnabled by vm.outlineEnabled.collectAsState()
+    val adaptiveFilter by vm.adaptiveFilter.collectAsState()
     val savedText by vm.customText.collectAsState()
     // 输入框用本地状态，避免每次写入 DataStore 后回传造成光标跳动
     var editing by remember { mutableStateOf<String?>(null) }
@@ -119,6 +125,23 @@ fun PrefixManageScreen(onBack: () -> Unit) {
                     )
                 }
                 Switch(checked = outlineEnabled, onCheckedChange = { vm.setOutlineEnabled(it) })
+            }
+            Spacer(Modifier.height(12.dp))
+            HorizontalDivider()
+            Spacer(Modifier.height(12.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("适配性筛选")
+                    Text(
+                        "开启后，首轮全选大纲改为只选「常驻化」分类下的全部内容；" +
+                            "发送提示词时，自动用本章梗概匹配「非常驻化」分类下各条目的显示标签，" +
+                            "命中的条目把其下完整字段（表）作为「新增大纲资料」在检索片段之后、提示词之前" +
+                            "提交给 AI（已命中的不重复提交）。关闭则维持现状：首轮全选全部大纲",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(checked = adaptiveFilter, onCheckedChange = { vm.setAdaptiveFilter(it) })
             }
             Spacer(Modifier.height(12.dp))
             HorizontalDivider()

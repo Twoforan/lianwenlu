@@ -107,6 +107,9 @@ class Prefs(private val context: Context) {
         // 前缀词管理：自定义前缀（纯文本）
         val prefixCustomText = stringPreferencesKey("prefix_custom_text")
 
+        // 前缀词管理：适配性筛选（默认关闭）
+        val prefixAdaptiveFilter = booleanPreferencesKey("prefix_adaptive_filter_enabled")
+
         // 长期记忆（书本向量化）：向量化工具（互斥）、默认开启、自动续跑、默认勾选检索
         val memoryToolMode = stringPreferencesKey("memory_tool_mode")
         val memoryEmbeddingBaseUrl = stringPreferencesKey("memory_embedding_base_url")
@@ -181,6 +184,10 @@ class Prefs(private val context: Context) {
 
     /** 「自定义前缀」：纯文本，新建会话前缀时取一次并冻结在该会话中 */
     val prefixCustomText: Flow<String> = context.dataStore.data.map { it[K.prefixCustomText] ?: "" }
+
+    /** 「适配性筛选」：开启后首轮只全选「常驻化」分类下的大纲，非常驻大纲按本章梗概动态匹配注入（默认关闭） */
+    val prefixAdaptiveFilterEnabled: Flow<Boolean> =
+        context.dataStore.data.map { it[K.prefixAdaptiveFilter] ?: false }
 
     /** 向量化工具（互斥）：api = 厂商 Embedding API；local = 本地 GGUF 工具；off = 关闭 */
     val memoryToolMode: Flow<String> =
@@ -308,6 +315,7 @@ class Prefs(private val context: Context) {
     suspend fun setPrefixContextEnabled(v: Boolean) = writePrefs { it[K.prefixContextEnabled] = v }
     suspend fun setPrefixOutlineEnabled(v: Boolean) = writePrefs { it[K.prefixOutlineEnabled] = v }
     suspend fun setPrefixCustomText(v: String) = writePrefs { it[K.prefixCustomText] = v }
+    suspend fun setPrefixAdaptiveFilterEnabled(v: Boolean) = writePrefs { it[K.prefixAdaptiveFilter] = v }
     suspend fun setMemoryToolMode(v: String) = writePrefs { it[K.memoryToolMode] = v }
     suspend fun setMemoryEmbeddingBaseUrl(v: String) = writePrefs { it[K.memoryEmbeddingBaseUrl] = v }
     suspend fun setMemoryEmbeddingApiKey(v: String) = writePrefs { it[K.memoryEmbeddingApiKey] = v }
@@ -451,6 +459,24 @@ class Prefs(private val context: Context) {
 
     private fun outlineCategoriesKey(bookId: Long) =
         stringPreferencesKey("outline_categories_$bookId")
+
+    // ---------------- 大纲分类「常驻化」 ----------------
+
+    /** 某本书被「常驻化」的大纲分类标签（存储值集合）；未设置过时返回空集 */
+    suspend fun pinnedOutlineCategories(bookId: Long): Set<String> {
+        val raw = context.dataStore.data.first()[pinnedOutlineCategoriesKey(bookId)] ?: return emptySet()
+        return runCatching {
+            Json.decodeFromString(ListSerializer(String.serializer()), raw)
+        }.getOrNull()?.toSet() ?: emptySet()
+    }
+
+    suspend fun setPinnedOutlineCategories(bookId: Long, keys: Set<String>) {
+        val json = Json.encodeToString(ListSerializer(String.serializer()), keys.toList())
+        writePrefs { it[pinnedOutlineCategoriesKey(bookId)] = json }
+    }
+
+    private fun pinnedOutlineCategoriesKey(bookId: Long) =
+        stringPreferencesKey("outline_pinned_cats_$bookId")
 
     private suspend fun <T> Flow<T>.firstValue(): T = first()
 }

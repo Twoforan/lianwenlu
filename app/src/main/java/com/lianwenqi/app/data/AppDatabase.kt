@@ -43,7 +43,7 @@ import com.lianwenqi.app.data.entity.Volume
         ChatMessage::class,
         MemoryChunk::class
     ],
-    version = 12,
+    version = 13,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
@@ -169,13 +169,21 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /** v13：模型新增「思考模式开关」与「思考强度档位」（默认开启、最高强度） */
+        private val MIGRATION_12_13 = object : Migration(12, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE ai_model ADD COLUMN reasoningEnabled INTEGER NOT NULL DEFAULT 1")
+                db.execSQL("ALTER TABLE ai_model ADD COLUMN reasoningLevel TEXT NOT NULL DEFAULT 'max'")
+            }
+        }
+
         fun get(context: Context): AppDatabase =
             INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
                     context.applicationContext,
                     AppDatabase::class.java,
                     "lianwenqi.db"
-                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12).build().also { INSTANCE = it }
+                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13).build().also { INSTANCE = it }
             }
     }
 }

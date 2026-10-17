@@ -78,7 +78,9 @@ class ConfigRepository(
             temperature = model.temperature,
             maxTokens = model.maxTokens,
             maxContext = model.maxContext,
-            systemPrompt = model.systemPrompt
+            systemPrompt = model.systemPrompt,
+            reasoningEnabled = model.reasoningEnabled,
+            reasoningLevel = model.reasoningLevel
         )
     }
 

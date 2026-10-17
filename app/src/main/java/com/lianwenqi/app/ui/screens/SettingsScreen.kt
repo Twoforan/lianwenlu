@@ -71,6 +71,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lianwenqi.app.AppContainer
 import com.lianwenqi.app.ai.AiException
+import com.lianwenqi.app.ai.ReasoningLevel
 import com.lianwenqi.app.data.entity.AiModel
 import com.lianwenqi.app.data.entity.ApiType
 import com.lianwenqi.app.data.entity.Prompt
@@ -763,6 +764,8 @@ private fun AddModelDialog(
     var unlimited by remember { mutableStateOf(false) }
     var maxContext by remember { mutableStateOf(20) }
     var systemPrompt by remember { mutableStateOf("") }
+    var reasoningEnabled by remember { mutableStateOf(true) }
+    var reasoningLevel by remember { mutableStateOf(ReasoningLevel.DEFAULT.storage) }
     var remote by remember { mutableStateOf<List<String>>(emptyList()) }
     var error by remember { mutableStateOf<String?>(null) }
     var showRemote by remember { mutableStateOf(false) }
@@ -784,6 +787,8 @@ private fun AddModelDialog(
                             maxTokens = if (unlimited) 0 else maxTokens,
                             maxContext = maxContext,
                             systemPrompt = systemPrompt,
+                            reasoningEnabled = reasoningEnabled,
+                            reasoningLevel = reasoningLevel,
                             custom = !fromRemote
                         )
                     )
@@ -834,6 +839,14 @@ private fun AddModelDialog(
             onUnlimitedChange = { unlimited = it }
         )
         MaxContextSetting(maxContext = maxContext, onContextChange = { maxContext = it })
+        Spacer(Modifier.height(12.dp))
+        ReasoningSetting(
+            enabled = reasoningEnabled,
+            level = reasoningLevel,
+            onEnabledChange = { reasoningEnabled = it },
+            onLevelChange = { reasoningLevel = it }
+        )
+        Spacer(Modifier.height(12.dp))
         OutlinedTextField(
             value = systemPrompt,
             onValueChange = { systemPrompt = it },
@@ -859,6 +872,8 @@ private fun ModelDetailDialog(
     var unlimited by remember { mutableStateOf(model.maxTokens <= 0) }
     var maxContext by remember { mutableStateOf(model.maxContext) }
     var systemPrompt by remember { mutableStateOf(model.systemPrompt) }
+    var reasoningEnabled by remember { mutableStateOf(model.reasoningEnabled) }
+    var reasoningLevel by remember { mutableStateOf(model.reasoningLevel) }
 
     InputDialog(
         title = "模型设置",
@@ -882,7 +897,9 @@ private fun ModelDetailDialog(
                             temperature = temperature,
                             maxTokens = if (unlimited) 0 else maxTokens,
                             maxContext = maxContext,
-                            systemPrompt = systemPrompt
+                            systemPrompt = systemPrompt,
+                            reasoningEnabled = reasoningEnabled,
+                            reasoningLevel = reasoningLevel
                         )
                     )
                 }
@@ -916,6 +933,14 @@ private fun ModelDetailDialog(
             onUnlimitedChange = { unlimited = it }
         )
         MaxContextSetting(maxContext = maxContext, onContextChange = { maxContext = it })
+        Spacer(Modifier.height(12.dp))
+        ReasoningSetting(
+            enabled = reasoningEnabled,
+            level = reasoningLevel,
+            onEnabledChange = { reasoningEnabled = it },
+            onLevelChange = { reasoningLevel = it }
+        )
+        Spacer(Modifier.height(12.dp))
         OutlinedTextField(
             value = systemPrompt,
             onValueChange = { systemPrompt = it },
@@ -1004,4 +1029,44 @@ private fun MaxContextSetting(maxContext: Int, onContextChange: (Int) -> Unit) {
         style = MaterialTheme.typography.labelSmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant
     )
+}
+
+/** 思考模式：开关 + 思考强度档位（低 / 中 / 高 / 极）；关闭即关闭模型的思考/推理 */
+@Composable
+private fun ReasoningSetting(
+    enabled: Boolean,
+    level: String,
+    onEnabledChange: (Boolean) -> Unit,
+    onLevelChange: (String) -> Unit
+) {
+    val current = ReasoningLevel.normalize(level)
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text("思考模式", style = MaterialTheme.typography.bodyMedium)
+        Spacer(Modifier.weight(1f))
+        Switch(checked = enabled, onCheckedChange = onEnabledChange)
+    }
+    Text(
+        if (enabled) "已开启：模型先思考再作答，可调思考强度"
+        else "已关闭：模型直接作答，不做思考/推理",
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+    if (enabled) {
+        Spacer(Modifier.height(8.dp))
+        Text("思考强度：${current.label}")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            ReasoningLevel.ordered.forEach { lv ->
+                FilterChip(
+                    selected = lv == current,
+                    onClick = { onLevelChange(lv.storage) },
+                    label = { Text(lv.label) }
+                )
+            }
+        }
+        Text(
+            "低 → 极：数值越大，模型思考越充分（不同模型支持的最高强度不同，超出部分会自动取该模型的最大值）",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
 }

@@ -51,6 +51,7 @@ import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material.icons.filled.DriveFileMove
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -124,6 +125,7 @@ fun BookDetailScreen(
     val chapters by vm.chapters.collectAsState()
     val outline by vm.outline.collectAsState()
     val categories by vm.categories.collectAsState()
+    val pinnedCategories by vm.pinnedCategories.collectAsState()
 
     var desc by remember { mutableStateOf(false) }
     var tab by remember { mutableStateOf(0) }
@@ -246,11 +248,13 @@ fun BookDetailScreen(
                     bookId = bookId,
                     outline = outline,
                     categories = categories,
+                    pinnedCategories = pinnedCategories,
                     loadFields = { c -> vm.outlineFields(c) ?: defaultOutlineFields(c) },
                     onSaveFields = { c, names -> vm.saveOutlineFields(c, names) },
                     onAddCategory = { vm.addCategory(it) },
                     onDeleteCategory = { vm.deleteCategory(it) },
                     onRenameCategory = { k, n -> vm.renameCategory(k, n) },
+                    onTogglePinned = { vm.togglePinnedCategory(it) },
                     onSave = { vm.saveOutline(it) },
                     onDelete = { vm.deleteOutline(it) },
                     onMove = { item, cat -> vm.moveOutline(item, cat) }
@@ -476,11 +480,13 @@ private fun OutlineTab(
     bookId: Long,
     outline: List<OutlineItem>,
     categories: List<String>,
+    pinnedCategories: Set<String>,
     loadFields: suspend (String) -> List<String>,
     onSaveFields: (String, List<String>) -> Unit,
     onAddCategory: (String) -> Unit,
     onDeleteCategory: (String) -> Unit,
     onRenameCategory: (String, String) -> Unit,
+    onTogglePinned: (String) -> Unit,
     onSave: (OutlineItem) -> Unit,
     onDelete: (Long) -> Unit,
     onMove: (OutlineItem, String) -> Unit
@@ -514,11 +520,12 @@ private fun OutlineTab(
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 categories.forEach { key ->
-                    // 长按标签弹出「编辑名称 / 删除」菜单
+                    // 长按标签弹出「常驻化 / 编辑名称 / 删除」菜单
                     Box {
                         CategoryChip(
                             label = outlineCategoryLabel(key),
                             selected = key == category,
+                            pinned = key in pinnedCategories,
                             onClick = { category = key },
                             onLongClick = { labelMenu = key }
                         )
@@ -526,6 +533,13 @@ private fun OutlineTab(
                             expanded = labelMenu == key,
                             onDismissRequest = { labelMenu = null }
                         ) {
+                            DropdownMenuItem(
+                                text = { Text(if (key in pinnedCategories) "取消常驻化" else "常驻化") },
+                                onClick = {
+                                    labelMenu = null
+                                    onTogglePinned(key)
+                                }
+                            )
                             DropdownMenuItem(
                                 text = { Text("编辑名称") },
                                 onClick = {
@@ -663,12 +677,13 @@ private fun OutlineTab(
     }
 }
 
-/** 顶部分类标签（可长按删除） */
+/** 顶部分类标签（可长按删除）；[pinned] 为真时在标签前显示图钉图标表示已常驻化 */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun CategoryChip(
     label: String,
     selected: Boolean,
+    pinned: Boolean = false,
     onClick: () -> Unit,
     onLongClick: () -> Unit
 ) {
@@ -682,13 +697,26 @@ private fun CategoryChip(
         ),
         modifier = Modifier.combinedClickable(onClick = onClick, onLongClick = onLongClick)
     ) {
-        Text(
-            label,
+        Row(
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
-            style = MaterialTheme.typography.labelLarge,
-            color = if (selected) MaterialTheme.colorScheme.primary
-            else MaterialTheme.colorScheme.onSurface
-        )
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (pinned) {
+                Icon(
+                    Icons.Filled.PushPin,
+                    contentDescription = "已常驻化",
+                    modifier = Modifier.size(14.dp),
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Spacer(Modifier.width(4.dp))
+            }
+            Text(
+                label,
+                style = MaterialTheme.typography.labelLarge,
+                color = if (selected) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.onSurface
+            )
+        }
     }
 }
 
