@@ -58,10 +58,15 @@ class PrefixManageViewModel(private val container: AppContainer) : ViewModel() {
     val adaptiveFilter: StateFlow<Boolean> =
         prefs.prefixAdaptiveFilterEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
+    /** 首轮全选大纲与章节（默认关闭） */
+    val outlineFirstRound: StateFlow<Boolean> =
+        prefs.aiOutlineFirstRound.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
     fun setContextEnabled(v: Boolean) = viewModelScope.launch { prefs.setPrefixContextEnabled(v) }
     fun setOutlineEnabled(v: Boolean) = viewModelScope.launch { prefs.setPrefixOutlineEnabled(v) }
     fun setCustomText(v: String) = viewModelScope.launch { prefs.setPrefixCustomText(v) }
     fun setAdaptiveFilter(v: Boolean) = viewModelScope.launch { prefs.setPrefixAdaptiveFilterEnabled(v) }
+    fun setOutlineFirstRound(v: Boolean) = viewModelScope.launch { prefs.setAiOutlineFirstRound(v) }
 }
 
 /**
@@ -75,6 +80,7 @@ fun PrefixManageScreen(onBack: () -> Unit) {
     val contextEnabled by vm.contextEnabled.collectAsState()
     val outlineEnabled by vm.outlineEnabled.collectAsState()
     val adaptiveFilter by vm.adaptiveFilter.collectAsState()
+    val outlineFirstRound by vm.outlineFirstRound.collectAsState()
     val savedText by vm.customText.collectAsState()
     // 输入框用本地状态，避免每次写入 DataStore 后回传造成光标跳动
     var editing by remember { mutableStateOf<String?>(null) }
@@ -142,6 +148,22 @@ fun PrefixManageScreen(onBack: () -> Unit) {
                     )
                 }
                 Switch(checked = adaptiveFilter, onCheckedChange = { vm.setAdaptiveFilter(it) })
+            }
+            Spacer(Modifier.height(12.dp))
+            HorizontalDivider()
+            Spacer(Modifier.height(12.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("首轮全选大纲与章节")
+                    Text(
+                        "新建「跟书」会话时默认全选大纲与章节（梗概默认全部纳入、正文默认不纳入，" +
+                            "可在「选择上下文」里按卷 / 章节逐项调整）。两项内容由本页在首轮写入会话前缀并保持稳定，" +
+                            "只有重新勾选才改写前缀。「本章梗概」只写进本轮提示词、不进前缀，避免打断缓存。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(checked = outlineFirstRound, onCheckedChange = { vm.setOutlineFirstRound(it) })
             }
             Spacer(Modifier.height(12.dp))
             HorizontalDivider()

@@ -406,7 +406,12 @@ fun ChapterEditorScreen(
                         }) {
                             Icon(Icons.AutoMirrored.Filled.List, contentDescription = "返回书籍")
                         }
-                        IconButton(onClick = { vm.createChapter(null) { newId -> currentId = newId } }) {
+                        IconButton(onClick = {
+                            vm.createChapter(null) { newId ->
+                                currentId = newId
+                                aiOpen = true
+                            }
+                        }) {
                             Icon(Icons.Filled.Add, contentDescription = "新建章节")
                         }
                         IconButton(
@@ -651,10 +656,10 @@ fun ChapterEditorScreen(
                 if (content.text.isBlank()) writeAiToChapter(text) else pendingAiWrite = text
             },
             onNewChapter = {
-                // 新建章节并收起抽屉，直接跳转到新章节
+                // 新建章节后跳转到新章节，并保持侧边 AI 对话栏打开
                 vm.createChapter(null) { newId ->
                     currentId = newId
-                    aiOpen = false
+                    aiOpen = true
                 }
             }
         )

@@ -41,8 +41,8 @@ class SendChatMessageUseCaseTest {
             bookIds: List<Long>,
             chapterIds: List<Long>,
             outlineIds: List<Long>,
-            includeContent: Boolean,
-            includeSummary: Boolean
+            contentChapterIds: Set<Long>,
+            summaryChapterIds: Set<Long>
         ): String {
             buildContextCallCount++
             return context
@@ -63,7 +63,9 @@ class SendChatMessageUseCaseTest {
             promptExtra: String,
             promptTokens: Int,
             completionTokens: Int,
-            cachedTokens: Int
+            cachedTokens: Int,
+            chapterId: Long,
+            promptLog: String
         ): Long {
             savedMessages.add(
                 ChatMessage(
@@ -77,7 +79,9 @@ class SendChatMessageUseCaseTest {
                     promptExtra = promptExtra,
                     promptTokens = promptTokens,
                     completionTokens = completionTokens,
-                    cachedTokens = cachedTokens
+                    cachedTokens = cachedTokens,
+                    chapterId = chapterId,
+                    promptLog = promptLog
                 )
             )
             return savedMessages.size.toLong()

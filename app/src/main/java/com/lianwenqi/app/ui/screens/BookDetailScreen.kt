@@ -5,8 +5,10 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -78,12 +80,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
@@ -94,6 +98,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
+import com.lianwenqi.app.data.entity.Book
 import com.lianwenqi.app.data.entity.Chapter
 import com.lianwenqi.app.data.entity.OutlineCategory
 import com.lianwenqi.app.data.entity.OutlineItem
@@ -104,7 +109,9 @@ import com.lianwenqi.app.data.entity.Volume
 import com.lianwenqi.app.data.entity.outlineCategoryLabel
 import com.lianwenqi.app.ui.appViewModel
 import com.lianwenqi.app.ui.components.BookCover
+import com.lianwenqi.app.util.ExportUtil
 import com.lianwenqi.app.util.TextTool
+import kotlinx.coroutines.launch
 
 /** 全屏排序页的排序对象 */
 private sealed interface SortTarget {
@@ -130,6 +137,7 @@ fun BookDetailScreen(
     var desc by remember { mutableStateOf(false) }
     var tab by remember { mutableStateOf(0) }
     var sortTarget by remember { mutableStateOf<SortTarget?>(null) }
+    var batchManage by remember { mutableStateOf(false) }
     var showNewChapter by remember { mutableStateOf(false) }
 
     val target = sortTarget
@@ -152,6 +160,23 @@ fun BookDetailScreen(
                     is SortTarget.Chapters -> vm.reorderChapterIds(ids)
                 }
             }
+        )
+        return
+    }
+
+    // 章节批量管理：全屏页
+    if (batchManage) {
+        BatchManagePage(
+            book = book,
+            volumes = volumes,
+            chapters = chapters,
+            onBack = { batchManage = false },
+            onReorder = { vm.reorderChapterIds(it) },
+            onMoveToVolume = { ids, vid -> vm.moveChaptersToVolume(ids, vid) },
+            onMoveToNewVolume = { ids -> vm.createVolumeAndMoveChapters(ids) },
+            onDelete = { ids -> vm.deleteChapters(ids) },
+            onMerge = { ids -> vm.mergeChapters(ids) },
+            onRenumber = { vm.renumberChapters() }
         )
         return
     }
@@ -241,7 +266,7 @@ fun BookDetailScreen(
                     onRenameVolume = { v, t -> vm.renameVolume(v, t) },
                     onRenameChapter = { c, t -> vm.renameChapter(c, t) },
                     onSortVolumes = { sortTarget = SortTarget.Volumes },
-                    onSortChapters = { vid, vtitle -> sortTarget = SortTarget.Chapters(vid, vtitle) }
+                    onBatchManage = { batchManage = true }
                 )
             } else {
                 OutlineTab(
@@ -287,7 +312,7 @@ private fun CatalogTab(
     onRenameVolume: (Volume, String) -> Unit,
     onRenameChapter: (Chapter, String) -> Unit,
     onSortVolumes: () -> Unit,
-    onSortChapters: (Long?, String) -> Unit
+    onBatchManage: () -> Unit
 ) {
     // 默认只展开「上次最新编辑章节」所属的分卷，其他分卷收起；
     // 用户手动展开 / 收起后记入 collapsedOverride，之后不再随数据变化重置
@@ -408,11 +433,7 @@ private fun CatalogTab(
         is Chapter -> ActionMenuDialog(
             title = target.title,
             actions = listOf(
-                "排序" to {
-                    val v = volumes.firstOrNull { it.id == target.volumeId }
-                    onSortChapters(target.volumeId, v?.title ?: "未分卷")
-                    menuTarget = null
-                },
+                "批量管理" to { onBatchManage(); menuTarget = null },
                 "重命名" to { renameTarget = target; menuTarget = null },
                 "删除章节" to { deleteChapterTarget = target; menuTarget = null }
             ),
@@ -1130,6 +1151,303 @@ private fun SortPage(
                     )
                 }
                 HorizontalDivider()
+            }
+        }
+    }
+}
+
+/** 批量操作区的一个文字按钮 */
+private data class BatchAction(
+    val label: String,
+    val enabled: Boolean = true,
+    val danger: Boolean = false,
+    val onClick: () -> Unit
+)
+
+/**
+ * 全屏章节批量管理页：多选 + 拖拽排序 + 批量操作（移动 / 删除 / 合并 / 导出 / 序号重排）。
+ * 与 [SortPage] 一样是 Screen 内的全屏覆盖层，返回即退出批量模式。
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun BatchManagePage(
+    book: Book?,
+    volumes: List<Volume>,
+    chapters: List<Chapter>,
+    onBack: () -> Unit,
+    onReorder: (List<Long>) -> Unit,
+    onMoveToVolume: (List<Long>, Long?) -> Unit,
+    onMoveToNewVolume: (List<Long>) -> Unit,
+    onDelete: (List<Long>) -> Unit,
+    onMerge: (List<Long>) -> Unit,
+    onRenumber: () -> Unit
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val order = remember { mutableStateListOf<Chapter>() }
+    val selected = remember { mutableStateOf(setOf<Long>()) }
+    val listState = rememberLazyListState()
+    var draggingIndex by remember { mutableStateOf(-1) }
+    var dragOffset by remember { mutableStateOf(0f) }
+    var showMovePicker by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableStateOf(false) }
+    var confirmMerge by remember { mutableStateOf(false) }
+
+    // 以数据库顺序为准重建列表，并剔除已不存在的选中项
+    LaunchedEffect(chapters) {
+        order.clear()
+        order.addAll(chapters)
+        selected.value = selected.value.intersect(chapters.map { it.id }.toSet())
+    }
+
+    val allSelected = order.isNotEmpty() && order.all { it.id in selected.value }
+    val selectedIds = order.filter { it.id in selected.value }.map { it.id }
+
+    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        // 顶栏：返回 / 居中标题（实时显示已选数量）/ 全选
+        Box(Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.statusBars)) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = onBack) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                }
+                Spacer(Modifier.weight(1f))
+                TextButton(
+                    enabled = order.isNotEmpty(),
+                    onClick = {
+                        selected.value = if (allSelected) emptySet() else order.map { it.id }.toSet()
+                    }
+                ) { Text(if (allSelected) "取消全选" else "全选") }
+            }
+            Text(
+                "批量管理(${selected.value.size})",
+                modifier = Modifier.align(Alignment.Center),
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+        }
+        HorizontalDivider()
+
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.weight(1f),
+            contentPadding = PaddingValues(vertical = 4.dp)
+        ) {
+            itemsIndexed(order, key = { _, c -> c.id }) { index, chapter ->
+                val currentIndex by rememberUpdatedState(index)
+                val checked = chapter.id in selected.value
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .zIndex(if (index == draggingIndex) 1f else 0f)
+                        .graphicsLayer { translationY = if (index == draggingIndex) dragOffset else 0f }
+                        .background(
+                            if (index == draggingIndex) MaterialTheme.colorScheme.secondaryContainer
+                            else MaterialTheme.colorScheme.surface
+                        )
+                        .clickable {
+                            selected.value =
+                                if (checked) selected.value - chapter.id else selected.value + chapter.id
+                        }
+                        .padding(start = 12.dp, end = 4.dp, top = 10.dp, bottom = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // 圆形勾选框
+                    Box(
+                        Modifier
+                            .size(22.dp)
+                            .clip(CircleShape)
+                            .background(
+                                if (checked) MaterialTheme.colorScheme.primary else Color.Transparent
+                            )
+                            .border(
+                                2.dp,
+                                if (checked) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.outline,
+                                CircleShape
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (checked) {
+                            Icon(
+                                Icons.Filled.Check,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onPrimary,
+                                modifier = Modifier.size(14.dp)
+                            )
+                        }
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Text(
+                        chapter.title,
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodyLarge,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        "${TextTool.countWords(chapter.content)}字",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    // 拖拽手柄：按住即可拖动调整顺序（拖动结束即时落库）
+                    Box(
+                        Modifier
+                            .size(40.dp)
+                            .pointerInput(Unit) {
+                                detectDragGestures(
+                                    onDragStart = {
+                                        draggingIndex = currentIndex
+                                        dragOffset = 0f
+                                    },
+                                    onDrag = { change, amount ->
+                                        change.consume()
+                                        dragOffset += amount.y
+                                        val info = listState.layoutInfo.visibleItemsInfo
+                                            .firstOrNull { it.index == draggingIndex }
+                                            ?: return@detectDragGestures
+                                        val center = info.offset + dragOffset + info.size / 2f
+                                        val targetItem = listState.layoutInfo.visibleItemsInfo
+                                            .firstOrNull { center >= it.offset && center <= it.offset + it.size }
+                                            ?: return@detectDragGestures
+                                        if (targetItem.index != draggingIndex) {
+                                            val moved = order.removeAt(draggingIndex)
+                                            order.add(targetItem.index, moved)
+                                            dragOffset = info.offset + dragOffset - targetItem.offset
+                                            draggingIndex = targetItem.index
+                                        }
+                                    },
+                                    onDragEnd = {
+                                        draggingIndex = -1
+                                        dragOffset = 0f
+                                        onReorder(order.map { it.id })
+                                    },
+                                    onDragCancel = {
+                                        draggingIndex = -1
+                                        dragOffset = 0f
+                                    }
+                                )
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.Filled.DragHandle,
+                            contentDescription = "拖动排序",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                }
+                HorizontalDivider()
+            }
+        }
+
+        // 底部批量操作区：两行三列
+        Surface(
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+            shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
+            shadowElevation = 12.dp
+        ) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .windowInsetsPadding(WindowInsets.navigationBars)
+                    .padding(horizontal = 8.dp, vertical = 8.dp)
+            ) {
+                BatchActionRow(
+                    listOf(
+                        BatchAction("移动至", enabled = selectedIds.isNotEmpty()) { showMovePicker = true },
+                        BatchAction("删除所选", enabled = selectedIds.isNotEmpty(), danger = true) {
+                            confirmDelete = true
+                        },
+                        BatchAction("合并为单章", enabled = selectedIds.size >= 2) { confirmMerge = true }
+                    )
+                )
+                BatchActionRow(
+                    listOf(
+                        BatchAction("合并生成TXT", enabled = selectedIds.isNotEmpty()) {
+                            book?.let { b ->
+                                val sel = order.filter { it.id in selected.value }
+                                scope.launch {
+                                    val f = ExportUtil.chaptersToTxt(context, b, sel)
+                                    ExportUtil.shareFile(context, f, "text/plain", "分享章节")
+                                }
+                            }
+                        },
+                        BatchAction("合并生成WORD", enabled = selectedIds.isNotEmpty()) {
+                            book?.let { b ->
+                                val sel = order.filter { it.id in selected.value }
+                                scope.launch {
+                                    val f = ExportUtil.bookToWord(context, b, sel, singleFile = true)
+                                    ExportUtil.shareFile(context, f, "application/msword", "分享章节")
+                                }
+                            }
+                        },
+                        BatchAction("章节序号重排", enabled = order.isNotEmpty()) { onRenumber() }
+                    )
+                )
+            }
+        }
+    }
+
+    // 移动至：选择目标分卷（含新建分卷）
+    if (showMovePicker) {
+        val ids = selectedIds
+        ActionMenuDialog(
+            title = "移动至分卷（已选 ${ids.size} 章）",
+            actions = buildList {
+                add("（未分卷）" to { onMoveToVolume(ids, null); showMovePicker = false })
+                volumes.forEach { v -> add(v.title to { onMoveToVolume(ids, v.id); showMovePicker = false }) }
+                add("新建分卷并移入" to { onMoveToNewVolume(ids); showMovePicker = false })
+            },
+            onDismiss = { showMovePicker = false }
+        )
+    }
+
+    if (confirmDelete) {
+        val count = selectedIds.size
+        ConfirmDialog(
+            title = "删除已选的 $count 个章节？",
+            message = "所选章节的正文与梗概将无法恢复。",
+            onConfirm = { onDelete(selectedIds) },
+            onDismiss = { confirmDelete = false }
+        )
+    }
+
+    if (confirmMerge) {
+        val count = selectedIds.size
+        ConfirmDialog(
+            title = "将已选的 $count 个章节合并为单章？",
+            message = "合并后原章节将被删除，合并结果无法自动拆分。",
+            confirmText = "合并",
+            onConfirm = { onMerge(selectedIds) },
+            onDismiss = { confirmMerge = false }
+        )
+    }
+}
+
+/** 批量操作区的一行：三个等宽文字按钮 */
+@Composable
+private fun BatchActionRow(buttons: List<BatchAction>) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        buttons.forEach { b ->
+            TextButton(
+                onClick = b.onClick,
+                enabled = b.enabled,
+                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(horizontal = 2.dp, vertical = 6.dp),
+                colors = if (b.danger) ButtonDefaults.textButtonColors(
+                    contentColor = MaterialTheme.colorScheme.error
+                ) else ButtonDefaults.textButtonColors()
+            ) {
+                Text(
+                    b.label,
+                    style = MaterialTheme.typography.labelMedium,
+                    maxLines = 1,
+                    softWrap = false
+                )
             }
         }
     }

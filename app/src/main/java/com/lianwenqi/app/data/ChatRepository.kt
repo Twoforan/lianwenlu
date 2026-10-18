@@ -74,7 +74,9 @@ class ChatRepository(private val db: AppDatabase) : ChatGateway {
         promptExtra: String,
         promptTokens: Int,
         completionTokens: Int,
-        cachedTokens: Int
+        cachedTokens: Int,
+        chapterId: Long,
+        promptLog: String
     ): Long {
         val id = chatDao.insertMessage(
             ChatMessage(
@@ -88,7 +90,9 @@ class ChatRepository(private val db: AppDatabase) : ChatGateway {
                 promptExtra = promptExtra,
                 promptTokens = promptTokens,
                 completionTokens = completionTokens,
-                cachedTokens = cachedTokens
+                cachedTokens = cachedTokens,
+                chapterId = chapterId,
+                promptLog = promptLog
             )
         )
         chatDao.getSession(sessionId)?.let {
@@ -138,13 +142,13 @@ class ChatRepository(private val db: AppDatabase) : ChatGateway {
         }
     }
 
-    /** 按勾选的书籍 / 分卷 / 章节 / 人设 组装上下文 */
+    /** 按勾选的书籍 / 分卷 / 章节 / 人设 组装上下文（章节的梗概 / 正文逐章判定） */
     override suspend fun buildContext(
         bookIds: List<Long>,
         chapterIds: List<Long>,
         outlineIds: List<Long>,
-        includeContent: Boolean,
-        includeSummary: Boolean
+        contentChapterIds: Set<Long>,
+        summaryChapterIds: Set<Long>
     ): String {
         val sb = StringBuilder()
         bookIds.forEach { bid ->
@@ -175,10 +179,10 @@ class ChatRepository(private val db: AppDatabase) : ChatGateway {
         chapterIds.forEach { cid ->
             val ch = chapterDao.getById(cid) ?: return@forEach
             sb.append("【章节】").append(ch.title).append('\n')
-            if (includeSummary && ch.summary.isNotBlank()) {
+            if (cid in summaryChapterIds && ch.summary.isNotBlank()) {
                 sb.append("梗概：").append(ch.summary).append('\n')
             }
-            if (includeContent) sb.append("正文：").append(ch.content).append('\n')
+            if (cid in contentChapterIds) sb.append("正文：").append(ch.content).append('\n')
         }
         return sb.toString()
     }

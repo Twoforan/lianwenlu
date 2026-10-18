@@ -231,21 +231,39 @@ data class ChatMessage(
     val cachedTokens: Int = 0,
     /** 回答正文是否被用户收起；收起后再次打开会话仍保持收起 */
     val contentCollapsed: Boolean = false,
+    /**
+     * 本对话发生时所在章节 id（0 表示未绑定章节）。
+     * 用于把历史对话按章节分组后整组收起，新一轮对话记录的是发送当时所处的章节。
+     */
+    val chapterId: Long = 0,
+    /**
+     * 本轮发送时的提示词日志快照（JSON，见 [com.lianwenqi.app.data.PromptLog]）。
+     * 供「查看日志 / 查看本轮提示词」弹窗回显当时的预设、上下文与本轮提示词。
+     */
+    val promptLog: String = "",
     val createdAt: Long = System.currentTimeMillis()
 )
 
 /**
  * 一条消息发送时的上下文选择快照。
- * 编码为「书籍id|章节id|大纲id|含梗概|含正文」的紧凑字符串存入 [ChatMessage.contextSnapshot]。
+ * 编码为「书籍id|章节id|大纲id|梗概章节id|正文章节id|章节全选|梗概全选|正文全选|v2」的紧凑字符串，
+ * 存入 [ChatMessage.contextSnapshot]（旧格式为「书籍id|章节id|大纲id|含梗概|含正文|章节全选」，
+ * 解析时按旧语义把全局开关展开到当时的章节列表）。
  */
 data class ContextSnapshot(
     val bookIds: List<Long> = emptyList(),
     val chapterIds: List<Long> = emptyList(),
     val outlineIds: List<Long> = emptyList(),
-    val includeSummary: Boolean = true,
-    val includeContent: Boolean = true,
+    /** 纳入「梗概」的章节 id（与 [chapterIds] 取交集后生效） */
+    val summaryChapterIds: List<Long> = emptyList(),
+    /** 纳入「正文」的章节 id（与 [chapterIds] 取交集后生效） */
+    val contentChapterIds: List<Long> = emptyList(),
     /** 章节是否处于「全选」状态：为真时忽略 [chapterIds]，按当前书本的全部章节重新展开 */
-    val chapterAll: Boolean = false
+    val chapterAll: Boolean = false,
+    /** 梗概是否全选：为真时忽略 [summaryChapterIds]，按当前书本的全部章节重新展开 */
+    val summaryAll: Boolean = true,
+    /** 正文是否全选：为真时忽略 [contentChapterIds]，按当前书本的全部章节重新展开 */
+    val contentAll: Boolean = true
 ) {
     val isEmpty: Boolean
         get() = bookIds.isEmpty() && chapterIds.isEmpty() && outlineIds.isEmpty()
@@ -254,9 +272,12 @@ data class ContextSnapshot(
         bookIds.joinToString(","),
         chapterIds.joinToString(","),
         outlineIds.joinToString(","),
-        if (includeSummary) "1" else "0",
-        if (includeContent) "1" else "0",
-        if (chapterAll) "1" else "0"
+        summaryChapterIds.joinToString(","),
+        contentChapterIds.joinToString(","),
+        if (chapterAll) "1" else "0",
+        if (summaryAll) "1" else "0",
+        if (contentAll) "1" else "0",
+        "v2"
     ).joinToString("|")
 }
 
@@ -266,13 +287,31 @@ fun decodeContextSnapshot(raw: String): ContextSnapshot {
     val parts = raw.split("|")
     fun ids(part: String?): List<Long> =
         part?.split(",")?.mapNotNull { it.trim().toLongOrNull() } ?: emptyList()
+    if (parts.getOrNull(8) == "v2") {
+        return ContextSnapshot(
+            bookIds = ids(parts[0]),
+            chapterIds = ids(parts[1]),
+            outlineIds = ids(parts[2]),
+            summaryChapterIds = ids(parts[3]),
+            contentChapterIds = ids(parts[4]),
+            chapterAll = parts.getOrNull(5) == "1",
+            summaryAll = parts.getOrNull(6) == "1",
+            contentAll = parts.getOrNull(7) == "1"
+        )
+    }
+    // 旧格式：字段 3/4 为全局「含梗概 / 含正文」布尔，按当时的章节列表展开成集合
+    val chapters = ids(parts.getOrNull(1))
+    val summaryOn = parts.getOrNull(3) != "0"
+    val contentOn = parts.getOrNull(4) != "0"
     return ContextSnapshot(
         bookIds = ids(parts.getOrNull(0)),
-        chapterIds = ids(parts.getOrNull(1)),
+        chapterIds = chapters,
         outlineIds = ids(parts.getOrNull(2)),
-        includeSummary = parts.getOrNull(3) != "0",
-        includeContent = parts.getOrNull(4) != "0",
-        chapterAll = parts.getOrNull(5) == "1"
+        summaryChapterIds = if (summaryOn) chapters else emptyList(),
+        contentChapterIds = if (contentOn) chapters else emptyList(),
+        chapterAll = parts.getOrNull(5) == "1",
+        summaryAll = summaryOn,
+        contentAll = contentOn
     )
 }
 

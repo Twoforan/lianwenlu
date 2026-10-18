@@ -17,7 +17,9 @@ data class AiOutlineImportResult(
 
 /**
  * 把解析出的大纲区块写入某本书的作品大纲。
- * type → 分类标签（没有则新建）；name → 条目「显示标签」（同标签下重名时自动加序号）；
+ * type → 分类标签（没有则新建）；
+ * name → 条目「显示标签」：同一标签下已有同名条目时按其原有位置整条替换（字段全量覆盖），
+ * 没有同名的则作为新条目追加到该标签末尾；
  * fields → 条目字段（key 为字段名，value 为内容）。
  */
 class AiOutlineImporter(
@@ -42,16 +44,25 @@ class AiOutlineImporter(
             }
 
             val existing = outlineRepository.getOutline(bookId).filter { it.category == categoryKey }
-            val displayName = uniqueName(block.name, existing.map { displayNameOf(it) })
+            val displayName = block.name
             val fields = listOf(OUTLINE_HEAD_LABEL to displayName) + block.fields
+            // 同名条目替换：保留原 id 与排序位置，字段整条覆盖；其余作为新条目追加
+            val sameName = existing.firstOrNull { displayNameOf(it) == displayName }
             outlineRepository.saveOutline(
-                OutlineItem(
-                    bookId = bookId,
-                    category = categoryKey,
-                    title = displayName,
-                    content = encodeOutlineFields(fields),
-                    sortOrder = existing.size
-                )
+                if (sameName != null) {
+                    sameName.copy(
+                        title = displayName,
+                        content = encodeOutlineFields(fields)
+                    )
+                } else {
+                    OutlineItem(
+                        bookId = bookId,
+                        category = categoryKey,
+                        title = displayName,
+                        content = encodeOutlineFields(fields),
+                        sortOrder = existing.size
+                    )
+                }
             )
             items++
 
@@ -71,12 +82,4 @@ class AiOutlineImporter(
     /** 条目的对外显示名：首项「显示标签」的值，旧数据回落到标题 */
     private fun displayNameOf(item: OutlineItem): String =
         decodeOutlineFields(item.content).firstOrNull()?.second?.ifBlank { item.title } ?: item.title
-
-    /** 同一标签下重名时按「名称（2）」「名称（3）」…挑一个不重复的 */
-    private fun uniqueName(name: String, existing: List<String>): String {
-        if (name !in existing) return name
-        var i = 2
-        while ("$name（$i）" in existing) i++
-        return "$name（$i）"
-    }
 }

@@ -211,6 +211,86 @@ class BookRepository(private val db: AppDatabase) {
     suspend fun moveChapterToVolume(chapterId: Long, volumeId: Long?, order: Int) =
         chapterDao.moveToVolume(chapterId, volumeId, order)
 
+    /** 批量删除章节，剩余章节序号归一化为连续 */
+    suspend fun deleteChapters(bookId: Long, chapterIds: List<Long>) {
+        chapterIds.forEach { chapterDao.deleteById(it) }
+        normalizeChapterOrder(bookId)
+    }
+
+    /**
+     * 批量把章节移动到指定分卷：被移动章节保持原有相对顺序，追加到目标分卷末尾，
+     * 其余章节顺序不变。最后整体归一化 sortOrder。
+     */
+    suspend fun moveChaptersToVolume(bookId: Long, orderedIds: List<Long>, volumeId: Long?) {
+        val all = chapterDao.getByBook(bookId)
+        val idSet = orderedIds.toSet()
+        val moving = orderedIds.mapNotNull { id -> all.firstOrNull { it.id == id } }
+        if (moving.isEmpty()) return
+        // 目标分卷内（排除即将移入的）最后一章，移入章节追加其后
+        val lastInTarget = all.lastOrNull { it.volumeId == volumeId && it.id !in idSet }
+        val seq = mutableListOf<Chapter>()
+        all.filter { it.id !in idSet }.forEach { c ->
+            seq.add(c)
+            if (c.id == lastInTarget?.id) seq.addAll(moving)
+        }
+        if (lastInTarget == null) seq.addAll(moving)
+        seq.forEachIndexed { index, c ->
+            val vol = if (c.id in idSet) volumeId else c.volumeId
+            chapterDao.moveToVolume(c.id, vol, index)
+        }
+    }
+
+    /**
+     * 把若干章节按给定顺序合并为一章：标题取第一章，正文以各章标题作为分隔；
+     * 合并后删除原章节并归一化序号，返回新章节 id（无有效章节时返回 null）。
+     */
+    suspend fun mergeChapters(bookId: Long, orderedIds: List<Long>): Long? {
+        val all = chapterDao.getByBook(bookId)
+        val chosen = orderedIds.mapNotNull { id -> all.firstOrNull { it.id == id } }
+        if (chosen.isEmpty()) return null
+        val first = chosen.first()
+        val content = buildString {
+            chosen.forEach { c ->
+                append(c.title).append("\n\n")
+                if (c.content.isNotBlank()) append(c.content).append("\n\n")
+            }
+        }.trimEnd('\n')
+        val mergedId = chapterDao.insert(
+            Chapter(
+                bookId = bookId,
+                volumeId = first.volumeId,
+                title = first.title,
+                summary = first.summary,
+                content = content,
+                sortOrder = first.sortOrder
+            )
+        )
+        chosen.forEach { chapterDao.deleteById(it.id) }
+        touchBook(bookId, mergedId, first.title)
+        normalizeChapterOrder(bookId)
+        return mergedId
+    }
+
+    /** 章节序号重排：按当前顺序归一化 sortOrder，并按章节前缀重写各分卷内的标题编号 */
+    suspend fun renumberChapters(bookId: Long) {
+        val template = bookDao.getById(bookId)?.chapterPrefix ?: "第%n章"
+        val chapters = chapterDao.getByBook(bookId)
+        var order = 0
+        // 按分卷分组的迭代顺序即章节当前排序；卷内从 1 重新编号，未分卷章节单独成组
+        chapters.groupBy { it.volumeId }.forEach { (_, list) ->
+            list.forEachIndexed { i, c ->
+                chapterDao.update(c.copy(title = buildTitle(template, i + 1), sortOrder = order++))
+            }
+        }
+    }
+
+    /** 把整本书的章节 sortOrder 归一化为连续序号 */
+    private suspend fun normalizeChapterOrder(bookId: Long) {
+        chapterDao.getByBook(bookId).forEachIndexed { i, c ->
+            if (c.sortOrder != i) chapterDao.setOrder(c.id, i)
+        }
+    }
+
     suspend fun searchInBook(bookId: Long, keyword: String): List<Chapter> =
         if (keyword.isBlank()) emptyList() else chapterDao.searchInBook(bookId, keyword)
 }

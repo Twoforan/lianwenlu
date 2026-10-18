@@ -99,6 +99,19 @@ object ExportUtil {
         }
     }
 
+    /** 把选中的若干章节合并导出为单个 txt（不含分卷标题，章节标题作为分隔） */
+    fun chaptersToTxt(context: Context, book: Book, chapters: List<Chapter>): File {
+        val sb = StringBuilder()
+        sb.append(book.title).append("\n\n")
+        chapters.forEach { c ->
+            sb.append(c.title).append('\n')
+            sb.append(c.content).append("\n\n")
+        }
+        val file = File(exportDir(context), "${safeName(book.title)}.txt")
+        file.writeText(sb.toString())
+        return file
+    }
+
     fun bookToWord(context: Context, book: Book, chapters: List<Chapter>, singleFile: Boolean): File {
         val dir = exportDir(context)
         return if (singleFile) {

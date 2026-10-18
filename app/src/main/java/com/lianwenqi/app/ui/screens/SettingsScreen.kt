@@ -96,10 +96,6 @@ class SettingsViewModel(private val container: AppContainer) : ViewModel() {
         prefs.nightMode.stateIn(viewModelScope, SharingStarted.Eagerly, false)
     val activeModelId: StateFlow<Long> =
         prefs.activeModelId.stateIn(viewModelScope, SharingStarted.Eagerly, 0L)
-    val aiFollowBook: StateFlow<Boolean> =
-        prefs.aiFollowBook.stateIn(viewModelScope, SharingStarted.Eagerly, false)
-    val aiOutlineFirstRound: StateFlow<Boolean> =
-        prefs.aiOutlineFirstRound.stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
     fun saveProvider(provider: Provider) = viewModelScope.launch { configRepository.saveProvider(provider) }
     fun deleteProvider(id: Long) = viewModelScope.launch { configRepository.deleteProvider(id) }
@@ -122,8 +118,6 @@ class SettingsViewModel(private val container: AppContainer) : ViewModel() {
     fun deletePrompt(id: Long) = viewModelScope.launch { configRepository.deletePrompt(id) }
 
     fun setNight(v: Boolean) = viewModelScope.launch { prefs.setNightMode(v) }
-    fun setAiFollowBook(v: Boolean) = viewModelScope.launch { prefs.setAiFollowBook(v) }
-    fun setAiOutlineFirstRound(v: Boolean) = viewModelScope.launch { prefs.setAiOutlineFirstRound(v) }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -140,8 +134,6 @@ fun SettingsScreen(
     val models by vm.models.collectAsState()
     val prompts by vm.prompts.collectAsState()
     val activeModelId by vm.activeModelId.collectAsState()
-    val aiFollowBook by vm.aiFollowBook.collectAsState()
-    val aiOutlineFirstRound by vm.aiOutlineFirstRound.collectAsState()
 
     // 默认停在「通用」页：点击底部「设置」以及从 AI 工具 / 前缀词管理 / 检查更新等子页面返回时，
     // 都会回到该页（返回时本页重新组合，记住的 tab 复位为默认值 2）
@@ -213,45 +205,6 @@ fun SettingsScreen(
                                 contentDescription = null,
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant
                             )
-                        }
-                        Spacer(Modifier.height(12.dp))
-                        HorizontalDivider()
-                        Spacer(Modifier.height(12.dp))
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Column(Modifier.weight(1f)) {
-                                Text("章节内会话跟书走")
-                                Text(
-                                    if (aiFollowBook) {
-                                        "同一本书共用一个侧边 AI 对话，「＋」新建对话并绑定本书"
-                                    } else {
-                                        "会话跟随章节，「＋」新建对话并绑定本章节"
-                                    },
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            Switch(checked = aiFollowBook, onCheckedChange = { vm.setAiFollowBook(it) })
-                        }
-                        if (aiFollowBook) {
-                            Spacer(Modifier.height(12.dp))
-                            HorizontalDivider()
-                            Spacer(Modifier.height(12.dp))
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Column(Modifier.weight(1f)) {
-                                    Text("首轮全选大纲与章节")
-                                    Text(
-                                        "新建「跟书」会话时默认全选大纲与章节（仅梗概/仅正文按当时勾选）。" +
-                                            "两项内容随后由「前缀词管理」在首轮写入会话前缀并保持稳定，" +
-                                            "只有重新勾选才改写前缀。「本章梗概」只写进本轮提示词、不进前缀，避免打断缓存。",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                                Switch(
-                                    checked = aiOutlineFirstRound,
-                                    onCheckedChange = { vm.setAiOutlineFirstRound(it) }
-                                )
-                            }
                         }
                         Spacer(Modifier.height(12.dp))
                         HorizontalDivider()

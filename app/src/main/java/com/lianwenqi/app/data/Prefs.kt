@@ -85,10 +85,7 @@ class Prefs(private val context: Context) {
         val readerPageMode = intPreferencesKey("reader_page_mode")
         val readerImmersive = booleanPreferencesKey("reader_immersive")
 
-        // 章节内 AI 会话的归属：false 跟章节，true 跟书
-        val aiFollowBook = booleanPreferencesKey("ai_session_follow_book")
-
-        // 首轮全选大纲：跟书模式下仅把大纲写进首轮前缀，后续轮次复用不再改写
+        // 首轮全选大纲：仅把大纲写进首轮前缀，后续轮次复用不再改写
         val aiOutlineFirstRound = booleanPreferencesKey("ai_outline_first_round")
 
         // AI 工具页：写入大纲工具是否启用（默认启用）
@@ -159,10 +156,7 @@ class Prefs(private val context: Context) {
     /** 阅读器全屏（隐藏系统状态栏与导航栏） */
     val readerImmersive: Flow<Boolean> = context.dataStore.data.map { it[K.readerImmersive] ?: true }
 
-    /** 章节内 AI 会话归属：false 跟章节（默认），true 跟书 */
-    val aiFollowBook: Flow<Boolean> = context.dataStore.data.map { it[K.aiFollowBook] ?: false }
-
-    /** 首轮全选大纲：跟书模式下仅首轮把大纲写进前缀（默认关闭） */
+    /** 首轮全选大纲：仅首轮把大纲写进前缀（默认关闭） */
     val aiOutlineFirstRound: Flow<Boolean> = context.dataStore.data.map { it[K.aiOutlineFirstRound] ?: false }
 
     /** 「写入大纲工具」是否启用（默认启用；关闭后不出现在聊天页工具多选里） */
@@ -307,7 +301,6 @@ class Prefs(private val context: Context) {
     suspend fun setActiveModelId(v: Long) = writePrefs { it[K.activeModelId] = v }
     suspend fun setReaderPageMode(v: Int) = writePrefs { it[K.readerPageMode] = v }
     suspend fun setReaderImmersive(v: Boolean) = writePrefs { it[K.readerImmersive] = v }
-    suspend fun setAiFollowBook(v: Boolean) = writePrefs { it[K.aiFollowBook] = v }
     suspend fun setAiOutlineFirstRound(v: Boolean) = writePrefs { it[K.aiOutlineFirstRound] = v }
     suspend fun setAiToolOutlineEnabled(v: Boolean) = writePrefs { it[K.aiToolOutlineEnabled] = v }
     suspend fun setAiToolChapterEnabled(v: Boolean) = writePrefs { it[K.aiToolChapterEnabled] = v }

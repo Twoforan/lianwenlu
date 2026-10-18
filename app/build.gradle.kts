@@ -28,8 +28,8 @@ android {
         applicationId = "com.lianwenqi.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 39
-        versionName = "3.2.5"
+        versionCode = 40
+        versionName = "3.2.6"
 
         vectorDrawables { useSupportLibrary = true }
 
@@ -69,6 +69,11 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+        }
+        debug {
+            // 本地向量化（llama.cpp）只发 arm64-v8a；debug 额外编 x86_64，
+            // 方便在没有 arm64 设备时用 x86_64 模拟器安装运行。
+            ndk { abiFilters += "x86_64" }
         }
     }
 

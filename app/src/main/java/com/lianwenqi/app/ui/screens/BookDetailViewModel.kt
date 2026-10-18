@@ -153,4 +153,32 @@ class BookDetailViewModel(
     fun reorderChapterIds(ids: List<Long>) = viewModelScope.launch {
         if (ids.size >= 2) bookRepository.reorderChapters(ids)
     }
+
+    // ---------------- 章节批量管理 ----------------
+
+    /** 批量删除所选章节 */
+    fun deleteChapters(ids: List<Long>) = viewModelScope.launch {
+        if (ids.isNotEmpty()) bookRepository.deleteChapters(bookId, ids)
+    }
+
+    /** 把所选章节移动到指定分卷（volumeId 为 null 表示未分卷） */
+    fun moveChaptersToVolume(ids: List<Long>, volumeId: Long?) = viewModelScope.launch {
+        if (ids.isNotEmpty()) bookRepository.moveChaptersToVolume(bookId, ids, volumeId)
+    }
+
+    /** 新建分卷并把所选章节移入 */
+    fun createVolumeAndMoveChapters(ids: List<Long>) = viewModelScope.launch {
+        val vid = bookRepository.createVolume(bookId)
+        if (ids.isNotEmpty()) bookRepository.moveChaptersToVolume(bookId, ids, vid)
+    }
+
+    /** 把所选章节按顺序合并为一章 */
+    fun mergeChapters(ids: List<Long>) = viewModelScope.launch {
+        if (ids.size >= 2) bookRepository.mergeChapters(bookId, ids)
+    }
+
+    /** 章节序号重排 */
+    fun renumberChapters() = viewModelScope.launch {
+        bookRepository.renumberChapters(bookId)
+    }
 }

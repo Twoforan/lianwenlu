@@ -11,6 +11,8 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -20,6 +22,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -43,12 +46,13 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Article
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
@@ -58,6 +62,7 @@ import androidx.compose.material.icons.filled.EditNote
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.ReceiptLong
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
@@ -83,6 +88,8 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TextField
+import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -100,6 +107,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
@@ -112,6 +120,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.lianwenqi.app.data.PromptLog
 import com.lianwenqi.app.data.entity.AiModel
 import com.lianwenqi.app.data.entity.Book
 import com.lianwenqi.app.data.entity.BookGroup
@@ -158,9 +167,11 @@ fun AiChatScreen(initialBookId: Long?) {
     val pinnedCats by vm.pinnedOutlineCategories.collectAsState()
     val selBooks by vm.selectedBookIds.collectAsState()
     val selChapters by vm.selectedChapterIds.collectAsState()
+    val selSummary by vm.summaryChapterIds.collectAsState()
+    val selContent by vm.contentChapterIds.collectAsState()
     val selOutline by vm.selectedOutlineIds.collectAsState()
-    val incContent by vm.includeContent.collectAsState()
-    val incSummary by vm.includeSummary.collectAsState()
+    val summaryAll by vm.summaryAllSelected.collectAsState()
+    val contentAll by vm.contentAllSelected.collectAsState()
     val errorMsg by vm.errorMessage.collectAsState()
     val editingUserMsgId by vm.editingUserMessageId.collectAsState()
     val pendingReplyTo by vm.pendingReplyToId.collectAsState()
@@ -185,6 +196,7 @@ fun AiChatScreen(initialBookId: Long?) {
     var showAiTools by remember { mutableStateOf(false) }
     var showSessions by remember { mutableStateOf(false) }
     var renamingSession by remember { mutableStateOf<ChatSession?>(null) }
+    var renamingChapterId by remember { mutableStateOf<Long?>(null) }
     var showPrompts by remember { mutableStateOf(false) }
     var manifestState by remember { mutableIntStateOf(0) }
 
@@ -262,14 +274,14 @@ fun AiChatScreen(initialBookId: Long?) {
                     label = { Text("大纲(${selOutline.size})") }
                 )
                 FilterChip(
-                    selected = incSummary,
-                    onClick = { vm.includeSummary.value = !incSummary },
+                    selected = summaryAll,
+                    onClick = { vm.selectAllSummary() },
                     enabled = selBooks.isNotEmpty(),
                     label = { Text("仅梗概") }
                 )
                 FilterChip(
-                    selected = incContent,
-                    onClick = { vm.includeContent.value = !incContent },
+                    selected = contentAll,
+                    onClick = { vm.selectAllContent() },
                     enabled = selBooks.isNotEmpty(),
                     label = { Text("仅正文") }
                 )
@@ -278,6 +290,38 @@ fun AiChatScreen(initialBookId: Long?) {
             HorizontalDivider()
 
             val entries = remember(messages) { buildChatEntries(messages) }
+            // 按「消息所属章节」连续分组：历史章节的对话整组包裹、可收起；最新章节不包裹
+            val chapterGroups = remember(entries) { buildChapterGroups(entries) }
+            val collapsedChapters = remember { mutableStateMapOf<Long, Boolean>() }
+            // 「查看日志 / 查看本轮提示词」的目标消息（为空表示弹窗关闭）
+            var logTarget by remember { mutableStateOf<ChatMessage?>(null) }
+            var promptTarget by remember { mutableStateOf<ChatMessage?>(null) }
+            // 一条对话的渲染：被章节分组包裹与不包裹都复用同一份
+            val renderEntry: @Composable (ChatEntry) -> Unit = { entry ->
+                ChatMessageItem(
+                    entry = entry,
+                    modelName = modelName,
+                    sending = sending,
+                    pendingReplyToId = pendingReplyTo,
+                    streamingContent = streamingContent,
+                    streamingReasoning = streamingReasoning,
+                    ui = ui,
+                    chapters = chapters,
+                    volumes = volumes,
+                    outline = outline,
+                    previewFor = { vm.previewFor(it) },
+                    onEditUser = { vm.beginEditUserMessage(it) },
+                    onRegenerate = { vm.regenerate(it) },
+                    onCopy = { clipboard.setText(AnnotatedString(it)) },
+                    onDelete = { vm.deleteMessage(it) },
+                    onSaveEdit = { id, text -> vm.updateMessage(id, text) },
+                    onSaveAndSend = { id, text, uid -> vm.saveAndContinue(id, text, uid) },
+                    onSwitchVariant = { uid, mid -> vm.switchVariant(uid, mid) },
+                    onViewLog = { logTarget = it },
+                    onViewPrompt = { promptTarget = it },
+                    onStop = { vm.stopGenerating() }
+                )
+            }
             val listState = rememberLazyListState()
             // 进入会话 / 切换会话 / 新增消息后，自动停在最新对话处（滚到真正的底部，而不是最后一条的开头）。
             // 必须先等 LazyColumn 完成一次布局（layoutInfo 有内容）再滚动：
@@ -306,30 +350,52 @@ fun AiChatScreen(initialBookId: Long?) {
                     contentPadding = PaddingValues(12.dp),
                     verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
-                    items(entries) { entry ->
-                        ChatMessageItem(
-                            entry = entry,
-                            modelName = modelName,
-                            sending = sending,
-                            pendingReplyToId = pendingReplyTo,
-                            streamingContent = streamingContent,
-                            streamingReasoning = streamingReasoning,
-                            ui = ui,
-                            chapters = chapters,
-                            outline = outline,
-                            previewFor = { vm.previewFor(it) },
-                            onEditUser = { vm.beginEditUserMessage(it) },
-                            onRegenerate = { vm.regenerate(it) },
-                            onCopy = { clipboard.setText(AnnotatedString(it)) },
-                            onDelete = { vm.deleteMessage(it) },
-                            onSaveEdit = { id, text -> vm.updateMessage(id, text) },
-                            onSaveAndSend = { id, text, uid -> vm.saveAndContinue(id, text, uid) },
-                            onSwitchVariant = { uid, mid -> vm.switchVariant(uid, mid) },
-                            onToggleContent = { id, collapsed -> vm.setContentCollapsed(id, collapsed) },
-                            onStop = { vm.stopGenerating() }
-                        )
+                    items(chapterGroups.size) { gi ->
+                        val group = chapterGroups[gi]
+                        // 绑定到章节且不是最新章节的历史对话：整组包裹，默认收起
+                        val historical = group.chapterId > 0 && gi != chapterGroups.lastIndex
+                        if (!historical) {
+                            group.entries.forEach { renderEntry(it) }
+                        } else {
+                            val chapterIndex = chapters.indexOfFirst { it.id == group.chapterId }
+                            val collapsed = collapsedChapters[group.chapterId] != false
+                            ChapterGroupCard(
+                                title = chapters.getOrNull(chapterIndex)?.title ?: "（章节已删除）",
+                                // 组内「对话」条数（一问一答算一条）与回答字数
+                                rounds = group.entries.count { it is ChatEntry.User },
+                                words = group.entries.sumOf { e ->
+                                    // 回答作为「用户消息的版本」随用户条目展示，字数从当前展示的版本取
+                                    when (e) {
+                                        is ChatEntry.User ->
+                                            e.variants.getOrNull(e.activeIndex)?.content?.length ?: 0
+                                        is ChatEntry.Assistant -> e.msg.content.length
+                                    }
+                                },
+                                preview = groupPreview(group),
+                                collapsed = collapsed,
+                                onToggle = { collapsedChapters[group.chapterId] = !collapsed },
+                                onLongPressTitle = if (group.chapterId > 0) {
+                                    { renamingChapterId = group.chapterId }
+                                } else null
+                            ) {
+                                if (!collapsed) group.entries.forEach { renderEntry(it) }
+                            }
+                        }
                     }
                 }
+            }
+
+            // 「查看日志」：分「预设 / 上下文 / 本轮」三部分回显本轮发送时的提示词（默认收起，逐层展开）
+            logTarget?.let { msg ->
+                PromptLogDialog(log = PromptLog.decode(msg.promptLog), onClose = { logTarget = null })
+            }
+            // 「查看本轮提示词」：回显本轮实际发送的完整提示词
+            promptTarget?.let { msg ->
+                PromptTextDialog(
+                    log = PromptLog.decode(msg.promptLog),
+                    onCopy = { clipboard.setText(AnnotatedString(it)) },
+                    onClose = { promptTarget = null }
+                )
             }
 
             errorMsg?.let {
@@ -338,15 +404,12 @@ fun AiChatScreen(initialBookId: Long?) {
             }
 
             // 当前上下文快照，用于底部「文件清单」回显
-            val currentSnapshot = ContextSnapshot(
-                bookIds = selBooks.toList(),
-                chapterIds = selChapters.toList(),
-                outlineIds = selOutline.toList(),
-                includeSummary = incSummary,
-                includeContent = incContent
-            )
             val manifestChapters = selChapters.map { id ->
-                chapters.firstOrNull { it.id == id }?.title ?: "（章节已删除）"
+                ManifestChapterRow(
+                    title = chapters.firstOrNull { it.id == id }?.title ?: "（章节已删除）",
+                    summary = summaryAll || id in selSummary,
+                    content = contentAll || id in selContent
+                )
             }
             val manifestOutline = selOutline.map { id ->
                 outline.firstOrNull { it.id == id }
@@ -423,7 +486,6 @@ fun AiChatScreen(initialBookId: Long?) {
             if (manifestState != 0) {
                 ContextManifestContent(
                     state = manifestState,
-                    snapshot = currentSnapshot,
                     chapterRows = manifestChapters,
                     outlineRows = manifestOutline,
                     preview = { vm.contextPreview() },
@@ -492,29 +554,18 @@ fun AiChatScreen(initialBookId: Long?) {
                 )
             }
 
-            Row(
-                Modifier.fillMaxWidth().padding(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                OutlinedTextField(
-                    value = input,
-                    onValueChange = { vm.input.value = it },
-                    modifier = Modifier.weight(1f),
-                    placeholder = { Text("说点什么…") },
-                    maxLines = 5
-                )
-                Spacer(Modifier.width(8.dp))
-                IconButton(
-                    enabled = !sending && input.isNotBlank(),
-                    onClick = {
-                        focusManager.clearFocus()
-                        keyboard?.hide()
-                        vm.send()
-                    }
-                ) {
-                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "发送")
-                }
-            }
+            ChatComposer(
+                value = input,
+                onValueChange = { vm.input.value = it },
+                placeholder = "说点什么…",
+                sendEnabled = !sending && input.isNotBlank(),
+                onSend = {
+                    focusManager.clearFocus()
+                    keyboard?.hide()
+                    vm.send()
+                },
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+            )
         }
     }
 
@@ -866,6 +917,14 @@ fun AiChatScreen(initialBookId: Long?) {
             dismissButton = { TextButton(onClick = { renamingSession = null }) { Text("取消") } }
         )
     }
+    renamingChapterId?.let { target ->
+        ChapterRenameDialog(
+            chapterId = target,
+            chapters = chapters,
+            onConfirm = { vm.renameChapter(target, it); renamingChapterId = null },
+            onDismiss = { renamingChapterId = null }
+        )
+    }
 }
 
 /** 编辑器内的 AI 助手：从右侧滑出的抽屉 */
@@ -923,11 +982,14 @@ private fun AiAssistantPanel(
     val volumes by vm.volumes.collectAsState()
     val outline by vm.outline.collectAsState()
     val selChapters by vm.selectedChapterIds.collectAsState()
+    val selSummary by vm.summaryChapterIds.collectAsState()
+    val selContent by vm.contentChapterIds.collectAsState()
     val selOutline by vm.selectedOutlineIds.collectAsState()
     val pinnedCats by vm.pinnedOutlineCategories.collectAsState()
     val summaryOn by vm.currentSummaryOn.collectAsState()
-    val incContent by vm.includeContent.collectAsState()
-    val incSummary by vm.includeSummary.collectAsState()
+    val chapterAll by vm.chapterAllSelected.collectAsState()
+    val summaryAll by vm.summaryAllSelected.collectAsState()
+    val contentAll by vm.contentAllSelected.collectAsState()
     val errorMsg by vm.errorMessage.collectAsState()
     val editingUserMsgId by vm.editingUserMessageId.collectAsState()
     val pendingReplyTo by vm.pendingReplyToId.collectAsState()
@@ -943,7 +1005,6 @@ private fun AiAssistantPanel(
     // 当前打开的章节不进入上下文
     val contextChapters = chapters.filter { it.id != chapterId }
     val modelName = models.firstOrNull { it.id == activeModelId }?.displayName ?: "未选择模型"
-    val allSelected = contextChapters.isNotEmpty() && selChapters.containsAll(contextChapters.map { it.id })
 
     // 底部按钮对应的展开面板：context / outline / prompt
     var openPanel by remember { mutableStateOf<String?>(null) }
@@ -953,6 +1014,11 @@ private fun AiAssistantPanel(
     val focusManager = LocalFocusManager.current
     val clipboard = LocalClipboardManager.current
     val ui = remember { MessageUiState() }
+    // 「查看日志 / 查看本轮提示词」的目标消息（为空表示弹窗关闭）
+    var logTarget by remember { mutableStateOf<ChatMessage?>(null) }
+    var promptTarget by remember { mutableStateOf<ChatMessage?>(null) }
+    // 长按章节分组标题后可编辑章节名（为空表示弹窗关闭）
+    var renamingChapterId by remember { mutableStateOf<Long?>(null) }
 
     // 编辑回答时，返回键直接取消编辑
     BackHandler(enabled = ui.editingId != null) { ui.editingId = null }
@@ -1010,6 +1076,9 @@ private fun AiAssistantPanel(
 
             // 上方只显示与 AI 的聊天内容；点击空白处取消删除确认
             val entries = remember(messages) { buildChatEntries(messages) }
+            // 侧边栏同样按「所属章节」分组收起：从章节进入时，本章对话默认折叠，历史章节亦折叠
+            val chapterGroups = remember(entries) { buildChapterGroups(entries) }
+            val collapsedChapters = remember { mutableStateMapOf<Long, Boolean>() }
             val listState = rememberLazyListState()
             // 打开抽屉 / 切换章节 / 新增消息后，自动停在最新对话处（同：先等列表完成布局，再滚到底部）
             LaunchedEffect(chapterId, entries.size) {
@@ -1045,29 +1114,84 @@ private fun AiAssistantPanel(
                             )
                         }
                     }
-                    items(entries) { entry ->
-                        ChatMessageItem(
-                            entry = entry,
-                            modelName = modelName,
-                            sending = sending,
-                            pendingReplyToId = pendingReplyTo,
-                            streamingContent = streamingContent,
-                            streamingReasoning = streamingReasoning,
-                            ui = ui,
-                            chapters = chapters,
-                            outline = outline,
-                            previewFor = { vm.previewFor(it) },
-                            onEditUser = { vm.beginEditUserMessage(it) },
-                            onRegenerate = { vm.regenerate(it) },
-                            onCopy = { clipboard.setText(AnnotatedString(it)) },
-                            onDelete = { vm.deleteMessage(it) },
-                            onSaveEdit = { id, text -> vm.updateMessage(id, text) },
-                            onSaveAndSend = { id, text, uid -> vm.saveAndContinue(id, text, uid) },
-                            onSwitchVariant = { uid, mid -> vm.switchVariant(uid, mid) },
-                            onToggleContent = { id, collapsed -> vm.setContentCollapsed(id, collapsed) },
-                            onStop = { vm.stopGenerating() },
-                            onWriteToChapter = onWriteToChapter
-                        )
+                    items(chapterGroups.size) { gi ->
+                        val group = chapterGroups[gi]
+                        // 只有绑定了章节的分组才包裹；否则（旧数据 / 未绑定）保持平铺
+                        if (group.chapterId <= 0) {
+                            group.entries.forEach { entry ->
+                                ChatMessageItem(
+                                    entry = entry,
+                                    modelName = modelName,
+                                    sending = sending,
+                                    pendingReplyToId = pendingReplyTo,
+                                    streamingContent = streamingContent,
+                                    streamingReasoning = streamingReasoning,
+                                    ui = ui,
+                                    chapters = chapters,
+                                    volumes = volumes,
+                                    outline = outline,
+                                    previewFor = { vm.previewFor(it) },
+                                    onEditUser = { vm.beginEditUserMessage(it) },
+                                    onRegenerate = { vm.regenerate(it) },
+                                    onCopy = { clipboard.setText(AnnotatedString(it)) },
+                                    onDelete = { vm.deleteMessage(it) },
+                                    onSaveEdit = { id, text -> vm.updateMessage(id, text) },
+                                    onSaveAndSend = { id, text, uid -> vm.saveAndContinue(id, text, uid) },
+                                    onSwitchVariant = { uid, mid -> vm.switchVariant(uid, mid) },
+                                    onViewLog = { logTarget = it },
+                                    onViewPrompt = { promptTarget = it },
+                                    onStop = { vm.stopGenerating() },
+                                    onWriteToChapter = onWriteToChapter
+                                )
+                            }
+                            return@items
+                        }
+                        val collapsed = collapsedChapters[group.chapterId] != false
+                        val chapterIndex = chapters.indexOfFirst { it.id == group.chapterId }
+                        ChapterGroupCard(
+                            title = chapters.getOrNull(chapterIndex)?.title ?: "（章节已删除）",
+                            rounds = group.entries.count { it is ChatEntry.User },
+                            words = group.entries.sumOf { e ->
+                                when (e) {
+                                    is ChatEntry.User ->
+                                        e.variants.getOrNull(e.activeIndex)?.content?.length ?: 0
+                                    is ChatEntry.Assistant -> e.msg.content.length
+                                }
+                            },
+                            preview = groupPreview(group),
+                            collapsed = collapsed,
+                            onToggle = { collapsedChapters[group.chapterId] = !collapsed },
+                            onLongPressTitle = if (group.chapterId > 0) {
+                                { renamingChapterId = group.chapterId }
+                            } else null
+                        ) {
+                            group.entries.forEach { entry ->
+                                ChatMessageItem(
+                                    entry = entry,
+                                    modelName = modelName,
+                                    sending = sending,
+                                    pendingReplyToId = pendingReplyTo,
+                                    streamingContent = streamingContent,
+                                    streamingReasoning = streamingReasoning,
+                                    ui = ui,
+                                    chapters = chapters,
+                                    volumes = volumes,
+                                    outline = outline,
+                                    previewFor = { vm.previewFor(it) },
+                                    onEditUser = { vm.beginEditUserMessage(it) },
+                                    onRegenerate = { vm.regenerate(it) },
+                                    onCopy = { clipboard.setText(AnnotatedString(it)) },
+                                    onDelete = { vm.deleteMessage(it) },
+                                    onSaveEdit = { id, text -> vm.updateMessage(id, text) },
+                                    onSaveAndSend = { id, text, uid -> vm.saveAndContinue(id, text, uid) },
+                                    onSwitchVariant = { uid, mid -> vm.switchVariant(uid, mid) },
+                                    onViewLog = { logTarget = it },
+                                    onViewPrompt = { promptTarget = it },
+                                    onStop = { vm.stopGenerating() },
+                                    onWriteToChapter = onWriteToChapter
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -1087,14 +1211,20 @@ private fun AiAssistantPanel(
                     chapters = contextChapters,
                     volumes = volumes,
                     selected = selChapters,
-                    allSelected = allSelected,
-                    includeSummary = incSummary,
-                    includeContent = incContent,
+                    summarySelected = selSummary,
+                    contentSelected = selContent,
+                    allSelected = chapterAll,
+                    summaryAll = summaryAll,
+                    contentAll = contentAll,
                     onToggleAll = { vm.selectAllChapters() },
-                    onToggleSummary = { vm.includeSummary.value = !incSummary },
-                    onToggleContent = { vm.includeContent.value = !incContent },
+                    onToggleSummary = { vm.selectAllSummary() },
+                    onToggleContent = { vm.selectAllContent() },
                     onToggleChapter = { vm.toggleChapter(it) },
-                    onToggleVolume = { vm.toggleVolume(it) }
+                    onToggleChapterSummary = { vm.toggleChapterSummary(it) },
+                    onToggleChapterContent = { vm.toggleChapterContent(it) },
+                    onToggleVolume = { vm.toggleVolume(it) },
+                    onToggleVolumeSummary = { vm.toggleVolumeSummary(it) },
+                    onToggleVolumeContent = { vm.toggleVolumeContent(it) }
                 )
 
                 "outline" -> OutlinePicker(
@@ -1138,13 +1268,17 @@ private fun AiAssistantPanel(
             }
 
             // 输入框常驻
-            OutlinedTextField(
+            ChatComposer(
                 value = input,
                 onValueChange = { vm.input.value = it },
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-                placeholder = { Text("向ai提问") },
-                shape = RoundedCornerShape(12.dp),
-                maxLines = 5
+                placeholder = "向ai提问",
+                sendEnabled = !sending && input.isNotBlank(),
+                onSend = {
+                    focusManager.clearFocus()
+                    keyboard?.hide()
+                    vm.send()
+                },
+                modifier = Modifier.padding(horizontal = 16.dp)
             )
 
             // 所选文件的反馈：文件清单 → 表格 → 生成的 txt
@@ -1152,8 +1286,10 @@ private fun AiAssistantPanel(
                 snapshot = ContextSnapshot(
                     chapterIds = selChapters.toList(),
                     outlineIds = selOutline.toList(),
-                    includeSummary = incSummary,
-                    includeContent = incContent
+                    summaryChapterIds = selSummary.toList(),
+                    contentChapterIds = selContent.toList(),
+                    summaryAll = summaryAll,
+                    contentAll = contentAll
                 ),
                 chapters = chapters,
                 outline = outline,
@@ -1167,7 +1303,7 @@ private fun AiAssistantPanel(
                 preview = { vm.contextPreview() }
             )
 
-            // 「＋本章梗概」「快捷提示词」与「发送」同一水平线
+            // 「＋本章梗概」「快捷提示词」快捷按钮行（发送按钮已并入上方输入卡片）
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -1210,21 +1346,6 @@ private fun AiAssistantPanel(
                         )
                     }
                 )
-                Spacer(Modifier.weight(1f))
-                Button(
-                    enabled = !sending && input.isNotBlank(),
-                    onClick = {
-                        focusManager.clearFocus()
-                        keyboard?.hide()
-                        vm.send()
-                    },
-                    modifier = Modifier.height(34.dp),
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
-                ) {
-                    Icon(Icons.Filled.AutoAwesome, null, Modifier.size(16.dp))
-                    Spacer(Modifier.width(4.dp))
-                    Text("发送", style = MaterialTheme.typography.labelMedium, maxLines = 1, softWrap = false)
-                }
             }
 
             // 快捷提示词面板：在对话框下方展开
@@ -1306,6 +1427,58 @@ private fun AiAssistantPanel(
             ).show()
         }
     }
+
+    // 「查看日志」：分「预设 / 上下文 / 本轮」三部分回显本轮发送时的提示词（默认收起，逐层展开）
+    logTarget?.let { msg ->
+        PromptLogDialog(log = PromptLog.decode(msg.promptLog), onClose = { logTarget = null })
+    }
+    // 「查看本轮提示词」：回显本轮实际发送的完整提示词
+    promptTarget?.let { msg ->
+        PromptTextDialog(
+            log = PromptLog.decode(msg.promptLog),
+            onCopy = { clipboard.setText(AnnotatedString(it)) },
+            onClose = { promptTarget = null }
+        )
+    }
+    // 长按章节分组标题 → 修改章节名（保存后同步到书籍）
+    renamingChapterId?.let { target ->
+        ChapterRenameDialog(
+            chapterId = target,
+            chapters = chapters,
+            onConfirm = { vm.renameChapter(target, it); renamingChapterId = null },
+            onDismiss = { renamingChapterId = null }
+        )
+    }
+}
+
+/** 长按章节分组标题后弹出的「修改章节名」弹窗：保存后写回书籍中的章节标题 */
+@Composable
+private fun ChapterRenameDialog(
+    chapterId: Long,
+    chapters: List<Chapter>,
+    onConfirm: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var title by remember(chapterId) {
+        mutableStateOf(chapters.firstOrNull { it.id == chapterId }?.title.orEmpty())
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("修改章节名") },
+        text = {
+            OutlinedTextField(
+                value = title,
+                onValueChange = { title = it },
+                label = { Text("章节名") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+        },
+        confirmButton = {
+            TextButton(enabled = title.isNotBlank(), onClick = { onConfirm(title) }) { Text("保存") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
 }
 
 /** 底部选择按钮，如 [上下文 ∧] [大纲 ∨] [模型选择 ∨] */
@@ -1458,20 +1631,29 @@ private fun PickerBox(
     }
 }
 
-/** 上下文选择：全选 / 梗概 / 正文 + 分卷章节树 */
+/** 「梗概 / 正文」两列的固定宽度，保证分卷行与章节行左右对齐 */
+private val ContextColumnWidth = 56.dp
+
+/** 上下文选择：全选 / 梗概 / 正文 + 分卷章节树（三列：纳入上下文 / 梗概 / 正文） */
 @Composable
 private fun ContextPicker(
     chapters: List<Chapter>,
     volumes: List<Volume>,
     selected: Set<Long>,
+    summarySelected: Set<Long>,
+    contentSelected: Set<Long>,
     allSelected: Boolean,
-    includeSummary: Boolean,
-    includeContent: Boolean,
+    summaryAll: Boolean,
+    contentAll: Boolean,
     onToggleAll: () -> Unit,
     onToggleSummary: () -> Unit,
     onToggleContent: () -> Unit,
     onToggleChapter: (Long) -> Unit,
-    onToggleVolume: (Long) -> Unit
+    onToggleChapterSummary: (Long) -> Unit,
+    onToggleChapterContent: (Long) -> Unit,
+    onToggleVolume: (Long) -> Unit,
+    onToggleVolumeSummary: (Long) -> Unit,
+    onToggleVolumeContent: (Long) -> Unit
 ) {
     // 各分卷的收起状态（默认展开）
     val collapsed = remember { mutableStateMapOf<Long, Boolean>() }
@@ -1491,11 +1673,37 @@ private fun ContextPicker(
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 SmallChip("全选", allSelected, onToggleAll)
-                SmallChip("梗概", includeSummary, onToggleSummary)
-                SmallChip("正文", includeContent, onToggleContent)
+                SmallChip("梗概", summaryAll, onToggleSummary)
+                SmallChip("正文", contentAll, onToggleContent)
             }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            Column(Modifier.heightIn(max = 240.dp).verticalScroll(rememberScrollState())) {
+            // 三列含义表头：纳入上下文 / 梗概 / 正文
+            Row(
+                Modifier.fillMaxWidth().padding(start = 12.dp, end = 8.dp, top = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "章节",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f)
+                )
+                Box(Modifier.width(ContextColumnWidth), contentAlignment = Alignment.Center) {
+                    Text(
+                        "梗概",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Box(Modifier.width(ContextColumnWidth), contentAlignment = Alignment.Center) {
+                    Text(
+                        "正文",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            Column(Modifier.heightIn(max = 300.dp).verticalScroll(rememberScrollState())) {
                 if (chapters.isEmpty()) {
                     Text(
                         "暂无可选章节",
@@ -1514,28 +1722,89 @@ private fun ContextPicker(
                             picked = list.count { it.id in selected },
                             total = list.size,
                             expanded = expanded,
-                            onToggleExpand = { collapsed[v.id] = expanded }
+                            onToggleExpand = { collapsed[v.id] = expanded },
+                            summarySelected = list.all { it.id in summarySelected },
+                            contentSelected = list.all { it.id in contentSelected },
+                            onToggleSummary = { onToggleVolumeSummary(v.id) },
+                            onToggleContent = { onToggleVolumeContent(v.id) }
                         ) { onToggleVolume(v.id) }
                         if (expanded) {
                             list.forEach { ch ->
-                                ChapterRow(ch.title, ch.id in selected, 26.dp, useCheckbox = true) {
-                                    onToggleChapter(ch.id)
-                                }
+                                ChapterSelectionRow(
+                                    label = ch.title,
+                                    selected = ch.id in selected,
+                                    summary = ch.id in summarySelected,
+                                    content = ch.id in contentSelected,
+                                    startPadding = 26.dp,
+                                    onToggle = { onToggleChapter(ch.id) },
+                                    onToggleSummary = { onToggleChapterSummary(ch.id) },
+                                    onToggleContent = { onToggleChapterContent(ch.id) }
+                                )
                             }
                         }
                     }
                 }
                 chapters.filter { it.volumeId == null }.forEach { ch ->
-                    ChapterRow(ch.title, ch.id in selected, 6.dp, useCheckbox = true) {
-                        onToggleChapter(ch.id)
-                    }
+                    ChapterSelectionRow(
+                        label = ch.title,
+                        selected = ch.id in selected,
+                        summary = ch.id in summarySelected,
+                        content = ch.id in contentSelected,
+                        startPadding = 6.dp,
+                        onToggle = { onToggleChapter(ch.id) },
+                        onToggleSummary = { onToggleChapterSummary(ch.id) },
+                        onToggleContent = { onToggleChapterContent(ch.id) }
+                    )
                 }
             }
         }
     }
 }
 
-/** 分卷行：整卷选中 + 已选数量；[onToggleExpand] 非空时左侧显示展开/收起箭头 */
+/** 「梗概 / 正文」列的复选框：固定宽度、居中，保证跨行对齐 */
+@Composable
+private fun ContextColumnCheckbox(checked: Boolean, onToggle: () -> Unit) {
+    Box(Modifier.width(ContextColumnWidth), contentAlignment = Alignment.Center) {
+        Checkbox(checked = checked, onCheckedChange = { onToggle() })
+    }
+}
+
+/** 上下文选择里的章节行：章节是否纳入 + 梗概 + 正文三列 */
+@Composable
+private fun ChapterSelectionRow(
+    label: String,
+    selected: Boolean,
+    summary: Boolean,
+    content: Boolean,
+    startPadding: Dp,
+    onToggle: () -> Unit,
+    onToggleSummary: () -> Unit,
+    onToggleContent: () -> Unit
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onToggle)
+            .padding(start = startPadding, end = 8.dp, top = 2.dp, bottom = 2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Checkbox(checked = selected, onCheckedChange = { onToggle() })
+        Text(
+            label,
+            style = MaterialTheme.typography.bodySmall,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+        ContextColumnCheckbox(summary, onToggleSummary)
+        ContextColumnCheckbox(content, onToggleContent)
+    }
+}
+
+/**
+ * 分卷行：整卷选中 + 已选数量；[onToggleExpand] 非空时左侧显示展开/收起箭头。
+ * [summarySelected] / [contentSelected] 非空时，右侧追加「梗概 / 正文」两列复选框。
+ */
 @Composable
 private fun VolumeRow(
     label: String,
@@ -1544,6 +1813,10 @@ private fun VolumeRow(
     total: Int,
     expanded: Boolean = true,
     onToggleExpand: (() -> Unit)? = null,
+    summarySelected: Boolean? = null,
+    contentSelected: Boolean? = null,
+    onToggleSummary: (() -> Unit)? = null,
+    onToggleContent: (() -> Unit)? = null,
     onToggle: () -> Unit
 ) {
     Row(
@@ -1551,7 +1824,7 @@ private fun VolumeRow(
             .fillMaxWidth()
             .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
             .clickable(onClick = onToggle)
-            .padding(start = 2.dp, end = 12.dp),
+            .padding(start = 2.dp, end = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         if (onToggleExpand != null) {
@@ -1567,18 +1840,19 @@ private fun VolumeRow(
         }
         Checkbox(checked = allSelected, onCheckedChange = { onToggle() })
         Text(
-            label,
+            "$label  $picked/$total",
             style = MaterialTheme.typography.labelLarge,
             fontWeight = FontWeight.SemiBold,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f)
         )
-        Text(
-            "$picked/$total",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
+        if (summarySelected != null && onToggleSummary != null) {
+            ContextColumnCheckbox(summarySelected, onToggleSummary)
+        }
+        if (contentSelected != null && onToggleContent != null) {
+            ContextColumnCheckbox(contentSelected, onToggleContent)
+        }
     }
 }
 
@@ -1782,6 +2056,320 @@ private fun buildChatEntries(messages: List<ChatMessage>): List<ChatEntry> {
     return entries
 }
 
+/** 对话列表按「所属章节」连续切分后的分组；[chapterId] 为 0 表示未绑定章节（旧数据） */
+private class ChatChapterGroup(val chapterId: Long, val entries: List<ChatEntry>)
+
+/**
+ * 把展示项按「消息所属章节」连续分组：同章节内连续的一问一答归入同一组，章节变化即开新组。
+ * 用于让历史章节的对话整组包裹、可收起（最新章节不包裹，见 [AiChatScreen] 的分组渲染）。
+ */
+private fun buildChapterGroups(entries: List<ChatEntry>): List<ChatChapterGroup> {
+    fun chapterOf(e: ChatEntry): Long = when (e) {
+        is ChatEntry.User -> e.msg.chapterId
+        is ChatEntry.Assistant -> e.msg.chapterId
+    }
+    val groups = mutableListOf<ChatChapterGroup>()
+    val current = mutableListOf<ChatEntry>()
+    var currentId = 0L
+    entries.forEach { e ->
+        val id = chapterOf(e)
+        if (current.isEmpty() || id == currentId) {
+            current += e
+            currentId = id
+        } else {
+            groups += ChatChapterGroup(currentId, current.toList())
+            current.clear()
+            current += e
+            currentId = id
+        }
+    }
+    if (current.isNotEmpty()) groups += ChatChapterGroup(currentId, current.toList())
+    return groups
+}
+
+/** 分组预览：收起时展示本组首条内容摘要（单行省略），让折叠态也能看出这轮聊了什么 */
+private fun groupPreview(group: ChatChapterGroup): String {
+    val text = when (val first = group.entries.firstOrNull()) {
+        is ChatEntry.User -> first.msg.content
+        is ChatEntry.Assistant -> first.msg.content
+        else -> ""
+    }
+    return text.replace('\n', ' ').trim()
+}
+
+/**
+ * 章节对话分组卡片：头部为「章节号徽标 + 章节名 + 本条统计」，点击整组展开 / 收起。
+ * 收起时额外露出一行内容预览，展开时在卡片内渲染 [content]。
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun ChapterGroupCard(
+    title: String,
+    rounds: Int,
+    words: Int,
+    preview: String,
+    collapsed: Boolean,
+    onToggle: () -> Unit,
+    onLongPressTitle: (() -> Unit)? = null,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    val shape = RoundedCornerShape(18.dp)
+    val accent = MaterialTheme.colorScheme.primary
+    // 参照原型：淡紫→纸白的渐变底 + 展开时加重描边，营造「一张卡片包住这一章」的观感
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(
+                Brush.verticalGradient(
+                    listOf(
+                        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
+                        MaterialTheme.colorScheme.surface
+                    )
+                )
+            )
+            .border(
+                width = if (collapsed) 1.dp else 1.5.dp,
+                color = if (collapsed) MaterialTheme.colorScheme.outlineVariant
+                else accent.copy(alpha = 0.55f),
+                shape = shape
+            )
+    ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .combinedClickable(onClick = { onToggle() }, onLongClick = onLongPressTitle)
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    title,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    "共 $rounds 条对话 · 约 $words 字",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Icon(
+                if (collapsed) Icons.Filled.KeyboardArrowDown
+                else Icons.Filled.KeyboardArrowUp,
+                contentDescription = if (collapsed) "展开" else "收起",
+                modifier = Modifier.size(20.dp),
+                tint = accent
+            )
+        }
+        if (collapsed) {
+            if (preview.isNotBlank()) {
+                Text(
+                    preview,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 56.dp, end = 12.dp, bottom = 10.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        } else {
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
+            Column(
+                Modifier.padding(start = 12.dp, end = 12.dp, top = 10.dp, bottom = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+                content = content
+            )
+        }
+    }
+}
+
+/** 日志弹窗中的分组标题（预设日志 / 上下文日志 / 本轮提示词日志） */
+@Composable
+private fun LogSectionTitle(text: String) {
+    Text(
+        text,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 12.dp, bottom = 2.dp),
+        style = MaterialTheme.typography.labelLarge,
+        fontWeight = FontWeight.Bold,
+        color = MaterialTheme.colorScheme.primary
+    )
+}
+
+/**
+ * 日志弹窗中的一个可展开节点（默认收起）。
+ * 头部为「箭头 + 标题」，展开后在其下方缩进渲染 [content]（子节点 / 纯文本）。
+ */
+@Composable
+private fun LogNode(
+    title: String,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth()) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clickable { expanded = !expanded }
+                .padding(vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                if (expanded) Icons.Filled.KeyboardArrowDown
+                else Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = if (expanded) "收起" else "展开",
+                modifier = Modifier.size(16.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.width(4.dp))
+            Text(
+                title,
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.Medium
+            )
+        }
+        if (expanded) {
+            Column(
+                Modifier.padding(start = 20.dp, bottom = 4.dp),
+                content = content
+            )
+        }
+    }
+}
+
+/** 日志弹窗中的纯文本节点：标题可展开，展开后显示 [text]（为空时显示占位） */
+@Composable
+private fun LogTextNode(title: String, text: String) {
+    LogNode(title) {
+        Text(
+            text.ifBlank { "（空）" },
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(8.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant)
+                .padding(8.dp),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+/**
+ * 「查看日志」弹窗：按「预设日志（命中缓存）→ 上下文日志（命中缓存）→ 本轮提示词日志（新增缓存）」
+ * 三层回显本轮发送时的提示词，所有节点默认收起、逐层展开。
+ */
+@Composable
+private fun PromptLogDialog(log: PromptLog?, onClose: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onClose,
+        title = { Text("提示词日志") },
+        text = {
+            if (log == null) {
+                Text("本轮没有记录提示词日志（旧消息或未发送成功）")
+            } else {
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 440.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    // 一、预设日志：会话建立时冻结、每轮复用（命中缓存）
+                    LogSectionTitle("预设日志（命中缓存部分）")
+                    LogTextNode("预设提示词", log.systemPrompt)
+                    LogTextNode("自定义前缀", log.customPrefix)
+                    LogNode("大纲内容") {
+                        if (log.outlines.isEmpty()) {
+                            Text(
+                                "（未勾选大纲）",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        } else {
+                            log.outlines.forEach { node ->
+                                LogTextNode(node.title.ifBlank { "大纲条目" }, node.text)
+                            }
+                        }
+                    }
+
+                    // 二、上下文日志：历史上已发送过的轮次（命中缓存）
+                    LogSectionTitle("上下文日志（命中缓存部分）")
+                    if (log.rounds.isEmpty()) {
+                        Text(
+                            "（无历史轮次）",
+                            modifier = Modifier.padding(vertical = 4.dp),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    } else {
+                        log.rounds.forEachIndexed { i, round ->
+                            LogNode("第${i + 1}轮") {
+                                Text(
+                                    "用户：${round.user.ifBlank { "（空）" }}",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    "助手：${round.assistant.ifBlank { "（空）" }}",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+                        }
+                    }
+
+                    // 三、本轮提示词日志：本轮新拼入、尚未进缓存的部分
+                    LogSectionTitle("本轮提示词日志（未命中缓存部分）")
+                    LogTextNode("本章梗概", log.summary)
+                    if (log.memory.isNotBlank()) LogTextNode("记忆检索参考资料", log.memory)
+                    if (log.autoOutline.isNotBlank()) LogTextNode("新增大纲参考资料", log.autoOutline)
+                    LogTextNode("用户提示词部分", log.userPrompt)
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onClose) { Text("关闭") } }
+    )
+}
+
+/** 「查看本轮提示词」弹窗：只回显本轮实际发送的完整提示词，可整段复制 */
+@Composable
+private fun PromptTextDialog(log: PromptLog?, onCopy: (String) -> Unit, onClose: () -> Unit) {
+    val text = log?.fullPrompt.orEmpty()
+    AlertDialog(
+        onDismissRequest = onClose,
+        title = { Text("本轮提示词") },
+        text = {
+            if (text.isBlank()) {
+                Text("本轮没有记录提示词（旧消息或未发送成功）")
+            } else {
+                key(text) {
+                    SelectionContainer {
+                        Text(
+                            text,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 440.dp)
+                                .verticalScroll(rememberScrollState()),
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            if (text.isNotBlank()) {
+                TextButton(onClick = { onCopy(text) }) { Text("复制") }
+            }
+            TextButton(onClick = onClose) { Text("关闭") }
+        }
+    )
+}
+
 /** 对话项上的临时 UI 状态：待确认删除的消息、正在内联编辑的回答 */
 @Stable
 private class MessageUiState {
@@ -1836,6 +2424,7 @@ private fun ChatMessageItem(
     streamingReasoning: String,
     ui: MessageUiState,
     chapters: List<Chapter>,
+    volumes: List<Volume>,
     outline: List<OutlineItem>,
     previewFor: suspend (ContextSnapshot) -> String,
     onEditUser: (ChatMessage) -> Unit,
@@ -1845,7 +2434,10 @@ private fun ChatMessageItem(
     onSaveEdit: (Long, String) -> Unit,
     onSaveAndSend: (Long, String, Long) -> Unit,
     onSwitchVariant: (Long, Long) -> Unit,
-    onToggleContent: (Long, Boolean) -> Unit,
+    /** 「查看日志」：弹出本轮提示词日志（预设 / 上下文 / 本轮三部分） */
+    onViewLog: (ChatMessage) -> Unit,
+    /** 「查看本轮提示词」：弹出本轮实际发送的完整提示词 */
+    onViewPrompt: (ChatMessage) -> Unit,
     onStop: () -> Unit,
     /** 侧边栏 AI 助手专属：把这条回答的正文写入当前章节；为空则不显示该操作（如导航栏 AI 对话页） */
     onWriteToChapter: ((String) -> Unit)? = null
@@ -1854,18 +2446,53 @@ private fun ChatMessageItem(
         is ChatEntry.User -> {
             val msg = entry.msg
             val generating = pendingReplyToId == msg.id
-            // 长按可选中并复制消息内容；key 随 selectionReset 变化时重建以取消选中
-            key(ui.selectionReset) {
-                SelectionContainer {
-                    Text(
-                        text = msg.content,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(10.dp))
-                            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(10.dp))
-                            .padding(horizontal = 12.dp, vertical = 10.dp),
-                        style = MaterialTheme.typography.bodyMedium
-                    )
+            MessageCard(
+                label = chapterLocationLabel(msg.chapterId, chapters, volumes),
+                time = msg.createdAt,
+                ai = false,
+                tools = {
+                    MessageAction(Icons.Filled.Refresh, "重新生成", enabled = !sending) {
+                        ui.pendingDeleteId = null
+                        onRegenerate(msg.id)
+                    }
+                    MessageAction(Icons.Filled.Edit, "编辑") {
+                        ui.pendingDeleteId = null
+                        onEditUser(msg)
+                    }
+                    MessageAction(Icons.Filled.ContentCopy, "复制") {
+                        ui.pendingDeleteId = null
+                        onCopy(msg.content)
+                    }
+                    DeleteAction(msg.id, ui, onDelete)
+                    Spacer(Modifier.weight(1f))
+                    // 生成中把翻页器翻到“新的一页”，生成完成后即可在历史版本间回看
+                    val total = entry.variants.size + if (generating) 1 else 0
+                    if (total > 1) {
+                        VariantPager(
+                            index = if (generating) entry.variants.size else entry.activeIndex,
+                            total = total,
+                            enabled = !generating,
+                            onPrev = {
+                                entry.variants.getOrNull(entry.activeIndex - 1)
+                                    ?.let { onSwitchVariant(msg.id, it.id) }
+                            },
+                            onNext = {
+                                entry.variants.getOrNull(entry.activeIndex + 1)
+                                    ?.let { onSwitchVariant(msg.id, it.id) }
+                            }
+                        )
+                    }
+                }
+            ) {
+                // 长按可选中并复制消息内容；key 随 selectionReset 变化时重建以取消选中
+                key(ui.selectionReset) {
+                    SelectionContainer {
+                        Text(
+                            text = msg.content,
+                            modifier = Modifier.fillMaxWidth(),
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
                 }
             }
             // 这条消息发送时选好的上下文（文件清单）
@@ -1876,40 +2503,6 @@ private fun ChatMessageItem(
                 outline = outline,
                 preview = { previewFor(snapshot) }
             )
-            Spacer(Modifier.height(4.dp))
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                MessageAction(Icons.Filled.Refresh, "重新生成", enabled = !sending) {
-                    ui.pendingDeleteId = null
-                    onRegenerate(msg.id)
-                }
-                MessageAction(Icons.Filled.Edit, "编辑") {
-                    ui.pendingDeleteId = null
-                    onEditUser(msg)
-                }
-                MessageAction(Icons.Filled.ContentCopy, "复制") {
-                    ui.pendingDeleteId = null
-                    onCopy(msg.content)
-                }
-                DeleteAction(msg.id, ui, onDelete)
-                Spacer(Modifier.weight(1f))
-                // 生成中把翻页器翻到“新的一页”，生成完成后即可在历史版本间回看
-                val total = entry.variants.size + if (generating) 1 else 0
-                if (total > 1) {
-                    VariantPager(
-                        index = if (generating) entry.variants.size else entry.activeIndex,
-                        total = total,
-                        enabled = !generating,
-                        onPrev = {
-                            entry.variants.getOrNull(entry.activeIndex - 1)
-                                ?.let { onSwitchVariant(msg.id, it.id) }
-                        },
-                        onNext = {
-                            entry.variants.getOrNull(entry.activeIndex + 1)
-                                ?.let { onSwitchVariant(msg.id, it.id) }
-                        }
-                    )
-                }
-            }
             if (generating) {
                 Spacer(Modifier.height(10.dp))
                 RespondingBlock(
@@ -1923,6 +2516,7 @@ private fun ChatMessageItem(
                     AssistantBlock(
                         msg = active,
                         userMessageId = msg.id,
+                        locationLabel = chapterLocationLabel(msg.chapterId, chapters, volumes),
                         modelName = modelName,
                         sending = sending,
                         ui = ui,
@@ -1931,7 +2525,8 @@ private fun ChatMessageItem(
                         onDelete = onDelete,
                         onSaveEdit = onSaveEdit,
                         onSaveAndSend = onSaveAndSend,
-                        onToggleContent = onToggleContent,
+                        onViewLog = onViewLog,
+                        onViewPrompt = onViewPrompt,
                         onWriteToChapter = onWriteToChapter
                     )
                 }
@@ -1941,6 +2536,7 @@ private fun ChatMessageItem(
         is ChatEntry.Assistant -> AssistantBlock(
             msg = entry.msg,
             userMessageId = entry.replyToUserId,
+            locationLabel = chapterLocationLabel(entry.msg.chapterId, chapters, volumes),
             modelName = modelName,
             sending = sending,
             ui = ui,
@@ -1949,10 +2545,22 @@ private fun ChatMessageItem(
             onDelete = onDelete,
             onSaveEdit = onSaveEdit,
             onSaveAndSend = onSaveAndSend,
-            onToggleContent = onToggleContent,
+            onViewLog = onViewLog,
+            onViewPrompt = onViewPrompt,
             onWriteToChapter = onWriteToChapter
         )
     }
+}
+
+/** 消息卡片头部展示的定位文本：所属「分卷 · 章节名」；未绑定章节时返回空串 */
+private fun chapterLocationLabel(
+    chapterId: Long,
+    chapters: List<Chapter>,
+    volumes: List<Volume>
+): String {
+    val chapter = chapters.firstOrNull { it.id == chapterId } ?: return ""
+    val volume = volumes.firstOrNull { it.id == chapter.volumeId }
+    return "${volume?.title ?: "未分卷"} · ${chapter.title}"
 }
 
 /** 助手回答：深度思考（可选）+ 正文 + 操作行；编辑态下变为输入框 + 保存类按钮 */
@@ -1960,6 +2568,8 @@ private fun ChatMessageItem(
 private fun AssistantBlock(
     msg: ChatMessage,
     userMessageId: Long,
+    /** 卡片头部展示的「分卷 · 章节名」 */
+    locationLabel: String,
     modelName: String,
     sending: Boolean,
     ui: MessageUiState,
@@ -1968,97 +2578,241 @@ private fun AssistantBlock(
     onDelete: (Long) -> Unit,
     onSaveEdit: (Long, String) -> Unit,
     onSaveAndSend: (Long, String, Long) -> Unit,
-    onToggleContent: (Long, Boolean) -> Unit,
+    onViewLog: (ChatMessage) -> Unit,
+    onViewPrompt: (ChatMessage) -> Unit,
     onWriteToChapter: ((String) -> Unit)? = null
 ) {
-    if (msg.reasoning.isNotBlank()) {
-        ThinkingBlock(msg.reasoning)
-        Spacer(Modifier.height(6.dp))
-    }
     if (ui.editingId == msg.id) {
-        OutlinedTextField(
-            value = ui.editingText,
-            onValueChange = { ui.editingText = it },
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(10.dp),
-            maxLines = 12
-        )
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = {
-                onSaveEdit(msg.id, ui.editingText)
-                ui.editingId = null
-            }) { Text("保存") }
-            TextButton(onClick = {
-                onSaveAndSend(msg.id, ui.editingText, userMessageId)
-                ui.editingId = null
-            }) { Text("保存并发送") }
-            TextButton(onClick = { ui.editingId = null }) { Text("取消") }
+        MessageCard(
+            label = locationLabel,
+            time = msg.createdAt,
+            ai = true,
+            tools = {
+                TextButton(onClick = {
+                    onSaveEdit(msg.id, ui.editingText)
+                    ui.editingId = null
+                }) { Text("保存") }
+                TextButton(onClick = {
+                    onSaveAndSend(msg.id, ui.editingText, userMessageId)
+                    ui.editingId = null
+                }) { Text("保存并发送") }
+                TextButton(onClick = { ui.editingId = null }) { Text("取消") }
+            }
+        ) {
+            OutlinedTextField(
+                value = ui.editingText,
+                onValueChange = { ui.editingText = it },
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(10.dp),
+                maxLines = 12
+            )
         }
     } else {
-        AnswerBlock(
-            content = msg.content,
-            collapsed = msg.contentCollapsed,
-            resetKey = ui.selectionReset,
-            onToggle = { onToggleContent(msg.id, !msg.contentCollapsed) }
-        )
-        Spacer(Modifier.height(6.dp))
-        // 模型与本次消耗的 token 同行显示，位于操作按钮行上方
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                "model: $modelName",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+        MessageCard(
+            label = locationLabel,
+            time = msg.createdAt,
+            ai = true,
+            tools = {
+                MessageAction(
+                    Icons.Filled.Refresh, "重新生成",
+                    enabled = !sending && userMessageId > 0
+                ) {
+                    ui.pendingDeleteId = null
+                    onRegenerate(userMessageId)
+                }
+                MessageAction(Icons.Filled.Edit, "编辑") {
+                    ui.pendingDeleteId = null
+                    ui.editingText = msg.content
+                    ui.editingId = msg.id
+                }
+                MessageAction(Icons.Filled.ContentCopy, "复制") {
+                    ui.pendingDeleteId = null
+                    onCopy(msg.content)
+                }
+                // 「查看日志」：分预设 / 上下文 / 本轮三部分回显本次发送的提示词
+                MessageAction(Icons.Filled.ReceiptLong, "查看日志") {
+                    ui.pendingDeleteId = null
+                    onViewLog(msg)
+                }
+                // 「查看本轮提示词」：只看本轮真正发给 AI 的提示词
+                MessageAction(Icons.Filled.Article, "查看本轮提示词") {
+                    ui.pendingDeleteId = null
+                    onViewPrompt(msg)
+                }
+                // 侧边栏专属：把本条回答正文写入当前章节（覆盖 + 一键排版）
+                onWriteToChapter?.let { write ->
+                    MessageAction(Icons.Filled.EditNote, "写入当前章节") {
+                        ui.pendingDeleteId = null
+                        write(msg.content)
+                    }
+                }
+                DeleteAction(msg.id, ui, onDelete)
+            }
+        ) {
+            if (msg.reasoning.isNotBlank()) {
+                ThinkingBlock(msg.reasoning)
+                Spacer(Modifier.height(6.dp))
+            }
+            // 回答正文不再单独收起：历史章节的对话由所属章节分组统一收起（见 ChapterGroupCard）
+            AnswerBlock(
+                content = msg.content,
+                resetKey = ui.selectionReset
             )
-            val tokens = msg.promptTokens + msg.completionTokens
-            if (tokens > 0) {
-                Spacer(Modifier.weight(1f))
-                // 缓存命中率 = 命中缓存的输入 token / 总输入 token
-                val hit = if (msg.promptTokens > 0) msg.cachedTokens * 100 / msg.promptTokens else 0
+            Spacer(Modifier.height(6.dp))
+            // 模型与本次消耗的 token 同行显示，位于操作按钮行上方
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    buildString {
-                        append("消耗 $tokens tokens（输入 ${msg.promptTokens} / 输出 ${msg.completionTokens}）")
-                        // 只要记录了输入 token 就展示命中率：首轮没有缓存命中时显示 0%，
-                        // 避免「第一次生成看不到缓存命中率」的观感问题
-                        if (msg.promptTokens > 0) append(" · 缓存命中 $hit%")
-                    },
+                    "model: $modelName",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-            }
-        }
-        Spacer(Modifier.height(4.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            MessageAction(
-                Icons.Filled.Refresh, "重新生成",
-                enabled = !sending && userMessageId > 0
-            ) {
-                ui.pendingDeleteId = null
-                onRegenerate(userMessageId)
-            }
-            MessageAction(Icons.Filled.Edit, "编辑") {
-                ui.pendingDeleteId = null
-                ui.editingText = msg.content
-                ui.editingId = msg.id
-            }
-            MessageAction(Icons.Filled.ContentCopy, "复制") {
-                ui.pendingDeleteId = null
-                onCopy(msg.content)
-            }
-            // 侧边栏专属：把本条回答正文写入当前章节（覆盖 + 一键排版）
-            onWriteToChapter?.let { write ->
-                MessageAction(Icons.Filled.EditNote, "写入当前章节") {
-                    ui.pendingDeleteId = null
-                    write(msg.content)
+                val tokens = msg.promptTokens + msg.completionTokens
+                if (tokens > 0) {
+                    Spacer(Modifier.weight(1f))
+                    // 缓存命中率 = 命中缓存的输入 token / 总输入 token
+                    val hit = if (msg.promptTokens > 0) msg.cachedTokens * 100 / msg.promptTokens else 0
+                    Text(
+                        buildString {
+                            append("消耗 $tokens tokens（输入 ${msg.promptTokens} / 输出 ${msg.completionTokens}）")
+                            // 只要记录了输入 token 就展示命中率：首轮没有缓存命中时显示 0%，
+                            // 避免「第一次生成看不到缓存命中率」的观感问题
+                            if (msg.promptTokens > 0) append(" · 缓存命中 $hit%")
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
-            MessageAction(
-                if (msg.contentCollapsed) Icons.Filled.KeyboardArrowDown else Icons.Filled.KeyboardArrowUp,
-                if (msg.contentCollapsed) "展开回答" else "收起回答"
+        }
+    }
+}
+
+/**
+ * 对话气泡卡片：统一「分卷 · 章节名 + 时间 + 正文 + 操作栏」外观。
+ * 用户消息为纸白底，AI 消息为淡紫底；操作栏与正文之间用一条细分隔线分开（参照原型）。
+ */
+@Composable
+private fun MessageCard(
+    label: String,
+    time: Long,
+    ai: Boolean,
+    tools: @Composable RowScope.() -> Unit,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    val shape = RoundedCornerShape(15.dp)
+    val accent = MaterialTheme.colorScheme.primary
+    val background = if (ai) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.30f)
+    else MaterialTheme.colorScheme.surface
+    val borderColor = if (ai) accent.copy(alpha = 0.20f) else MaterialTheme.colorScheme.outlineVariant
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(background)
+            .border(1.dp, borderColor, shape)
+    ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(start = 12.dp, end = 12.dp, top = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                label,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = accent
+            )
+            Spacer(Modifier.weight(1f))
+            Text(
+                formatMessageTime(time),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        Column(
+            Modifier.padding(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 8.dp),
+            content = content
+        )
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            content = tools
+        )
+    }
+}
+
+/** 消息时间：HH:mm（本地时区） */
+private fun formatMessageTime(millis: Long): String {
+    if (millis <= 0L) return ""
+    val cal = java.util.Calendar.getInstance().apply { timeInMillis = millis }
+    return "%02d:%02d".format(
+        cal.get(java.util.Calendar.HOUR_OF_DAY),
+        cal.get(java.util.Calendar.MINUTE)
+    )
+}
+
+/**
+ * 统一的对话输入区（参照原型 composer）：外侧圆角描边卡片，内嵌无边框输入框与圆形发送按钮。
+ * 输入行随内容高度自适应，最多 5 行。
+ */
+@Composable
+private fun ChatComposer(
+    value: String,
+    onValueChange: (String) -> Unit,
+    placeholder: String,
+    sendEnabled: Boolean,
+    onSend: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.5.dp, MaterialTheme.colorScheme.outlineVariant)
+    ) {
+        Row(
+            Modifier.padding(start = 6.dp, end = 6.dp, top = 2.dp, bottom = 2.dp),
+            verticalAlignment = Alignment.Bottom
+        ) {
+            TextField(
+                value = value,
+                onValueChange = onValueChange,
+                modifier = Modifier.weight(1f),
+                placeholder = {
+                    Text(placeholder, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                },
+                maxLines = 5,
+                colors = TextFieldDefaults.colors(
+                    focusedContainerColor = Color.Transparent,
+                    unfocusedContainerColor = Color.Transparent,
+                    disabledContainerColor = Color.Transparent,
+                    focusedIndicatorColor = Color.Transparent,
+                    unfocusedIndicatorColor = Color.Transparent,
+                    disabledIndicatorColor = Color.Transparent
+                )
+            )
+            Box(
+                Modifier
+                    .padding(end = 2.dp, bottom = 5.dp)
+                    .size(38.dp)
+                    .clip(CircleShape)
+                    .background(
+                        if (sendEnabled) MaterialTheme.colorScheme.primaryContainer
+                        else MaterialTheme.colorScheme.surfaceVariant
+                    )
+                    .clickable(enabled = sendEnabled, onClick = onSend),
+                contentAlignment = Alignment.Center
             ) {
-                ui.pendingDeleteId = null
-                onToggleContent(msg.id, !msg.contentCollapsed)
+                Icon(
+                    Icons.AutoMirrored.Filled.Send,
+                    contentDescription = "发送",
+                    modifier = Modifier.size(18.dp),
+                    tint = if (sendEnabled) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
-            DeleteAction(msg.id, ui, onDelete)
         }
     }
 }
@@ -2182,26 +2936,15 @@ private fun ThinkingBlock(reasoning: String) {
 }
 
 /**
- * 回答正文：与灰色「深度思考」块区分开，展开时仍是纯文本（保持旧版外观）。
- * 收起后只留一行提示，点击即可展开；折叠状态随消息持久化（[ChatMessage.contentCollapsed]）。
+ * 回答正文：与灰色「深度思考」块区分开，始终是纯文本（保持旧版外观）。
+ * 正文不再单独收起：历史对话由所属章节分组统一收起（见 [ChapterGroupCard]）。
  */
 @Composable
-private fun AnswerBlock(content: String, collapsed: Boolean, resetKey: Int, onToggle: () -> Unit) {
-    if (collapsed) {
-        Text(
-            "回答已收起，点击展开",
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable { onToggle() },
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-    } else {
-        // 长按可选中并复制回答内容；key 随 resetKey 变化时重建以取消选中
-        key(resetKey) {
-            SelectionContainer {
-                Text(content, style = MaterialTheme.typography.bodyMedium)
-            }
+private fun AnswerBlock(content: String, resetKey: Int) {
+    // 长按可选中并复制回答内容；key 随 resetKey 变化时重建以取消选中
+    key(resetKey) {
+        SelectionContainer {
+            Text(content, style = MaterialTheme.typography.bodyMedium)
         }
     }
 }
@@ -2289,7 +3032,11 @@ private fun ContextManifest(
     preview: suspend () -> String
 ) {
     val chapterRows = snapshot.chapterIds.map { id ->
-        chapters.firstOrNull { it.id == id }?.title ?: "（章节已删除）"
+        ManifestChapterRow(
+            title = chapters.firstOrNull { it.id == id }?.title ?: "（章节已删除）",
+            summary = snapshot.summaryAll || id in snapshot.summaryChapterIds,
+            content = snapshot.contentAll || id in snapshot.contentChapterIds
+        )
     }
     val outlineRows = snapshot.outlineIds.map { id ->
         outline.firstOrNull { it.id == id }
@@ -2358,7 +3105,6 @@ private fun ContextManifest(
 
         ContextManifestContent(
             state = state,
-            snapshot = snapshot,
             chapterRows = chapterRows,
             outlineRows = outlineRows,
             preview = preview
@@ -2366,12 +3112,14 @@ private fun ContextManifest(
     }
 }
 
+/** 文件清单里的一个章节行：标题 + 是否纳入梗概 / 正文 */
+private data class ManifestChapterRow(val title: String, val summary: Boolean, val content: Boolean)
+
 /** 文件清单内容区：state=1 显示清单表格，state=2 显示生成的 txt，其余不渲染 */
 @Composable
 private fun ContextManifestContent(
     state: Int,
-    snapshot: ContextSnapshot,
-    chapterRows: List<String>,
+    chapterRows: List<ManifestChapterRow>,
     outlineRows: List<String>,
     preview: suspend () -> String,
     modifier: Modifier = Modifier
@@ -2401,26 +3149,26 @@ private fun ContextManifestContent(
                         Text("仅正文", style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.SemiBold, modifier = Modifier.width(52.dp))
                     }
-                    chapterRows.forEach { title ->
+                    chapterRows.forEach { row ->
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                         Row(
                             Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                title,
+                                row.title,
                                 style = MaterialTheme.typography.bodySmall,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.weight(1f)
                             )
                             Text(
-                                if (snapshot.includeSummary) "✓" else "—",
+                                if (row.summary) "✓" else "—",
                                 style = MaterialTheme.typography.bodySmall,
                                 modifier = Modifier.width(52.dp)
                             )
                             Text(
-                                if (snapshot.includeContent) "✓" else "—",
+                                if (row.content) "✓" else "—",
                                 style = MaterialTheme.typography.bodySmall,
                                 modifier = Modifier.width(52.dp)
                             )
@@ -2452,7 +3200,7 @@ private fun ContextManifestContent(
 
             2 -> {
                 var text by remember { mutableStateOf("") }
-                LaunchedEffect(snapshot) { text = preview() }
+                LaunchedEffect(chapterRows, outlineRows) { text = preview() }
                 Text(
                     if (text.isBlank()) "（暂无可生成的上下文）" else text,
                     style = MaterialTheme.typography.bodySmall,

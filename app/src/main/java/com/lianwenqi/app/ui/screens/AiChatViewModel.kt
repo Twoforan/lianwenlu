@@ -7,6 +7,8 @@ import com.lianwenqi.app.data.AiChapterImporter
 import com.lianwenqi.app.data.AiOutlineImporter
 import com.lianwenqi.app.data.ChatEvent
 import com.lianwenqi.app.data.MemoryGateway
+import com.lianwenqi.app.data.PromptLogContext
+import com.lianwenqi.app.data.PromptLogNode
 import com.lianwenqi.app.data.SendChatMessageUseCase
 import com.lianwenqi.app.data.SendChatRequest
 import com.lianwenqi.app.data.VectorizeProgress
@@ -122,14 +124,22 @@ class AiChatViewModel(
     val selectedBookIds = MutableStateFlow<Set<Long>>(emptySet())
     val selectedChapterIds = MutableStateFlow<Set<Long>>(emptySet())
     val selectedOutlineIds = MutableStateFlow<Set<Long>>(emptySet())
+
+    /** 纳入「梗概」的章节（须同时在 [selectedChapterIds] 内才生效） */
+    val summaryChapterIds = MutableStateFlow<Set<Long>>(emptySet())
+
+    /** 纳入「正文」的章节（须同时在 [selectedChapterIds] 内才生效） */
+    val contentChapterIds = MutableStateFlow<Set<Long>>(emptySet())
+
     /**
      * 章节上下文是否处于「全选」状态。
      * 编辑器场景下当前打开的章节不进上下文，所以「全选」的具体 id 集合会随章节切换而变化；
      * 记录该标记后，切到别的章节时仍是「全选」而不是被还原成上一章的具体列表。
+     * [summaryAllSelected] / [contentAllSelected] 同理，用于「梗概 / 正文」两列的全选状态。
      */
     val chapterAllSelected = MutableStateFlow(false)
-    val includeContent = MutableStateFlow(true)
-    val includeSummary = MutableStateFlow(true)
+    val summaryAllSelected = MutableStateFlow(false)
+    val contentAllSelected = MutableStateFlow(false)
 
     /** 「＋本章梗概」：是否把当前打开章节的梗概额外加入上下文 */
     val currentSummaryOn = MutableStateFlow(false)
@@ -440,69 +450,68 @@ class AiChatViewModel(
 
     /**
      * 进入 AI 面板时决定展示哪个会话：
-     * 跟章节 → 该章节上一次的会话；跟书 → 该书最近一次绑定本书的会话（没有则新建）。
+     * 统一「跟书走」→ 该书最近一次绑定本书的会话（没有则新建）。
      */
     private suspend fun restoreInitialSession() {
-        val chapterId = fixedChapterId
-        if (chapterId != null) {
-            if (prefs.aiFollowBook.first()) {
-                val bookId = memoryBookId()
-                if (bookId != null) {
-                    val existing = chatRepository.getBookSession(bookId)
-                    if (existing != null) {
-                        _sessionId.value = existing.id
-                        restoreContextMemory()
-                    } else {
-                        _sessionId.value = createBookSession(bookId, activeModelId.value.takeIf { it > 0 })
-                        applyNewBookSessionDefaults(bookId)
-                    }
-                    return
+        if (fixedChapterId != null) {
+            val bookId = memoryBookId()
+            if (bookId != null) {
+                val existing = chatRepository.getBookSession(bookId)
+                if (existing != null) {
+                    _sessionId.value = existing.id
+                    restoreContextMemory()
+                } else {
+                    _sessionId.value = createBookSession(bookId, activeModelId.value.takeIf { it > 0 })
+                    applyNewBookSessionDefaults(bookId)
                 }
-            } else {
-                chatRepository.getSessionByChapter(chapterId)?.let { _sessionId.value = it.id }
+                return
             }
         }
         restoreContextMemory()
     }
 
-    /** 套用「本书上次选中的章节 / 大纲与梗概正文开关」 */
+    /** 套用「本书上次选中的章节 / 大纲与梗概正文勾选」 */
     private suspend fun restoreContextMemory() {
         val bookId = memoryBookId() ?: return
         val mem = prefs.aiContextMemory(bookId) ?: return
         val chapterIds = _chapters.value.map { it.id }.toSet()
         val outlineIds = _outline.value.map { it.id }.toSet()
+        val all = contextChapterIds()
         if (mem.chapterAll) {
             // 上次是「全选」：按当前章节重新展开，切章节后依然保持全选
-            selectedChapterIds.value = contextChapterIds()
-            chapterAllSelected.value = true
+            selectedChapterIds.value = all
         } else {
             selectedChapterIds.value = mem.chapterIds.filter { it in chapterIds }.toSet()
-            refreshChapterAllFlag()
         }
+        summaryChapterIds.value =
+            if (mem.summaryAll) all else mem.summaryChapterIds.filter { it in chapterIds }.toSet()
+        contentChapterIds.value =
+            if (mem.contentAll) all else mem.contentChapterIds.filter { it in chapterIds }.toSet()
         selectedOutlineIds.value = mem.outlineIds.filter { it in outlineIds }.toSet()
-        includeSummary.value = mem.includeSummary
-        includeContent.value = mem.includeContent
+        refreshAllFlags()
     }
 
     /** 当前章节上下文的「全部章节」：编辑器场景排除当前打开的章节 */
     private fun contextChapterIds(): Set<Long> =
         _chapters.value.filter { it.id != fixedChapterId }.map { it.id }.toSet()
 
-    /** 依据当前选中集合重新判定是否仍处于「全选」 */
-    private fun refreshChapterAllFlag() {
+    /** 依据当前选中集合重新判定三列是否仍处于「全选」 */
+    private fun refreshAllFlags() {
         val all = contextChapterIds()
         chapterAllSelected.value = all.isNotEmpty() && selectedChapterIds.value == all
+        val sel = selectedChapterIds.value
+        summaryAllSelected.value = sel.isNotEmpty() && summaryChapterIds.value.containsAll(sel)
+        contentAllSelected.value = sel.isNotEmpty() && contentChapterIds.value.containsAll(sel)
     }
 
     /** 上下文选择变化时写入「本书记忆」，下次进入同一本书自动套用 */
     private suspend fun watchContextChanges() {
-        combine(
-            selectedChapterIds,
-            selectedOutlineIds,
-            includeSummary,
-            includeContent,
-            chapterAllSelected
-        ) { _, _, _, _, _ -> Unit }.collect {
+        // combine 最多支持 5 个不同类型的数据源，分两组嵌套后再合并，避免类型推断失败
+        val signal = combine(
+            combine(selectedChapterIds, selectedOutlineIds, summaryChapterIds) { _, _, _ -> Unit },
+            combine(contentChapterIds, chapterAllSelected, summaryAllSelected, contentAllSelected) { _, _, _, _ -> Unit }
+        ) { _, _ -> Unit }
+        signal.collect {
             val bookId = memoryBookId() ?: return@collect
             prefs.setAiContextMemory(
                 bookId,
@@ -510,9 +519,11 @@ class AiChatViewModel(
                     bookIds = selectedBookIds.value.toList(),
                     chapterIds = selectedChapterIds.value.toList(),
                     outlineIds = selectedOutlineIds.value.toList(),
-                    includeSummary = includeSummary.value,
-                    includeContent = includeContent.value,
-                    chapterAll = chapterAllSelected.value
+                    summaryChapterIds = summaryChapterIds.value.toList(),
+                    contentChapterIds = contentChapterIds.value.toList(),
+                    chapterAll = chapterAllSelected.value,
+                    summaryAll = summaryAllSelected.value,
+                    contentAll = contentAllSelected.value
                 )
             )
         }
@@ -559,21 +570,101 @@ class AiChatViewModel(
         selectBook(createBook(title))
     }
 
+    /** 勾选 / 取消某章是否纳入上下文；取消时同时清掉该章的梗概 / 正文勾选 */
     fun toggleChapter(id: Long) {
-        selectedChapterIds.value = selectedChapterIds.value.toggle(id)
-        refreshChapterAllFlag()
+        val nowChecked = id !in selectedChapterIds.value
+        selectedChapterIds.value =
+            if (nowChecked) selectedChapterIds.value + id else selectedChapterIds.value - id
+        if (nowChecked) {
+            // 勾选章节时默认带上「梗概」（与新建跟书会话的默认一致）
+            summaryChapterIds.value = summaryChapterIds.value + id
+        } else {
+            summaryChapterIds.value = summaryChapterIds.value - id
+            contentChapterIds.value = contentChapterIds.value - id
+        }
+        refreshAllFlags()
+    }
+
+    /** 单独勾选 / 取消某章的梗概 */
+    fun toggleChapterSummary(id: Long) {
+        summaryChapterIds.value = summaryChapterIds.value.toggle(id)
+        refreshAllFlags()
+    }
+
+    /** 单独勾选 / 取消某章的正文 */
+    fun toggleChapterContent(id: Long) {
+        contentChapterIds.value = contentChapterIds.value.toggle(id)
+        refreshAllFlags()
     }
 
     fun toggleOutline(id: Long) {
         selectedOutlineIds.value = selectedOutlineIds.value.toggle(id)
     }
 
+    /** 全选 / 取消全选章节 */
     fun selectAllChapters() {
         val all = contextChapterIds()
-        selectedChapterIds.value =
-            if (selectedChapterIds.value.containsAll(all) && all.isNotEmpty()) emptySet() else all
-        refreshChapterAllFlag()
+        val on = !(selectedChapterIds.value.containsAll(all) && all.isNotEmpty())
+        selectedChapterIds.value = if (on) all else emptySet()
+        // 勾选章节时默认带上「梗概」；取消全选时一并清掉梗概与正文
+        summaryChapterIds.value = if (on) all else emptySet()
+        if (!on) contentChapterIds.value = emptySet()
+        refreshAllFlags()
     }
+
+    /** 一键全选 / 取消全选「梗概」（对所有已纳入上下文的章节生效） */
+    fun selectAllSummary() {
+        val sel = selectedChapterIds.value
+        val on = !(sel.isNotEmpty() && summaryChapterIds.value.containsAll(sel))
+        summaryChapterIds.value = if (on) summaryChapterIds.value + sel else summaryChapterIds.value - sel
+        refreshAllFlags()
+    }
+
+    /** 一键全选 / 取消全选「正文」（对所有已纳入上下文的章节生效） */
+    fun selectAllContent() {
+        val sel = selectedChapterIds.value
+        val on = !(sel.isNotEmpty() && contentChapterIds.value.containsAll(sel))
+        contentChapterIds.value = if (on) contentChapterIds.value + sel else contentChapterIds.value - sel
+        refreshAllFlags()
+    }
+
+    /** 整卷勾选 / 取消：章节列 */
+    fun toggleVolume(volumeId: Long) {
+        val ids = volumeChapterIds(volumeId)
+        if (ids.isEmpty()) return
+        val on = !ids.all { it in selectedChapterIds.value }
+        selectedChapterIds.value = if (on) selectedChapterIds.value + ids else selectedChapterIds.value - ids
+        if (on) summaryChapterIds.value = summaryChapterIds.value + ids
+        else {
+            summaryChapterIds.value = summaryChapterIds.value - ids
+            contentChapterIds.value = contentChapterIds.value - ids
+        }
+        refreshAllFlags()
+    }
+
+    /** 整卷勾选 / 取消：梗概列 */
+    fun toggleVolumeSummary(volumeId: Long) {
+        val ids = volumeChapterIds(volumeId)
+        if (ids.isEmpty()) return
+        summaryChapterIds.value =
+            if (ids.all { it in summaryChapterIds.value }) summaryChapterIds.value - ids
+            else summaryChapterIds.value + ids
+        refreshAllFlags()
+    }
+
+    /** 整卷勾选 / 取消：正文列 */
+    fun toggleVolumeContent(volumeId: Long) {
+        val ids = volumeChapterIds(volumeId)
+        if (ids.isEmpty()) return
+        contentChapterIds.value =
+            if (ids.all { it in contentChapterIds.value }) contentChapterIds.value - ids
+            else contentChapterIds.value + ids
+        refreshAllFlags()
+    }
+
+    /** 某卷下参与上下文的章节（排除编辑器当前打开的章节） */
+    private fun volumeChapterIds(volumeId: Long): Set<Long> =
+        _chapters.value.filter { it.volumeId == volumeId && it.id != fixedChapterId }.map { it.id }.toSet()
 
     fun selectAllOutline() {
         val all = _outline.value.map { it.id }.toSet()
@@ -643,45 +734,29 @@ class AiChatViewModel(
     }
 
     /**
-     * 「＋」新开对话：
-     * 跟章节 → 会话命名「书名-卷名-章节名」，并销毁该章节此前的对话；
-     * 跟书 → 新建绑定本书的对话（标题按「书名（现）/（1）…」重排），默认全选章节 + 仅梗概。
+     * 「＋」新开对话：统一「跟书走」→ 新建绑定本书的对话
+     * （标题按「书名（现）/（1）…」重排），默认全选章节 + 全选梗概。
      */
     fun newSession() {
         viewModelScope.launch {
             val bookId = selectedBookIds.value.firstOrNull() ?: defaultBookId
-            val chapterId = fixedChapterId
             val modelId = activeModelId.value.takeIf { it > 0 }
-            when {
-                chapterId != null && !prefs.aiFollowBook.first() -> {
-                    _sessionId.value = createChapterSession(chapterId, bookId, modelId)
-                    restoreContextMemory()
-                }
-                chapterId != null && bookId != null -> {
-                    _sessionId.value = createBookSession(bookId, modelId)
-                    applyNewBookSessionDefaults(bookId)
-                }
-                else -> {
-                    _sessionId.value = chatRepository.createSession("新对话", bookId, modelId, null)
-                }
+            if (bookId != null) {
+                _sessionId.value = createBookSession(bookId, modelId)
+                applyNewBookSessionDefaults(bookId)
+            } else {
+                _sessionId.value = chatRepository.createSession("新对话", null, modelId, null)
             }
             editingUserMessageId.value = 0L
             currentSummaryOn.value = false
         }
     }
 
-    /** 按当前模式（跟书 / 跟章节）为新会话建立归属，供发送时兜底建会话使用 */
+    /** 按当前归属（跟书走）为新会话建立绑定，供发送时兜底建会话使用 */
     private suspend fun createSessionForCurrentMode(modelId: Long): Long {
         val bookId = selectedBookIds.value.firstOrNull() ?: defaultBookId
-        val chapterId = fixedChapterId
-        return when {
-            chapterId != null && !prefs.aiFollowBook.first() ->
-                createChapterSession(chapterId, bookId, modelId)
-            chapterId != null && bookId != null ->
-                createBookSession(bookId, modelId)
-            else ->
-                chatRepository.createSession("新对话", bookId, modelId, null)
-        }
+        return if (bookId != null) createBookSession(bookId, modelId)
+        else chatRepository.createSession("新对话", null, modelId, null)
     }
 
     /** 新建绑定本书的会话，并按「书名（现）/（1）/（2）…」重排该书会话标题 */
@@ -696,13 +771,16 @@ class AiChatViewModel(
         return id
     }
 
-    /** 跟书模式新建对话后的默认上下文：全选章节 + 仅梗概；大纲按「首轮全选」开关处理 */
+    /** 新建跟书会话后的默认上下文：全选章节 + 全选梗概、不含正文；大纲按「首轮全选」开关处理 */
     private suspend fun applyNewBookSessionDefaults(bookId: Long) {
-        includeSummary.value = true
-        includeContent.value = false
         loadBookContextNow(bookId)
-        selectedChapterIds.value = contextChapterIds()
-        chapterAllSelected.value = true
+        val all = contextChapterIds()
+        selectedChapterIds.value = all
+        summaryChapterIds.value = all
+        contentChapterIds.value = emptySet()
+        chapterAllSelected.value = all.isNotEmpty()
+        summaryAllSelected.value = all.isNotEmpty()
+        contentAllSelected.value = false
         if (prefs.aiOutlineFirstRound.first()) {
             // 「首轮全选大纲」：把大纲写进首轮前缀，后续轮次靠前缀复用不再改写。
             // 开启「适配性筛选」时改为只全选「常驻化」分类下的全部内容，
@@ -719,24 +797,14 @@ class AiChatViewModel(
         }
     }
 
-    /** 跟章节模式：同一章节只保留最新一次对话，会话标题为「书名-卷名-章节名」 */
-    private suspend fun createChapterSession(chapterId: Long, bookId: Long?, modelId: Long?): Long {
-        val id = chatRepository.createSession(chapterSessionTitle(chapterId), bookId, modelId, chapterId)
-        chatRepository.sessionsByChapter(chapterId).filter { it.id != id }.forEach { chatRepository.deleteSession(it.id) }
-        return id
-    }
-
-    /** 跟章节模式的会话标题：书名-卷名-章节名 */
-    private suspend fun chapterSessionTitle(chapterId: Long): String {
-        val chapter = bookRepository.getChapter(chapterId) ?: return "新对话"
-        val bookTitle = bookRepository.getBook(chapter.bookId)?.title.orEmpty()
-        val volumeTitle = chapter.volumeId?.let { vid ->
-            bookRepository.getVolumes(chapter.bookId).firstOrNull { it.id == vid }?.title.orEmpty()
-        }.orEmpty()
-        return listOf(bookTitle, volumeTitle, chapter.title)
-            .filter { it.isNotBlank() }
-            .joinToString("-")
-            .ifBlank { "新对话" }
+    /** 修改某章标题，并同步到书籍（会话按章节分组、编辑器等均据此刷新） */
+    fun renameChapter(chapterId: Long, title: String) = viewModelScope.launch {
+        val name = title.trim()
+        if (name.isBlank()) return@launch
+        val chapter = bookRepository.getChapter(chapterId) ?: return@launch
+        bookRepository.saveChapter(chapter.copy(title = name))
+        // 重新加载该书章节，让分组卡片标题即时更新
+        loadBookContextNow(chapter.bookId)
     }
 
     fun openSession(id: Long) {
@@ -898,30 +966,57 @@ class AiChatViewModel(
         // 长期记忆检索命中片段同样挂在本轮用户消息尾端落库（进入历史对话的上下文部分最后），不写会话前缀。
         val prefix = prepareSessionPrefix(sid)
         val memoryRef = memoryReferenceForText(text)
+        val summaryBlock = chapterBlockSuffix()
         // 顺序：新增参考资料 → 本章梗概 → 检索片段（片段参考资料）→ 适配性筛选新增大纲资料 → 用户提示词
-        val extra = listOf(prefix.newReference, chapterBlockSuffix(), memoryRef, prefix.autoOutlineMaterial)
+        val extra = listOf(prefix.newReference, summaryBlock, memoryRef, prefix.autoOutlineMaterial)
             .filter { it.isNotBlank() }
             .joinToString("\n\n")
         val userId = chatRepository.addMessage(
             sid, ChatRole.USER, text,
             contextSnapshot = currentSnapshot().encode(),
-            promptExtra = extra
+            promptExtra = extra,
+            // 记录本轮对话发生在哪一章，供聊天页按章节分组收起历史对话
+            chapterId = currentRoundChapterId()
         )
         if (overrideText == null) input.value = ""
         runGeneration(
             sid, modelId, systemPrompt,
-            replyToUserId = userId, historyEndId = userId, variantIndex = 0, prefix = prefix
+            replyToUserId = userId, historyEndId = userId, variantIndex = 0, prefix = prefix,
+            logContext = PromptLogContext(
+                outlines = prefix.outlineEntries.map { PromptLogNode(outlineLogTitle(it.text), it.text) },
+                summary = summaryBlock,
+                memory = memoryRef,
+                autoOutline = prefix.autoOutlineMaterial
+            )
         )
     }
 
-    /** 当前勾选的上下文（书籍/章节/大纲 + 是否含梗概/正文） */
+    /**
+     * 本轮对话所属章节：编辑器侧固定章节 → 会话绑定章节 → 会话所属书籍最近打开的章节。
+     * 供聊天页把历史对话按章节分组收起；都取不到时返回 0（不参与分组）。
+     */
+    private suspend fun currentRoundChapterId(): Long {
+        fixedChapterId?.let { return it }
+        val session = _sessionId.value?.let { chatRepository.getSession(it) }
+        session?.chapterId?.let { if (it > 0) return it }
+        val bookId = session?.bookId ?: defaultBookId ?: return 0L
+        return if (prefs.lastBookId.first() == bookId) prefs.lastChapterId.first() else 0L
+    }
+
+    /** 日志里大纲节点的标题：取条目文本的首个非空行 */
+    private fun outlineLogTitle(text: String): String =
+        text.lineSequence().firstOrNull { it.isNotBlank() }?.trim().orEmpty()
+
+    /** 当前勾选的上下文（书籍/章节/大纲 + 逐章的梗概与正文勾选） */
     fun currentSnapshot(): ContextSnapshot = ContextSnapshot(
         bookIds = selectedBookIds.value.toList(),
         chapterIds = selectedChapterIds.value.toList(),
         outlineIds = selectedOutlineIds.value.toList(),
-        includeSummary = includeSummary.value,
-        includeContent = includeContent.value,
-        chapterAll = chapterAllSelected.value
+        summaryChapterIds = summaryChapterIds.value.toList(),
+        contentChapterIds = contentChapterIds.value.toList(),
+        chapterAll = chapterAllSelected.value,
+        summaryAll = summaryAllSelected.value,
+        contentAll = contentAllSelected.value
     )
 
     /** 点击编辑某条已发送的消息：恢复它的正文与当时选好的上下文 */
@@ -942,18 +1037,18 @@ class AiChatViewModel(
     fun restoreContext(snapshot: ContextSnapshot) {
         selectedBookIds.value = snapshot.bookIds.toSet()
         selectedOutlineIds.value = snapshot.outlineIds.toSet()
-        includeSummary.value = snapshot.includeSummary
-        includeContent.value = snapshot.includeContent
         selectedChapterIds.value = snapshot.chapterIds.toSet()
-        chapterAllSelected.value = false
+        summaryChapterIds.value = snapshot.summaryChapterIds.toSet()
+        contentChapterIds.value = snapshot.contentChapterIds.toSet()
         viewModelScope.launch {
             loadBookContextNow(snapshot.bookIds.firstOrNull())
+            val all = contextChapterIds()
             if (snapshot.chapterAll) {
-                selectedChapterIds.value = contextChapterIds()
-                chapterAllSelected.value = true
-            } else {
-                refreshChapterAllFlag()
+                selectedChapterIds.value = all
+                if (snapshot.summaryAll) summaryChapterIds.value = all
+                if (snapshot.contentAll) contentChapterIds.value = all
             }
+            refreshAllFlags()
         }
     }
 
@@ -1017,18 +1112,9 @@ class AiChatViewModel(
         bookIds = snapshot.bookIds,
         chapterIds = snapshot.chapterIds,
         outlineIds = snapshot.outlineIds,
-        includeContent = snapshot.includeContent,
-        includeSummary = snapshot.includeSummary
+        contentChapterIds = snapshot.contentChapterIds.toSet(),
+        summaryChapterIds = snapshot.summaryChapterIds.toSet()
     )
-
-    fun toggleVolume(volumeId: Long) {
-        val all = _chapters.value.filter { it.volumeId == volumeId && it.id != fixedChapterId }.map { it.id }
-        if (all.isEmpty()) return
-        selectedChapterIds.value =
-            if (all.all { it in selectedChapterIds.value }) selectedChapterIds.value - all.toSet()
-            else selectedChapterIds.value + all.toSet()
-        refreshChapterAllFlag()
-    }
 
     /**
      * 运行一次生成：把输入打包成 [SendChatRequest] 交给 [SendChatMessageUseCase]，
@@ -1042,7 +1128,9 @@ class AiChatViewModel(
         replyToUserId: Long,
         historyEndId: Long,
         variantIndex: Int,
-        prefix: PreparedPrefix? = null
+        prefix: PreparedPrefix? = null,
+        /** 本轮日志素材（本章梗概 / 检索片段 / 新增大纲资料 / 预设大纲清单）；重新生成时为默认空值 */
+        logContext: PromptLogContext = PromptLogContext()
     ): Boolean {
         sending.value = true
         pendingReplyToId.value = replyToUserId
@@ -1067,7 +1155,10 @@ class AiChatViewModel(
             writeOutlineTool = writeOutlineToolOn(),
             chapterImportTool = chapterImportToolOn(),
             prefixText = p.custom,
-            referencePrefix = p.reference
+            referencePrefix = p.reference,
+            // 本轮所属章节：沿用该用户消息落库时的章节，重新生成 / 编辑重发不会跳到别的章节
+            chapterId = chatRepository.getMessage(replyToUserId)?.chapterId ?: 0L,
+            logContext = logContext
         )
         sendChatMessage(request).collect { event ->
             when (event) {
@@ -1133,7 +1224,7 @@ class AiChatViewModel(
                         ?.let { sp = sp.copy(books = sp.books.upsert(PrefixEntry(bid, it))) }
                 }
                 chapterIds.forEach { cid ->
-                    chatRepository.renderChapterEntry(cid, includeSummary.value, includeContent.value)
+                    chatRepository.renderChapterEntry(cid, chapterSummaryOn(cid), chapterContentOn(cid))
                         ?.let { sp = sp.copy(chapters = sp.chapters.upsert(PrefixEntry(cid, it))) }
                 }
             } else {
@@ -1155,10 +1246,10 @@ class AiChatViewModel(
                 chapterIds.filterNot { it in sp.checkedChapters }.forEach { cid ->
                     when {
                         sp.chapters.any { it.id == cid } ->
-                            chatRepository.renderChapterEntry(cid, includeSummary.value, includeContent.value)
+                            chatRepository.renderChapterEntry(cid, chapterSummaryOn(cid), chapterContentOn(cid))
                                 ?.let { sp = sp.copy(chapters = sp.chapters.upsert(PrefixEntry(cid, it))) }
                         cid in sp.tailChapters -> Unit
-                        else -> chatRepository.renderChapterEntry(cid, includeSummary.value, includeContent.value)
+                        else -> chatRepository.renderChapterEntry(cid, chapterSummaryOn(cid), chapterContentOn(cid))
                             ?.let { text ->
                                 newChapters += PrefixEntry(cid, text)
                                 sp = sp.copy(tailChapters = sp.tailChapters + cid)
@@ -1227,6 +1318,7 @@ class AiChatViewModel(
             reference = sp.renderReference(includeChapters = contextOn, includeOutlines = outlineOn),
             contextOn = contextOn,
             outlineOn = outlineOn,
+            outlineEntries = if (outlineOn) sp.outlines else emptyList(),
             newReference = if (appended.isBlank()) "" else "以下是新增参考资料，请在写作时参考：\n$appended",
             autoOutlineMaterial = autoOutlineMaterial
         )
@@ -1247,7 +1339,8 @@ class AiChatViewModel(
             custom = sp.custom,
             reference = sp.renderReference(includeChapters = contextOn, includeOutlines = outlineOn),
             contextOn = contextOn,
-            outlineOn = outlineOn
+            outlineOn = outlineOn,
+            outlineEntries = if (outlineOn) sp.outlines else emptyList()
         )
     }
 
@@ -1264,18 +1357,37 @@ class AiChatViewModel(
      */
     private fun liveSelection(contextOn: Boolean, outlineOn: Boolean): ContextSnapshot {
         val snap = currentSnapshot()
+        val all = contextChapterIds().toList()
         val chapterIds = when {
             contextOn -> emptyList()
-            snap.chapterAll -> contextChapterIds().toList()
+            snap.chapterAll -> all
             else -> snap.chapterIds
+        }
+        val summaryIds = when {
+            contextOn -> emptyList()
+            snap.summaryAll -> all
+            else -> snap.summaryChapterIds
+        }
+        val contentIds = when {
+            contextOn -> emptyList()
+            snap.contentAll -> all
+            else -> snap.contentChapterIds
         }
         return snap.copy(
             bookIds = if (contextOn) emptyList() else snap.bookIds,
             chapterIds = chapterIds,
+            summaryChapterIds = summaryIds,
+            contentChapterIds = contentIds,
             outlineIds = if (outlineOn) emptyList() else snap.outlineIds,
             chapterAll = if (contextOn) false else snap.chapterAll
         )
     }
+
+    /** 该章是否纳入「梗概」（用于前缀渲染与文件清单回显） */
+    private fun chapterSummaryOn(chapterId: Long): Boolean = chapterId in summaryChapterIds.value
+
+    /** 该章是否纳入「正文」 */
+    private fun chapterContentOn(chapterId: Long): Boolean = chapterId in contentChapterIds.value
 
     /** 会话前缀准备结果：自定义前缀文本 + 前置参考资料 + 两个开关状态 + 本轮尾部追加文本 */
     private data class PreparedPrefix(
@@ -1283,6 +1395,8 @@ class AiChatViewModel(
         val reference: String,
         val contextOn: Boolean,
         val outlineOn: Boolean,
+        /** 已冻结进前置预设的大纲条目（供「查看日志」回显选择的大纲清单） */
+        val outlineEntries: List<PrefixEntry> = emptyList(),
         /** 本轮新勾选内容渲染出的文本（挂到当轮用户消息尾端），无新增时为空 */
         val newReference: String = "",
         /** 「适配性筛选」本轮新命中的大纲资料（挂在检索片段之后、用户提示词之前），无新增时为空 */

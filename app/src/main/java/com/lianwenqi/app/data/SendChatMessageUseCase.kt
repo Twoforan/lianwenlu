@@ -19,6 +19,66 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.channelFlow
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+
+/** 日志里的一个可展开节点（标题 + 正文） */
+@Serializable
+data class PromptLogNode(val title: String = "", val text: String = "")
+
+/** 日志里的一轮历史对话 */
+@Serializable
+data class PromptLogRound(val user: String = "", val assistant: String = "")
+
+/**
+ * 一次发送时的「提示词日志」快照，供「查看日志 / 查看本轮提示词」弹窗回显。
+ * 按「预设日志（命中缓存部分）→ 上下文日志（命中缓存部分）→ 本轮提示词日志（未命中缓存部分）」组织。
+ */
+@Serializable
+data class PromptLog(
+    /** 预设提示词：所选模型的系统提示词 */
+    val systemPrompt: String = "",
+    /** 自定义前缀：会话建立时冻结下来的自定义前缀 */
+    val customPrefix: String = "",
+    /** 预设里勾选的大纲清单（每项可单独展开） */
+    val outlines: List<PromptLogNode> = emptyList(),
+    /** 命中缓存的历史轮次（第一轮、第二轮…） */
+    val rounds: List<PromptLogRound> = emptyList(),
+    /** 本轮「＋本章梗概」附带内容 */
+    val summary: String = "",
+    /** 本轮长期记忆检索到的参考资料 */
+    val memory: String = "",
+    /** 本轮「适配性筛选」新命中的大纲参考资料 */
+    val autoOutline: String = "",
+    /** 本轮用户输入的提示词 */
+    val userPrompt: String = "",
+    /** 本轮实际发送的完整提示词（按角色顺序拼接） */
+    val fullPrompt: String = ""
+) {
+    fun encode(): String = promptLogJson.encodeToString(serializer(), this)
+
+    companion object {
+        /** 解析 [ChatMessage.promptLog]；空值或损坏时返回 null */
+        fun decode(raw: String): PromptLog? {
+            if (raw.isBlank()) return null
+            return runCatching { promptLogJson.decodeFromString(serializer(), raw) }.getOrNull()
+        }
+    }
+}
+
+private val promptLogJson = Json {
+    ignoreUnknownKeys = true
+    encodeDefaults = true
+}
+
+/** ViewModel 侧提供的本轮日志素材（UseCase 无法自行取得的部分） */
+data class PromptLogContext(
+    /** 预设里勾选的大纲清单 */
+    val outlines: List<PromptLogNode> = emptyList(),
+    val summary: String = "",
+    val memory: String = "",
+    val autoOutline: String = ""
+)
 
 /**
  * 「发送 AI 消息」所需的一次性输入快照。
@@ -42,7 +102,11 @@ data class SendChatRequest(
     /** 会话级的「自定义前缀」（纯文本），为空则不发送 */
     val prefixText: String = "",
     /** 会话已冻结的「参考资料前缀」（书籍/大纲/章节字面文本），为空则不发送 */
-    val referencePrefix: String = ""
+    val referencePrefix: String = "",
+    /** 本轮对话所属章节 id（0 表示未绑定章节），随消息落库用于按章节分组收起 */
+    val chapterId: Long = 0,
+    /** 本轮日志素材（本章梗概 / 检索片段 / 新增大纲资料 / 预设大纲清单） */
+    val logContext: PromptLogContext = PromptLogContext()
 )
 
 /** 流式生成过程中对外吐出的事件 */
@@ -76,8 +140,8 @@ interface ChatGateway {
         bookIds: List<Long>,
         chapterIds: List<Long>,
         outlineIds: List<Long>,
-        includeContent: Boolean,
-        includeSummary: Boolean
+        contentChapterIds: Set<Long>,
+        summaryChapterIds: Set<Long>
     ): String
 
     suspend fun deactivateVariants(replyToId: Long)
@@ -93,7 +157,9 @@ interface ChatGateway {
         promptExtra: String = "",
         promptTokens: Int = 0,
         completionTokens: Int = 0,
-        cachedTokens: Int = 0
+        cachedTokens: Int = 0,
+        chapterId: Long = 0,
+        promptLog: String = ""
     ): Long
 }
 
@@ -128,8 +194,8 @@ class SendChatMessageUseCase(
             bookIds = sel.bookIds,
             chapterIds = sel.chapterIds,
             outlineIds = sel.outlineIds,
-            includeContent = sel.includeContent,
-            includeSummary = sel.includeSummary
+            contentChapterIds = sel.contentChapterIds.toSet(),
+            summaryChapterIds = sel.summaryChapterIds.toSet()
         )
         // 会话前缀（字面文本，跨轮逐字节稳定）拼在实时上下文前面，共同作为「参考资料」
         val reference = listOf(request.referencePrefix, context)
@@ -197,7 +263,9 @@ class SendChatMessageUseCase(
                 reasoning = result.reasoning,
                 promptTokens = result.promptTokens,
                 completionTokens = result.completionTokens,
-                cachedTokens = result.cachedTokens
+                cachedTokens = result.cachedTokens,
+                chapterId = request.chapterId,
+                promptLog = buildPromptLog(request, turns, history, allMessages).encode()
             )
             // AI 工具：回答里带可导入标记块时，按勾选的工具挨个上报，由 UI 逐个询问是否导入。
             // 若标记存在却无法解析（畸形 JSON），上报 Error，让用户知道工具没生效。
@@ -223,4 +291,48 @@ class SendChatMessageUseCase(
             send(ChatEvent.Error(result.error?.userMessage ?: "请求失败"))
         }
     }.buffer(Channel.UNLIMITED)
+
+    /**
+     * 组装本轮「提示词日志」快照：预设 / 上下文（命中缓存部分）与本轮新增（未命中缓存部分），
+     * 供聊天页「查看日志 / 查看本轮提示词」弹窗回显。
+     */
+    private fun buildPromptLog(
+        request: SendChatRequest,
+        turns: List<ChatTurn>,
+        history: List<ChatTurn>,
+        allMessages: List<ChatMessage>
+    ): PromptLog {
+        // 历史轮次：一条用户发言 + 紧随其后的助手回答算作一轮
+        val rounds = mutableListOf<PromptLogRound>()
+        var pendingUser: String? = null
+        history.forEach { turn ->
+            when (turn.role) {
+                ChatRole.USER -> {
+                    pendingUser?.let { rounds += PromptLogRound(it, "") }
+                    pendingUser = turn.content
+                }
+
+                ChatRole.ASSISTANT -> {
+                    rounds += PromptLogRound(pendingUser.orEmpty(), turn.content)
+                    pendingUser = null
+                }
+
+                else -> Unit
+            }
+        }
+        pendingUser?.let { rounds += PromptLogRound(it, "") }
+        return PromptLog(
+            systemPrompt = request.systemPrompt,
+            customPrefix = request.prefixText,
+            outlines = request.logContext.outlines,
+            rounds = rounds,
+            summary = request.logContext.summary,
+            memory = request.logContext.memory,
+            autoOutline = request.logContext.autoOutline,
+            userPrompt = allMessages.firstOrNull { it.id == request.replyToUserId }?.content.orEmpty(),
+            // 「本轮提示词」只回显本轮真正发给 AI 的那部分（含本章梗概 / 检索片段 / 新增大纲资料），
+            // 即请求里最后一条用户发言；预设提示词、自定义前缀与历史轮次属于命中缓存的前缀，不在此重复展示
+            fullPrompt = turns.lastOrNull { it.role == ChatRole.USER }?.content.orEmpty()
+        )
+    }
 }
