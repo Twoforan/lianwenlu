@@ -2185,55 +2185,58 @@ private fun ChapterGroupCard(
     onLongPressTitle: (() -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit
 ) {
-    // 收起时四角 18dp 圆角；展开时上角 18dp、下角 10dp（尾条位于最底部，其底边即随之呈 10dp 圆角）
-    val shape = if (collapsed) RoundedCornerShape(18.dp)
-    else RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp, bottomStart = 10.dp, bottomEnd = 10.dp)
+    // 圆角不再由整张卡片统一 clip：超长分组的整体圆角裁剪会生成一块巨大的图形层，
+    // 超出平台图层尺寸上限后，卡片下半部分（含尾部收起栏）会不绘制、也点不到 ——
+    // 表现为「对话过长时尾部收起栏收起不了」。改为由「头部区块 / 尾条」各自绘制圆角。
+    val topShape = RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp)
+    val bottomShape = RoundedCornerShape(bottomStart = 10.dp, bottomEnd = 10.dp)
+    val headShape = if (collapsed) RoundedCornerShape(18.dp) else topShape
     val accent = MaterialTheme.colorScheme.primary
-    // 参照原型：淡紫→纸白的渐变底，营造「一张卡片包住这一章」的观感（原型外层无描边）
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .clip(shape)
-            .background(
-                Brush.verticalGradient(
-                    listOf(
-                        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
-                        MaterialTheme.colorScheme.surface
-                    )
-                )
-            )
-    ) {
-        Row(
+    // 参照原型：头部淡紫→纸白渐变、内容区纸白底、尾条淡紫底，逐块拼出「一张卡片包住这一章」
+    val headBrush = Brush.verticalGradient(
+        listOf(
+            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
+            MaterialTheme.colorScheme.surface
+        )
+    )
+    Column(Modifier.fillMaxWidth()) {
+        // 头部区块：收起时四角圆角，展开时只有上两角圆角
+        Column(
             Modifier
                 .fillMaxWidth()
-                .combinedClickable(onClick = { onToggle() }, onLongClick = onLongPressTitle)
-                .padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .clip(headShape)
+                .background(headBrush, headShape)
         ) {
-            Column(Modifier.weight(1f)) {
-                Text(
-                    title,
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    "共 $rounds 条对话 · 约 $words 字",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .combinedClickable(onClick = { onToggle() }, onLongClick = onLongPressTitle)
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        title,
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        "共 $rounds 条对话 · 约 $words 字",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Icon(
+                    if (collapsed) Icons.Filled.KeyboardArrowDown
+                    else Icons.Filled.KeyboardArrowUp,
+                    contentDescription = if (collapsed) "展开" else "收起",
+                    modifier = Modifier.size(20.dp),
+                    tint = accent
                 )
             }
-            Icon(
-                if (collapsed) Icons.Filled.KeyboardArrowDown
-                else Icons.Filled.KeyboardArrowUp,
-                contentDescription = if (collapsed) "展开" else "收起",
-                modifier = Modifier.size(20.dp),
-                tint = accent
-            )
-        }
-        if (collapsed) {
-            if (preview.isNotBlank()) {
+            if (collapsed && preview.isNotBlank()) {
                 Text(
                     preview,
                     modifier = Modifier
@@ -2245,7 +2248,8 @@ private fun ChapterGroupCard(
                     overflow = TextOverflow.Ellipsis
                 )
             }
-        } else {
+        }
+        if (!collapsed) {
             // 原型：分隔线为淡紫（#a6a1e9），并加重与头部的分界
             HorizontalDivider(color = accent.copy(alpha = 0.45f))
             Column(
@@ -2256,13 +2260,17 @@ private fun ChapterGroupCard(
                 content = content
             )
             // 尾部手柄：整组「头 — 对话 — 尾」中的尾块，点击即把整块向上收起（与头部点击等效）
-            // 满宽贴底、41dp 高、淡紫底、大号 ∧；只保留顶部分隔线，不再画描边
+            // 满宽贴底、41dp 高、淡紫底、大号 ∧；只保留顶部分隔线，底两角 10dp 圆角
             HorizontalDivider(color = accent.copy(alpha = 0.45f))
             Box(
                 Modifier
                     .fillMaxWidth()
                     .height(41.dp)
-                    .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f))
+                    .clip(bottomShape)
+                    .background(
+                        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
+                        bottomShape
+                    )
                     .clickable { onToggle() },
                 contentAlignment = Alignment.Center
             ) {
@@ -2599,6 +2607,7 @@ private fun ChatMessageItem(
                     RespondingBlock(
                         content = streamingContent,
                         reasoning = streamingReasoning,
+                        modelName = modelName,
                         onStop = onStop
                     )
                 } else {
@@ -2778,8 +2787,10 @@ private fun MessageCard(
     Column(
         Modifier
             .fillMaxWidth()
-            .clip(shape)
-            .background(background)
+            // 不整卡 clip：长回答的圆角裁剪会生成一块超大图形层，超出平台图层尺寸上限后
+            // 卡片下半部分（AI 操作行）既不绘制也点不到 —— 表现为「AI 功能区点按没反应」。
+            // 背景/描边自带圆角，无需裁剪即可正确显示圆角。
+            .background(background, shape)
             .border(1.dp, borderColor, shape)
     ) {
         Column(
@@ -2991,9 +3002,14 @@ private fun AnswerBlock(content: String, resetKey: Int) {
     }
 }
 
-/** 正在响应中：就地显示在目标回答的位置，实时流式显示内容，右侧可随时「停止响应」 */
+/** 正在响应中：就地显示在目标回答的位置，实时流式显示内容，操作行可随时「停止响应」 */
 @Composable
-private fun RespondingBlock(content: String, reasoning: String, onStop: () -> Unit) {
+private fun RespondingBlock(
+    content: String,
+    reasoning: String,
+    modelName: String,
+    onStop: () -> Unit
+) {
     var dots by remember { mutableIntStateOf(1) }
     LaunchedEffect(Unit) {
         while (true) {
@@ -3001,27 +3017,35 @@ private fun RespondingBlock(content: String, reasoning: String, onStop: () -> Un
             dots = if (dots >= 3) 1 else dots + 1
         }
     }
-    // 与生成完成后的排版保持一致：深度思考单独一个折叠框，正文是普通文本，不共用背景
-    Column(Modifier.fillMaxWidth()) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                "正在生成" + "…".repeat(dots),
-                modifier = Modifier.weight(1f),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+    // 与生成完成后的 AssistantBlock 使用同一张 MessageCard 外壳（淡紫底 + 分隔线 + 操作行），
+    // 生成中与生成完的 UI 保持一致，只有最后一行换成「正在生成…」提示。
+    MessageCard(
+        ai = true,
+        tools = {
             TextButton(onClick = onStop) {
                 Text("停止响应", style = MaterialTheme.typography.labelMedium)
             }
         }
+    ) {
         if (reasoning.isNotBlank()) {
             ThinkingBlock(reasoning)
             Spacer(Modifier.height(6.dp))
         }
         if (content.isNotBlank()) {
+            AnswerBlock(content = content, resetKey = 0)
+            Spacer(Modifier.height(6.dp))
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                content,
-                style = MaterialTheme.typography.bodyMedium
+                "model: $modelName",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.weight(1f))
+            Text(
+                "正在生成" + "…".repeat(dots),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
     }
