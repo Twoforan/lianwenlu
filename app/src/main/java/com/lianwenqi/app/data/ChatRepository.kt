@@ -108,6 +108,9 @@ class ChatRepository(private val db: AppDatabase) : ChatGateway {
     suspend fun setContentCollapsed(id: Long, collapsed: Boolean) =
         chatDao.updateContentCollapsed(id, collapsed)
 
+    /** 修改未绑定章节「本轮对话」的显示名（只改消息，不同步书籍章节） */
+    suspend fun updateMessageRoundName(id: Long, name: String) = chatDao.updateRoundName(id, name)
+
     suspend fun getMessage(id: Long): ChatMessage? = chatDao.getMessage(id)
 
     /** 批量删除指定消息（编辑历史提示词后丢弃旧内容用） */

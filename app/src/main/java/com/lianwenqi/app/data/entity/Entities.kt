@@ -241,6 +241,11 @@ data class ChatMessage(
      * 供「查看日志 / 查看本轮提示词」弹窗回显当时的预设、上下文与本轮提示词。
      */
     val promptLog: String = "",
+    /**
+     * 未绑定章节的「本轮对话」自定义名称（存于该轮的用户消息上）。
+     * 为空时界面按「第X轮对话」显示；编辑只改这里，不会同步到书籍章节。
+     */
+    val roundName: String = "",
     val createdAt: Long = System.currentTimeMillis()
 )
 

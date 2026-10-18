@@ -367,6 +367,10 @@ interface ChatDao {
     @Query("UPDATE chat_message SET contentCollapsed = :collapsed WHERE id = :id")
     suspend fun updateContentCollapsed(id: Long, collapsed: Boolean)
 
+    /** 修改未绑定章节「本轮对话」的显示名（只改消息，不同步书籍） */
+    @Query("UPDATE chat_message SET roundName = :name WHERE id = :id")
+    suspend fun updateRoundName(id: Long, name: String)
+
     @Query("UPDATE chat_message SET active = 1 WHERE id = :id")
     suspend fun activateMessage(id: Long)
 

@@ -828,6 +828,15 @@ class AiChatViewModel(
     }
 
     /**
+     * 修改未绑定章节某轮对话的显示名（长按「第X轮对话」触发）。
+     * 只改该轮消息上的名称，不会同步到书籍章节（区别于 [renameChapter]）。
+     */
+    fun renameRound(userMessageId: Long, name: String) = viewModelScope.launch {
+        val n = name.trim()
+        if (n.isNotEmpty()) chatRepository.updateMessageRoundName(userMessageId, n)
+    }
+
+    /**
      * 启动一次生成任务并记录 Job，便于「停止响应」随时取消。
      * 复位统一放在此处 launch 的 finally 里，并用 [generationToken] 判断归属：
      * 被停止 / 被新任务接管的旧任务不会覆盖新任务的生成态，从根本上避免「一直正在生成中」。
