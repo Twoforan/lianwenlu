@@ -292,7 +292,7 @@ fun AiChatScreen(initialBookId: Long?) {
             HorizontalDivider()
 
             val entries = remember(messages) { buildChatEntries(messages) }
-            // 按「消息所属章节」连续分组：历史章节的对话整组包裹、可收起；最新章节不包裹。
+            // 按「消息所属章节」连续分组：每一组都整组包裹（含最后一组，这样最后一章的对话也有章节抬头、可收起）。
             // 未绑定章节的对话则按「一轮对话」各自成块（标题为「第X轮对话」，可长按改名）。
             val chapterGroups = remember(entries) { buildChapterGroups(entries) }
             // 折叠状态（键为分组 key）：默认只展开「焦点分组」（最后一组），其余收起
@@ -356,40 +356,35 @@ fun AiChatScreen(initialBookId: Long?) {
                 ) {
                     items(chapterGroups.size, key = { chapterGroups[it].key }) { gi ->
                         val group = chapterGroups[gi]
-                        // 绑定到章节且不是最新章节的历史对话：整组包裹、默认收起；
-                        // 未绑定章节的每一轮对话也包成「第X轮对话」卡片（焦点即最后一轮默认展开，便于滚到本轮末尾）。
-                        val wrapped = group.chapterId <= 0 || gi != chapterGroups.lastIndex
-                        if (!wrapped) {
-                            group.entries.forEach { renderEntry(it) }
-                        } else {
-                            val collapsed = collapsedGroups[group.key] ?: (group.key != focusKey)
-                            val title = if (group.chapterId > 0) {
-                                chapters.firstOrNull { it.id == group.chapterId }?.title
-                                    ?: "（章节已删除）"
-                            } else group.roundTitle()
-                            ChapterGroupCard(
-                                title = title,
-                                // 组内「对话」条数（一问一答算一条）与回答字数
-                                rounds = group.entries.count { it is ChatEntry.User },
-                                words = group.entries.sumOf { e ->
-                                    // 回答作为「用户消息的版本」随用户条目展示，字数从当前展示的版本取
-                                    when (e) {
-                                        is ChatEntry.User ->
-                                            e.variants.getOrNull(e.activeIndex)?.content?.length ?: 0
-                                        is ChatEntry.Assistant -> e.msg.content.length
-                                    }
-                                },
-                                preview = groupPreview(group),
-                                collapsed = collapsed,
-                                onToggle = { collapsedGroups[group.key] = !collapsed },
-                                onLongPressTitle = if (group.chapterId > 0) {
-                                    { renamingChapterId = group.chapterId }
-                                } else {
-                                    { renamingRound = group.anchorMessageId() to title }
+                        // 每组都整组包裹：绑定章节的组显示章节名抬头（最后一组默认展开，其余默认收起），
+                        // 未绑定章节的组包成「第X轮对话」卡片（避免导航栏 AI 里最后一章的对话缺少抬头、无法收起）。
+                        val collapsed = collapsedGroups[group.key] ?: (group.key != focusKey)
+                        val title = if (group.chapterId > 0) {
+                            chapters.firstOrNull { it.id == group.chapterId }?.title
+                                ?: "（章节已删除）"
+                        } else group.roundTitle()
+                        ChapterGroupCard(
+                            title = title,
+                            // 组内「对话」条数（一问一答算一条）与回答字数
+                            rounds = group.entries.count { it is ChatEntry.User },
+                            words = group.entries.sumOf { e ->
+                                // 回答作为「用户消息的版本」随用户条目展示，字数从当前展示的版本取
+                                when (e) {
+                                    is ChatEntry.User ->
+                                        e.variants.getOrNull(e.activeIndex)?.content?.length ?: 0
+                                    is ChatEntry.Assistant -> e.msg.content.length
                                 }
-                            ) {
-                                if (!collapsed) group.entries.forEach { renderEntry(it) }
+                            },
+                            preview = groupPreview(group),
+                            collapsed = collapsed,
+                            onToggle = { collapsedGroups[group.key] = !collapsed },
+                            onLongPressTitle = if (group.chapterId > 0) {
+                                { renamingChapterId = group.chapterId }
+                            } else {
+                                { renamingRound = group.anchorMessageId() to title }
                             }
+                        ) {
+                            if (!collapsed) group.entries.forEach { renderEntry(it) }
                         }
                     }
                 }
