@@ -138,6 +138,8 @@ fun BookDetailScreen(
     var tab by remember { mutableStateOf(0) }
     var sortTarget by remember { mutableStateOf<SortTarget?>(null) }
     var batchManage by remember { mutableStateOf(false) }
+    // 批量管理只作用于触发它的那一卷（null 表示未分卷章节），其他卷不参与
+    var batchVolumeId by remember { mutableStateOf<Long?>(null) }
     var showNewChapter by remember { mutableStateOf(false) }
 
     val target = sortTarget
@@ -164,19 +166,19 @@ fun BookDetailScreen(
         return
     }
 
-    // 章节批量管理：全屏页
+    // 章节批量管理：全屏页，只管理触发它的那一卷下的章节
     if (batchManage) {
         BatchManagePage(
             book = book,
             volumes = volumes,
-            chapters = chapters,
+            chapters = chapters.filter { it.volumeId == batchVolumeId },
             onBack = { batchManage = false },
             onReorder = { vm.reorderChapterIds(it) },
             onMoveToVolume = { ids, vid -> vm.moveChaptersToVolume(ids, vid) },
             onMoveToNewVolume = { ids -> vm.createVolumeAndMoveChapters(ids) },
             onDelete = { ids -> vm.deleteChapters(ids) },
             onMerge = { ids -> vm.mergeChapters(ids) },
-            onRenumber = { vm.renumberChapters() }
+            onRenumber = { vm.renumberChapters(batchVolumeId) }
         )
         return
     }
@@ -266,7 +268,7 @@ fun BookDetailScreen(
                     onRenameVolume = { v, t -> vm.renameVolume(v, t) },
                     onRenameChapter = { c, t -> vm.renameChapter(c, t) },
                     onSortVolumes = { sortTarget = SortTarget.Volumes },
-                    onBatchManage = { batchManage = true }
+                    onBatchManage = { vid -> batchVolumeId = vid; batchManage = true }
                 )
             } else {
                 OutlineTab(
@@ -312,7 +314,8 @@ private fun CatalogTab(
     onRenameVolume: (Volume, String) -> Unit,
     onRenameChapter: (Chapter, String) -> Unit,
     onSortVolumes: () -> Unit,
-    onBatchManage: () -> Unit
+    /** 批量管理：传入触发章节所属分卷 id（null 表示未分卷），只管理该卷章节 */
+    onBatchManage: (Long?) -> Unit
 ) {
     // 默认只展开「上次最新编辑章节」所属的分卷，其他分卷收起；
     // 用户手动展开 / 收起后记入 collapsedOverride，之后不再随数据变化重置
@@ -433,7 +436,7 @@ private fun CatalogTab(
         is Chapter -> ActionMenuDialog(
             title = target.title,
             actions = listOf(
-                "批量管理" to { onBatchManage(); menuTarget = null },
+                "批量管理" to { onBatchManage(target.volumeId); menuTarget = null },
                 "重命名" to { renameTarget = target; menuTarget = null },
                 "删除章节" to { deleteChapterTarget = target; menuTarget = null }
             ),

@@ -8,7 +8,7 @@
 - 兼容 OpenAI Chat Completions / Responses 两类接口，DeepSeek、Kimi、GPT、Claude 等均可接入
 - **长期记忆**：把本书已写正文向量化，写新章节时自动检索相关片段作为参考资料（支持厂商 Embedding API 或本地离线模型）
 - **内置《炼文炉 · 使用说明书》**：首次启动自动生成在书架上，覆盖全部功能，可阅读 / 导出，也可作为 AI 上下文书籍直接提问用法；随 App 版本自动更新
-- 当前版本：**v3.3.2**（versionCode 46，minSdk 26 / targetSdk 35），安装包见 [Releases](https://github.com/Twoforan/lianwenlu/releases/latest)
+- 当前版本：**v3.3.3**（versionCode 47，minSdk 26 / targetSdk 35），安装包见 [Releases](https://github.com/Twoforan/lianwenlu/releases/latest)
 
 ---
 

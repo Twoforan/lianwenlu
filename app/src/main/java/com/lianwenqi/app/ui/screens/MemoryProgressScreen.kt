@@ -1,5 +1,6 @@
 package com.lianwenqi.app.ui.screens
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -11,11 +12,16 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material.icons.outlined.Schema
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.DropdownMenu
@@ -38,6 +44,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -69,6 +77,15 @@ data class BookMemoryProgress(
     val lastChapterTitle: String
 )
 
+/** 详情页里单个章节的向量化状态 */
+data class ChapterMemoryStatus(val id: Long, val title: String, val vectorized: Boolean)
+
+/** 详情页里的一卷（[volumeId] 为 null 表示未分卷章节） */
+data class VolumeMemoryStatus(val volumeId: Long?, val title: String, val chapters: List<ChapterMemoryStatus>)
+
+/** 某本书的向量化详情：按卷分组展示每章是否已向量化 */
+data class BookMemoryDetail(val book: Book, val volumes: List<VolumeMemoryStatus>)
+
 class MemoryProgressViewModel(private val container: AppContainer) : ViewModel() {
     private val bookRepo: BookRepository = container.bookRepository
     private val memory = container.memoryRepository
@@ -82,6 +99,10 @@ class MemoryProgressViewModel(private val container: AppContainer) : ViewModel()
 
     private val _progress = MutableStateFlow<List<BookMemoryProgress>>(emptyList())
     val progress: StateFlow<List<BookMemoryProgress>> = _progress
+
+    /** 当前打开的书籍向量化详情；为空表示停留在列表页 */
+    private val _detail = MutableStateFlow<BookMemoryDetail?>(null)
+    val detail: StateFlow<BookMemoryDetail?> = _detail
 
     /** 分组筛选：null = 全部书籍，-1 = 未分组，其余为分组 id */
     val selectedGroupId = MutableStateFlow<Long?>(null)
@@ -101,13 +122,39 @@ class MemoryProgressViewModel(private val container: AppContainer) : ViewModel()
         selectedGroupId.value = groupId
     }
 
-    fun startVectorize(bookId: Long) {
+    /** 打开某本书的向量化详情（每卷每章的已向量化状态） */
+    fun openDetail(bookId: Long) {
+        viewModelScope.launch { _detail.value = computeDetail(bookId) }
+    }
+
+    fun closeDetail() {
+        _detail.value = null
+    }
+
+    /** 更新向量化：匹配章节是否有更新，仅对变化的章节重跑 */
+    fun startVectorize(bookId: Long) = runVectorizeOp {
+        memory.vectorize(bookId) { vectorizing.value = it }
+    }
+
+    /** 重新向量化：删除本书全部旧向量后全量重建 */
+    fun revectorize(bookId: Long) = runVectorizeOp {
+        memory.revectorize(bookId) { vectorizing.value = it }
+    }
+
+    /** 重新向量化单章：删除该章旧向量后重建这一章 */
+    fun revectorizeChapter(bookId: Long, chapterId: Long) = runVectorizeOp {
+        memory.revectorizeChapter(bookId, chapterId) { vectorizing.value = it }
+    }
+
+    /** 串行执行一次向量化任务，结束后同时刷新列表概览与详情页状态 */
+    private fun runVectorizeOp(block: suspend () -> Unit) {
         if (job?.isActive == true) return
         job = viewModelScope.launch {
             try {
-                memory.vectorize(bookId) { vectorizing.value = it }
+                block()
             } finally {
                 _progress.value = compute()
+                _detail.value?.let { _detail.value = computeDetail(it.book.id) }
                 vectorizing.value = null
             }
         }
@@ -126,20 +173,37 @@ class MemoryProgressViewModel(private val container: AppContainer) : ViewModel()
             lastChapterTitle = last?.title ?: ""
         )
     }
+
+    private suspend fun computeDetail(bookId: Long): BookMemoryDetail? {
+        val book = books.value.firstOrNull { it.id == bookId } ?: return null
+        val chapters = bookRepo.getChapters(bookId)
+        val done = memory.vectorizedChapterIds(bookId).toSet()
+        fun status(ch: com.lianwenqi.app.data.entity.Chapter) =
+            ChapterMemoryStatus(ch.id, ch.title, ch.id in done)
+        val sections = ArrayList<VolumeMemoryStatus>()
+        bookRepo.getVolumes(bookId).forEach { v ->
+            sections += VolumeMemoryStatus(v.id, v.title, chapters.filter { it.volumeId == v.id }.map(::status))
+        }
+        val loose = chapters.filter { it.volumeId == null }
+        if (loose.isNotEmpty()) sections += VolumeMemoryStatus(null, "未分卷", loose.map(::status))
+        return BookMemoryDetail(book, sections)
+    }
 }
 
-/** 向量化进度：可按分组筛选，展示「已向量化至 第X卷 第Y章 / 共N章」，仅统计正文 */
+/** 向量化进度：可按分组筛选；每本书可「更新向量化 / 重新向量化」，点击书籍查看逐章状态 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MemoryProgressScreen(onBack: () -> Unit) {
     val vm = appViewModel { MemoryProgressViewModel(it) }
     val groups by vm.groups.collectAsState()
     val progress by vm.progress.collectAsState()
+    val detail by vm.detail.collectAsState()
     val selectedGroupId by vm.selectedGroupId.collectAsState()
     val vectorizing by vm.vectorizing.collectAsState()
 
     var menuOpen by remember { mutableStateOf(false) }
-    var askBook by remember { mutableStateOf<Book?>(null) }
+    var askUpdate by remember { mutableStateOf<Book?>(null) }
+    var askRebuild by remember { mutableStateOf<Book?>(null) }
     // 分组筛选：null = 全部书籍，-1 = 未分组，其余为分组 id
     val filtered = progress.filter { p ->
         when (selectedGroupId) {
@@ -147,6 +211,18 @@ fun MemoryProgressScreen(onBack: () -> Unit) {
             -1L -> p.book.groupId == null
             else -> p.book.groupId == selectedGroupId
         }
+    }
+
+    // 书籍详情页：全屏覆盖
+    val opened = detail
+    if (opened != null) {
+        MemoryDetailPage(
+            detail = opened,
+            vectorizing = vectorizing,
+            onBack = { vm.closeDetail() },
+            onRevertChapter = { cid -> vm.revectorizeChapter(opened.book.id, cid) }
+        )
+        return
     }
 
     Scaffold(
@@ -195,28 +271,7 @@ fun MemoryProgressScreen(onBack: () -> Unit) {
                 }
             }
 
-            // 向量化进行中 / 出错时的状态（点击书本后触发）
-            vectorizing?.let { p ->
-                Column(Modifier.padding(horizontal = 16.dp)) {
-                    Spacer(Modifier.height(6.dp))
-                    val where = listOf(p.volumeTitle, p.chapterTitle).filter { it.isNotBlank() }
-                    Text(
-                        if (p.chapterTitle.isBlank()) "准备中…"
-                        else "正在处理 ${where.joinToString(" ")}（${p.done}/${p.total}）",
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                    p.error?.let { err ->
-                        Spacer(Modifier.height(4.dp))
-                        Text(
-                            err,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error
-                        )
-                    }
-                }
-                Spacer(Modifier.height(8.dp))
-                HorizontalDivider()
-            }
+            VectorizeStatus(vectorizing)
 
             if (filtered.isEmpty()) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -229,42 +284,68 @@ fun MemoryProgressScreen(onBack: () -> Unit) {
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     items(filtered, key = { it.book.id }) { item ->
+                        val busy = vectorizing != null
                         val running = vectorizing?.bookId == item.book.id
                         Card(
                             Modifier
                                 .fillMaxWidth()
-                                // 点击书籍询问是否向量化；向量化进行中时不可点
-                                .clickable(enabled = vectorizing == null) { askBook = item.book }
+                                // 点击书籍查看各章节向量化情况；向量化进行中时不可点
+                                .clickable(enabled = !busy) { vm.openDetail(item.book.id) }
                         ) {
-                            Column(Modifier.padding(12.dp)) {
-                                Text(
-                                    item.book.title,
-                                    fontWeight = FontWeight.SemiBold,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Spacer(Modifier.height(4.dp))
-                                Text(
-                                    progressLine(item),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                                if (running) {
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .padding(start = 12.dp, end = 4.dp, top = 10.dp, bottom = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(
+                                        item.book.title,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
                                     Spacer(Modifier.height(4.dp))
                                     Text(
-                                        "向量化中…",
+                                        progressLine(item),
                                         style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.primary
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
+                                    if (running) {
+                                        Spacer(Modifier.height(4.dp))
+                                        Text(
+                                            "向量化中…",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
                                 }
+                                // 文字区与操作区之间的竖分隔线
+                                Box(
+                                    Modifier
+                                        .padding(horizontal = 6.dp)
+                                        .width(1.dp)
+                                        .height(40.dp)
+                                        .background(MaterialTheme.colorScheme.outlineVariant)
+                                )
+                                VectorizeIconButton(
+                                    icon = Icons.Outlined.Schema,
+                                    label = "重新向量化",
+                                    enabled = !busy
+                                ) { askRebuild = item.book }
+                                VectorizeIconButton(
+                                    icon = Icons.Filled.Sync,
+                                    label = "更新向量化",
+                                    enabled = !busy
+                                ) { askUpdate = item.book }
                             }
                         }
                     }
                     item {
                         Row(Modifier.fillMaxWidth()) {
                             Text(
-                                "点击书籍可开始 / 继续向量化（已向量化的章节会自动跳过）；" +
-                                    "仅统计书籍正文，梗概与大纲不参与向量化",
+                                "点击书籍可查看各章节的向量化状态；左侧图标为「重新向量化」（删除旧向量后全量重建），" +
+                                    "右侧图标为「更新向量化」（仅重跑有更新的章节）；仅统计书籍正文，梗概与大纲不参与向量化",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -274,22 +355,205 @@ fun MemoryProgressScreen(onBack: () -> Unit) {
             }
         }
     }
-    askBook?.let { book ->
+
+    // 更新向量化：增量匹配
+    askUpdate?.let { book ->
         AlertDialog(
-            onDismissRequest = { askBook = null },
-            title = { Text("向量化") },
+            onDismissRequest = { askUpdate = null },
+            title = { Text("更新向量化") },
             text = {
                 Text(
-                    "是否向量化《${book.title}》？\n\n" +
-                        "将从全书正文开始向量化，已向量化的章节会自动跳过。"
+                    "是否更新《${book.title}》的向量化？\n\n" +
+                        "将对比章节内容，仅对已更新的章节重新向量化，未变化的章节会自动跳过。"
                 )
             },
             confirmButton = {
-                TextButton(onClick = { askBook = null; vm.startVectorize(book.id) }) { Text("确定") }
+                TextButton(onClick = { askUpdate = null; vm.startVectorize(book.id) }) { Text("确定") }
             },
-            dismissButton = { TextButton(onClick = { askBook = null }) { Text("取消") } }
+            dismissButton = { TextButton(onClick = { askUpdate = null }) { Text("取消") } }
         )
     }
+
+    // 重新向量化：先删旧映射，再全量重建
+    askRebuild?.let { book ->
+        AlertDialog(
+            onDismissRequest = { askRebuild = null },
+            title = { Text("重新向量化") },
+            text = {
+                Text(
+                    "是否重新向量化《${book.title}》？\n\n" +
+                        "将先删除该书已有的全部向量，再按当前向量源重新建立，全书章节都会被重跑。"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { askRebuild = null; vm.revectorize(book.id) }) { Text("确定") }
+            },
+            dismissButton = { TextButton(onClick = { askRebuild = null }) { Text("取消") } }
+        )
+    }
+}
+
+/** 书籍向量化详情：按卷分组列出每章是否已向量化，点击章节可重新建立该章向量 */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun MemoryDetailPage(
+    detail: BookMemoryDetail,
+    vectorizing: VectorizeProgress?,
+    onBack: () -> Unit,
+    onRevertChapter: (Long) -> Unit
+) {
+    var askChapter by remember { mutableStateOf<ChapterMemoryStatus?>(null) }
+    val total = detail.volumes.sumOf { it.chapters.size }
+    val done = detail.volumes.sumOf { s -> s.chapters.count { it.vectorized } }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {
+                    Text(detail.book.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                    }
+                }
+            )
+        }
+    ) { padding ->
+        Column(
+            Modifier
+                .fillMaxSize()
+                .padding(padding)
+        ) {
+            VectorizeStatus(vectorizing)
+
+            if (total == 0) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text("本书暂无章节", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            } else {
+                LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
+                    item {
+                        Text(
+                            "已向量化 $done / 共 $total 章",
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    detail.volumes.forEach { section ->
+                        item(key = "vol-${section.volumeId ?: "loose"}") {
+                            Text(
+                                section.title,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        items(section.chapters, key = { "ch-${it.id}" }) { chapter ->
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    // 点击章节：删除该章旧向量后重新建立
+                                    .clickable(enabled = vectorizing == null) { askChapter = chapter }
+                                    .padding(horizontal = 12.dp, vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    chapter.title,
+                                    modifier = Modifier.weight(1f),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    if (chapter.vectorized) "已向量化" else "未向量化",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = if (chapter.vectorized) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            HorizontalDivider()
+                        }
+                    }
+                    item {
+                        Text(
+                            "点击章节可重新建立该章的向量化（原有向量会被删除后重建）",
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 12.dp),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    askChapter?.let { c ->
+        AlertDialog(
+            onDismissRequest = { askChapter = null },
+            title = { Text("重新向量化「${c.title}」？") },
+            text = { Text("将先删除该章已有的向量，再重新建立。") },
+            confirmButton = {
+                TextButton(onClick = { askChapter = null; onRevertChapter(c.id) }) { Text("确定") }
+            },
+            dismissButton = { TextButton(onClick = { askChapter = null }) { Text("取消") } }
+        )
+    }
+}
+
+/** 每个书籍行右侧的图标按钮：淡紫圆角方块 + 图标 */
+@Composable
+private fun VectorizeIconButton(
+    icon: ImageVector,
+    label: String,
+    enabled: Boolean,
+    onClick: () -> Unit
+) {
+    val bg = if (enabled) MaterialTheme.colorScheme.secondaryContainer
+    else MaterialTheme.colorScheme.surfaceVariant
+    val tint = if (enabled) MaterialTheme.colorScheme.onSecondaryContainer
+    else MaterialTheme.colorScheme.onSurfaceVariant
+    Box(
+        Modifier
+            .padding(start = 4.dp)
+            .size(40.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(bg)
+            .clickable(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(icon, contentDescription = label, tint = tint, modifier = Modifier.size(20.dp))
+    }
+}
+
+/** 向量化进行中 / 出错时的状态条；空闲时什么都不显示 */
+@Composable
+private fun VectorizeStatus(vectorizing: VectorizeProgress?) {
+    if (vectorizing == null) return
+    val p = vectorizing
+    Column(Modifier.padding(horizontal = 16.dp)) {
+        Spacer(Modifier.height(6.dp))
+        val where = listOf(p.volumeTitle, p.chapterTitle).filter { it.isNotBlank() }
+        Text(
+            if (p.chapterTitle.isBlank()) "准备中…"
+            else "正在处理 ${where.joinToString(" ")}（${p.done}/${p.total}）",
+            style = MaterialTheme.typography.bodySmall
+        )
+        p.error?.let { err ->
+            Spacer(Modifier.height(4.dp))
+            Text(
+                err,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error
+            )
+        }
+    }
+    Spacer(Modifier.height(8.dp))
+    HorizontalDivider()
 }
 
 /** 分组筛选按钮文案：null=全部书籍，-1=未分组，其余取分组名（找不到时回退「全部书籍」） */

@@ -308,17 +308,17 @@ class BookRepository(private val db: AppDatabase) {
         return mergedId
     }
 
-    /** 章节序号重排：按当前顺序归一化 sortOrder，并按章节前缀重写各分卷内的标题编号 */
-    suspend fun renumberChapters(bookId: Long) {
+    /**
+     * 章节序号重排：只重排 [volumeId] 所在分卷（null 表示未分卷章节）的章节标题，卷内从 1 重新编号；
+     * 其他分卷的标题保持不变，最后整体归一化 sortOrder（不改变现有先后顺序）。
+     */
+    suspend fun renumberChapters(bookId: Long, volumeId: Long?) {
         val template = bookDao.getById(bookId)?.chapterPrefix ?: "第%n章"
-        val chapters = chapterDao.getByBook(bookId)
-        var order = 0
-        // 按分卷分组的迭代顺序即章节当前排序；卷内从 1 重新编号，未分卷章节单独成组
-        chapters.groupBy { it.volumeId }.forEach { (_, list) ->
-            list.forEachIndexed { i, c ->
-                chapterDao.update(c.copy(title = buildTitle(template, i + 1), sortOrder = order++))
-            }
-        }
+        // getByBook 已按 sortOrder 排序，卷内相对顺序即当前顺序
+        chapterDao.getByBook(bookId)
+            .filter { it.volumeId == volumeId }
+            .forEachIndexed { i, c -> chapterDao.update(c.copy(title = buildTitle(template, i + 1))) }
+        normalizeChapterOrder(bookId)
     }
 
     /** 把整本书的章节 sortOrder 归一化为连续序号 */

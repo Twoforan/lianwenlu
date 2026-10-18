@@ -211,13 +211,44 @@ class MemoryRepository(
         }
     }
 
+    /**
+     * 重新向量化：先删除本书全部已有向量（旧映射作废），再按当前向量源全量重建。
+     * 用于「换源/换模型后彻底重来」或怀疑旧向量已脏的场景。
+     */
+    suspend fun revectorize(bookId: Long, onProgress: (VectorizeProgress) -> Unit = {}) {
+        vectorizeLock.withLock {
+            chunkDao.deleteByBook(bookId)
+            runVectorize(bookId, onProgress)
+        }
+    }
+
+    /** 重新向量化单章：先删除该章已有向量，再按当前向量源重建这一章 */
+    suspend fun revectorizeChapter(
+        bookId: Long,
+        chapterId: Long,
+        onProgress: (VectorizeProgress) -> Unit = {}
+    ) {
+        vectorizeLock.withLock {
+            chunkDao.deleteByChapter(chapterId)
+            runVectorize(bookId, onProgress, onlyChapterIds = setOf(chapterId))
+        }
+    }
+
     private val vectorizeLock = Mutex()
 
-    private suspend fun runVectorize(bookId: Long, onProgress: (VectorizeProgress) -> Unit) {
+    /**
+     * 增量向量化：命中哈希（内容与更新时间和已存块一致）的章节自动跳过。
+     * [onlyChapterIds] 非空时只处理这些章节（单章重建用）。
+     */
+    private suspend fun runVectorize(
+        bookId: Long,
+        onProgress: (VectorizeProgress) -> Unit,
+        onlyChapterIds: Set<Long>? = null
+    ) {
         withContext(Dispatchers.IO) {
             val chapters = chapterDao.getByBook(bookId)
             val volumeTitles = volumeDao.getByBook(bookId).associate { it.id to it.title }
-            val targets = chapters.filter { it.content.isNotBlank() }
+            val targets = chapters.filter { it.content.isNotBlank() && (onlyChapterIds == null || it.id in onlyChapterIds) }
             // 向量化源签名（向量化工具 + 模型）并进块哈希：换了源，旧哈希全部失配，整本自动重跑。
             // 这是「本地向量 → 切回厂商 API」后仍能检索到的关键：旧向量与新查询向量算不了余弦。
             val source = gateway.signature()

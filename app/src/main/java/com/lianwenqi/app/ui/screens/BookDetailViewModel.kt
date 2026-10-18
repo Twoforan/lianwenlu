@@ -177,8 +177,8 @@ class BookDetailViewModel(
         if (ids.size >= 2) bookRepository.mergeChapters(bookId, ids)
     }
 
-    /** 章节序号重排 */
-    fun renumberChapters() = viewModelScope.launch {
-        bookRepository.renumberChapters(bookId)
+    /** 章节序号重排：只重排 [volumeId] 所在分卷（null 表示未分卷章节） */
+    fun renumberChapters(volumeId: Long?) = viewModelScope.launch {
+        bookRepository.renumberChapters(bookId, volumeId)
     }
 }
