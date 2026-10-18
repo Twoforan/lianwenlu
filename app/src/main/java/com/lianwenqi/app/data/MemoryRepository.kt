@@ -132,9 +132,14 @@ class MemoryRepository(
         scope: String
     ): List<String> {
         if (query.isBlank()) return emptyList()
+        // 只召回「现存章节」的向量块：章节被删除后其向量即使因异常尚未物理清理，
+        // 也不能再作为参考资料进入提示词，避免污染新文参考与多花无谓的 token。
+        val existingChapterIds = chapterDao.getByBook(bookId).map { it.id }.toSet()
         // 当前正在写的章节不进候选池：它已经在本章梗概 / 正文里了，
         // 留着只会凭「和自己梗概最像」把其它章节挤出去
-        val rows = chunkDao.getByBook(bookId).filter { excludeChapterId == null || it.chapterId != excludeChapterId }
+        val rows = chunkDao.getByBook(bookId).filter {
+            it.chapterId in existingChapterIds && (excludeChapterId == null || it.chapterId != excludeChapterId)
+        }
         if (rows.isEmpty()) return emptyList()
         // 检索失败（工具关闭 / 模型未就绪 / 网络异常）时静默返回空：只影响本次参考资料，不阻断发送
         val queryVector = gateway.embed(listOf(query)).getOrNull()?.firstOrNull() ?: return emptyList()

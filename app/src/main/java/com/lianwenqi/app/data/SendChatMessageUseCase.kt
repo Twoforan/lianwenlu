@@ -212,6 +212,9 @@ class SendChatMessageUseCase(
         val history = allMessages
             .filter { it.id <= request.historyEndId }
             .filter { it.role == ChatRole.USER || it.role == ChatRole.ASSISTANT }
+            // 同一轮用户消息下只保留「当前生效」的那一条回答：多次「重新生成」产生的废弃候选
+            // 不进后续请求的上下文，否则它们会并列堆积在历史里，造成 token 线性膨胀。
+            .filter { it.role == ChatRole.USER || it.active }
             .let { if (maxContext > 0) it.takeLast(maxContext) else it }
             // 拼回这条消息隐藏的附加提示词（如「＋本章梗概」「长期记忆检索片段」），保证与当初发送的字节一致。
             // 顺序上附加提示词放在用户指令**之前**：让「用户的要求」始终是本轮最后一句话，

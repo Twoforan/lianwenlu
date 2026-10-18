@@ -196,6 +196,10 @@ fun AiChatScreen(initialBookId: Long?) {
     var showAiTools by remember { mutableStateOf(false) }
     var showSessions by remember { mutableStateOf(false) }
     var renamingSession by remember { mutableStateOf<ChatSession?>(null) }
+    // 长按会话弹出的操作菜单（改名 / 换绑书籍）
+    var sessionMenu by remember { mutableStateOf<ChatSession?>(null) }
+    // 换绑书籍对话框的目标会话
+    var rebindingSession by remember { mutableStateOf<ChatSession?>(null) }
     var renamingChapterId by remember { mutableStateOf<Long?>(null) }
     // 长按未绑定章节的「第X轮对话」分组标题后改名：目标消息 id + 当前显示名
     var renamingRound by remember { mutableStateOf<Pair<Long, String>?>(null) }
@@ -359,10 +363,8 @@ fun AiChatScreen(initialBookId: Long?) {
                         // 每组都整组包裹：绑定章节的组显示章节名抬头（最后一组默认展开，其余默认收起），
                         // 未绑定章节的组包成「第X轮对话」卡片（避免导航栏 AI 里最后一章的对话缺少抬头、无法收起）。
                         val collapsed = collapsedGroups[group.key] ?: (group.key != focusKey)
-                        val title = if (group.chapterId > 0) {
-                            chapters.firstOrNull { it.id == group.chapterId }?.title
-                                ?: "（章节已删除）"
-                        } else group.roundTitle()
+                        val bound = groupBoundToChapter(group, chapters)
+                        val title = groupTitle(group, chapters)
                         ChapterGroupCard(
                             title = title,
                             // 组内「对话」条数（一问一答算一条）与回答字数
@@ -378,7 +380,8 @@ fun AiChatScreen(initialBookId: Long?) {
                             preview = groupPreview(group),
                             collapsed = collapsed,
                             onToggle = { collapsedGroups[group.key] = !collapsed },
-                            onLongPressTitle = if (group.chapterId > 0) {
+                            // 章节已删除时视为「解除映射」，长按改为改「本轮对话」名（只改消息，不同步书籍）
+                            onLongPressTitle = if (bound) {
                                 { renamingChapterId = group.chapterId }
                             } else {
                                 { renamingRound = group.anchorMessageId() to title }
@@ -860,7 +863,7 @@ fun AiChatScreen(initialBookId: Long?) {
                                     .pointerInput(s.id) {
                                         detectTapGestures(
                                             onTap = { vm.openSession(s.id); showSessions = false },
-                                            onLongPress = { renamingSession = s }
+                                            onLongPress = { sessionMenu = s }
                                         )
                                     }
                                     .padding(vertical = 10.dp)
@@ -887,7 +890,7 @@ fun AiChatScreen(initialBookId: Long?) {
                         }
                     }
                     Text(
-                        "长按会话标题可修改名称",
+                        "长按会话可修改名称或切换绑定书籍",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -920,6 +923,37 @@ fun AiChatScreen(initialBookId: Long?) {
                 ) { Text("保存") }
             },
             dismissButton = { TextButton(onClick = { renamingSession = null }) { Text("取消") } }
+        )
+    }
+    // 长按会话：选择「修改名称 / 切换绑定书籍」
+    sessionMenu?.let { target ->
+        AlertDialog(
+            onDismissRequest = { sessionMenu = null },
+            title = { Text(target.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            text = {
+                Column {
+                    TextButton(
+                        onClick = { renamingSession = target; sessionMenu = null },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("修改名称") }
+                    TextButton(
+                        onClick = { rebindingSession = target; sessionMenu = null },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("切换绑定书籍") }
+                }
+            },
+            confirmButton = { TextButton(onClick = { sessionMenu = null }) { Text("取消") } }
+        )
+    }
+    rebindingSession?.let { target ->
+        SessionRebindDialog(
+            session = target,
+            books = books,
+            onDismiss = { rebindingSession = null },
+            onConfirm = { bookId, keepHistory, keepPreset ->
+                vm.rebindSession(target.id, bookId, keepHistory, keepPreset)
+                rebindingSession = null
+            }
         )
     }
     renamingChapterId?.let { target ->
@@ -1164,10 +1198,8 @@ private fun AiAssistantPanel(
                     items(chapterGroups.size, key = { chapterGroups[it].key }) { gi ->
                         val group = chapterGroups[gi]
                         val collapsed = collapsedGroups[group.key] ?: (group.key != focusKey)
-                        val title = if (group.chapterId > 0) {
-                            chapters.firstOrNull { it.id == group.chapterId }?.title
-                                ?: "（章节已删除）"
-                        } else group.roundTitle()
+                        val bound = groupBoundToChapter(group, chapters)
+                        val title = groupTitle(group, chapters)
                         ChapterGroupCard(
                             title = title,
                             rounds = group.entries.count { it is ChatEntry.User },
@@ -1181,7 +1213,8 @@ private fun AiAssistantPanel(
                             preview = groupPreview(group),
                             collapsed = collapsed,
                             onToggle = { collapsedGroups[group.key] = !collapsed },
-                            onLongPressTitle = if (group.chapterId > 0) {
+                            // 章节已删除时视为「解除映射」，长按改为改「本轮对话」名（只改消息，不同步书籍）
+                            onLongPressTitle = if (bound) {
                                 { renamingChapterId = group.chapterId }
                             } else {
                                 { renamingRound = group.anchorMessageId() to title }
@@ -1511,6 +1544,74 @@ private fun RoundRenameDialog(
         },
         confirmButton = {
             TextButton(enabled = name.isNotBlank(), onClick = { onConfirm(name) }) { Text("保存") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
+}
+
+/**
+ * 「切换绑定书籍」弹窗：选目标书籍 + 两个勾选框决定是否把历史带入新书上下文。
+ * - 历史对话：原有对话消息继续作为新书上下文；
+ * - 历史预设：此前导入的大纲与章节梗概保留在会话预设中；
+ * 都不勾选则清空预设，下次发送按新书重新建立上下文（章节映射同时解除）。
+ */
+@Composable
+private fun SessionRebindDialog(
+    session: ChatSession,
+    books: List<Book>,
+    onDismiss: () -> Unit,
+    onConfirm: (bookId: Long, keepHistory: Boolean, keepPreset: Boolean) -> Unit
+) {
+    var targetId by remember(session.id) { mutableStateOf(session.bookId) }
+    var keepHistory by remember(session.id) { mutableStateOf(true) }
+    var keepPreset by remember(session.id) { mutableStateOf(false) }
+    var expanded by remember { mutableStateOf(false) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("切换绑定书籍") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text("选择要绑定的书籍：", style = MaterialTheme.typography.labelLarge)
+                Spacer(Modifier.height(4.dp))
+                Box {
+                    OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {
+                        Text(
+                            books.firstOrNull { it.id == targetId }?.title ?: "选择书籍",
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                        books.forEach { b ->
+                            DropdownMenuItem(
+                                text = { Text(b.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                onClick = { targetId = b.id; expanded = false }
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = keepHistory, onCheckedChange = { keepHistory = it })
+                    Text("历史对话", modifier = Modifier.clickable { keepHistory = !keepHistory })
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = keepPreset, onCheckedChange = { keepPreset = it })
+                    Text("历史预设", modifier = Modifier.clickable { keepPreset = !keepPreset })
+                }
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "勾选「历史对话」：原有历史对话带入新书上下文；勾选「历史预设」：此前导入的大纲与章节梗概保留在预设中。都不勾选则按新书重新建立上下文（章节映射同时解除）。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = targetId != null && targetId != session.bookId,
+                onClick = { targetId?.let { onConfirm(it, keepHistory, keepPreset) } }
+            ) { Text("确定") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
     )
@@ -2153,6 +2254,24 @@ private fun ChatChapterGroup.roundTitle(): String =
 
 /** 未绑定章节分组的长按改名目标（该组首条消息的 id） */
 private fun ChatChapterGroup.anchorMessageId(): Long = messageIdOf(entries.first())
+
+/**
+ * 分组抬头：绑定且章节仍存在的显示章节名；绑定章节已被删除的视为「解除映射」，
+ * 改显示该组自定义名（无则回落「（章节已删除）」）；未绑定章节的显示「第X轮对话」。
+ */
+private fun groupTitle(group: ChatChapterGroup, chapters: List<Chapter>): String {
+    val chapter = chapters.firstOrNull { it.id == group.chapterId }
+    return when {
+        group.chapterId > 0 && chapter != null -> chapter.title
+        group.chapterId > 0 ->
+            roundNameOf(group.entries.first()).ifBlank { "（章节已删除）" }
+        else -> group.roundTitle()
+    }
+}
+
+/** 该分组是否仍「绑定」在现存章节上：为真时抬头改名同步书籍章节，否则只改本轮对话名 */
+private fun groupBoundToChapter(group: ChatChapterGroup, chapters: List<Chapter>): Boolean =
+    group.chapterId > 0 && chapters.any { it.id == group.chapterId }
 
 /** 分组预览：收起时展示本组首条内容摘要（单行省略），让折叠态也能看出这轮聊了什么 */
 private fun groupPreview(group: ChatChapterGroup): String {

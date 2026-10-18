@@ -59,6 +59,9 @@ class ChatRepository(private val db: AppDatabase) : ChatGateway {
         chatDao.deleteSession(id)
     }
 
+    /** 清空会话的全部历史消息（换绑书籍时选择「不带历史对话」用） */
+    suspend fun clearSessionMessages(sessionId: Long) = chatDao.clearMessages(sessionId)
+
     fun observeMessages(sessionId: Long): Flow<List<ChatMessage>> = chatDao.observeMessages(sessionId)
 
     override suspend fun getMessages(sessionId: Long): List<ChatMessage> = chatDao.getMessages(sessionId)

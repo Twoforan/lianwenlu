@@ -289,4 +289,28 @@ class SendChatMessageUseCaseTest {
         assertEquals(listOf(ChatRole.ASSISTANT, ChatRole.USER), turns.map { it.role })
         assertEquals("请基于以上内容继续往下写。", turns.last().content)
     }
+
+    // ---------------- 场景 6：重新生成的废弃版本不进后续上下文 ----------------
+
+    @Test
+    fun history_keepsOnlyActiveAssistantVariant() = runTest {
+        // 同一轮用户消息（id=1）连续重新生成 3 次：只有最后一条 active=1，其余为废弃候选
+        val chat = FakeChatGateway(
+            messages = listOf(
+                userMessage(id = 1L, content = "写第一章"),
+                ChatMessage(id = 2L, sessionId = 1L, role = ChatRole.ASSISTANT, content = "候选甲", replyToId = 1L, variantIndex = 0, active = false),
+                ChatMessage(id = 3L, sessionId = 1L, role = ChatRole.ASSISTANT, content = "候选乙", replyToId = 1L, variantIndex = 1, active = false),
+                ChatMessage(id = 4L, sessionId = 1L, role = ChatRole.ASSISTANT, content = "最终版", replyToId = 1L, variantIndex = 2, active = true),
+                userMessage(id = 5L, content = "继续写第二章")
+            )
+        )
+        val model = FakeModelGateway(result = AiResult.ok("好的"))
+        SendChatMessageUseCase(chat, model)(request(replyToUserId = 5L, historyEndId = 5L)).toList()
+
+        val turns = model.lastRequest!!.turns
+        // 该轮只出现 1 条 assistant（最终版），废弃候选不再进入上下文
+        assertEquals(listOf(ChatRole.USER, ChatRole.ASSISTANT, ChatRole.USER), turns.map { it.role })
+        assertEquals("最终版", turns[1].content)
+        assertTrue(turns.none { it.content == "候选甲" || it.content == "候选乙" })
+    }
 }

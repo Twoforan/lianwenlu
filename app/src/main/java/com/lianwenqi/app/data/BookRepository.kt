@@ -27,6 +27,8 @@ class BookRepository(private val db: AppDatabase) {
     private val chapterDao = db.chapterDao()
     private val outlineDao = db.outlineDao()
     private val groupDao = db.bookGroupDao()
+    // 删除章节 / 书籍 / 合并章节时需要同步清理其长期记忆向量块，避免已删内容仍被检索召回
+    private val memoryChunkDao = db.memoryChunkDao()
 
     // ---------------- 书架 ----------------
 
@@ -93,6 +95,8 @@ class BookRepository(private val db: AppDatabase) {
         chapterDao.getByBook(bookId).forEach { chapterDao.deleteById(it.id) }
         volumeDao.getByBook(bookId).forEach { volumeDao.deleteById(it.id) }
         outlineDao.getByBook(bookId).forEach { outlineDao.deleteById(it.id) }
+        // 长期记忆向量块按书籍清理，防止删书后仍被检索召回
+        memoryChunkDao.deleteByBook(bookId)
         bookDao.deleteById(bookId)
     }
 
@@ -216,6 +220,8 @@ class BookRepository(private val db: AppDatabase) {
 
     suspend fun deleteChapter(bookId: Long, chapterId: Long) {
         chapterDao.deleteById(chapterId)
+        // 同步清理该章节的全部向量块：删章节即意味着「不要了」，残留在向量库会污染后续检索
+        memoryChunkDao.deleteByChapter(chapterId)
         val remaining = chapterDao.getByBook(bookId)
         remaining.forEachIndexed { i, c -> if (c.sortOrder != i) chapterDao.setOrder(c.id, i) }
     }
@@ -241,6 +247,8 @@ class BookRepository(private val db: AppDatabase) {
     /** 批量删除章节，剩余章节序号归一化为连续 */
     suspend fun deleteChapters(bookId: Long, chapterIds: List<Long>) {
         chapterIds.forEach { chapterDao.deleteById(it) }
+        // 被删章节的向量块一并清理，避免已删内容继续参与记忆检索
+        chapterIds.forEach { memoryChunkDao.deleteByChapter(it) }
         normalizeChapterOrder(bookId)
     }
 
@@ -293,6 +301,8 @@ class BookRepository(private val db: AppDatabase) {
             )
         )
         chosen.forEach { chapterDao.deleteById(it.id) }
+        // 合并即删除原章节：其向量块同步清理，避免残留在检索池里
+        chosen.forEach { memoryChunkDao.deleteByChapter(it.id) }
         touchBook(bookId, mergedId, first.title)
         normalizeChapterOrder(bookId)
         return mergedId

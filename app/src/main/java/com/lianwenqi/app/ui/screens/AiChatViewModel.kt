@@ -828,6 +828,51 @@ class AiChatViewModel(
     }
 
     /**
+     * 换绑会话的书籍：把会话从原书切到 [newBookId]，并解除章节映射（chapterId 置空）。
+     * [keepHistory] 为真保留原有历史对话（继续作为新书上下文的一部分），否则清空历史消息；
+     * [keepPreset] 为真保留会话已冻结的预设（此前导入的大纲 / 章节梗概），否则清空预设，
+     * 让下次发送按当前（新）书的勾选重新冻结，从而不再夹带原书内容。
+     */
+    fun rebindSession(sessionId: Long, newBookId: Long, keepHistory: Boolean, keepPreset: Boolean) =
+        viewModelScope.launch {
+            val session = chatRepository.getSession(sessionId) ?: return@launch
+            val old = SessionPrefix.decode(session.prefix)
+            val newPrefix = if (keepPreset) {
+                // 保留已冻结的书籍 / 大纲 / 章节条目，仅重置增量状态，避免把原书 id 误判成「重新勾选」
+                old.copy(
+                    checkedBooks = emptyList(),
+                    checkedOutlines = emptyList(),
+                    checkedChapters = emptyList(),
+                    tailBooks = emptyList(),
+                    tailOutlines = emptyList(),
+                    tailChapters = emptyList(),
+                    autoOutlineIds = emptyList()
+                )
+            } else {
+                // 清空预设并标记为未初始化：下次发送会按当前新书重新冻结，原书内容不再进入请求
+                SessionPrefix()
+            }
+            if (!keepHistory) chatRepository.clearSessionMessages(sessionId)
+            chatRepository.updateSession(
+                session.copy(
+                    bookId = newBookId,
+                    chapterId = null,
+                    prefix = newPrefix.encode(),
+                    updatedAt = System.currentTimeMillis()
+                )
+            )
+            if (_sessionId.value == sessionId) {
+                // 当前打开的会话：上下文选择一并切到新书，清掉旧书残留的章节 / 大纲勾选
+                selectedBookIds.value = setOf(newBookId)
+                selectedChapterIds.value = emptySet()
+                summaryChapterIds.value = emptySet()
+                contentChapterIds.value = emptySet()
+                selectedOutlineIds.value = emptySet()
+                refreshAllFlags()
+            }
+        }
+
+    /**
      * 修改未绑定章节某轮对话的显示名（长按「第X轮对话」触发）。
      * 只改该轮消息上的名称，不会同步到书籍章节（区别于 [renameChapter]）。
      */

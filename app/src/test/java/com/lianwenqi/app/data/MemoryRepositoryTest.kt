@@ -366,7 +366,7 @@ class MemoryRepositoryTest {
                 )
             }
         )
-        val repo = repository(FakeChapterDao(emptyList()), FakeVolumeDao(emptyList()), chunkDao)
+        val repo = repository(FakeChapterDao(listOf(chapter(7, 1, 10, "", 1L))), FakeVolumeDao(emptyList()), chunkDao)
         val result = repo.retrieve(1, target, topK = 1)
         assertEquals(listOf(target), result)
     }
@@ -385,13 +385,14 @@ class MemoryRepositoryTest {
             }
         )
         // 重排分数全 0（等价于厂商 API 无重排）：顺序就是余弦召回顺序
+        val chapters = FakeChapterDao(listOf(chapter(7, 1, 10, "", 1L), chapter(8, 1, 10, "", 1L), chapter(9, 1, 10, "", 1L)))
         val byCosine = MemoryRepository(
-            FakeChapterDao(emptyList()), FakeVolumeDao(emptyList()), chunkDao,
+            chapters, FakeVolumeDao(emptyList()), chunkDao,
             FakeGateway(), { it() }
         ).retrieve(1, "甲片段", topK = 3)
         // 重排给「越靠后的候选分数越高」：最终顺序应为余弦顺序的反序
         val reranked = MemoryRepository(
-            FakeChapterDao(emptyList()), FakeVolumeDao(emptyList()), chunkDao,
+            chapters, FakeVolumeDao(emptyList()), chunkDao,
             FakeGateway(rerankScores = { n -> FloatArray(n) { it.toFloat() } }), { it() }
         ).retrieve(1, "甲片段", topK = 3)
 
@@ -429,7 +430,8 @@ class MemoryRepositoryTest {
             override suspend fun signature() = "fake|2"
         }
         val result = MemoryRepository(
-            FakeChapterDao(emptyList()), FakeVolumeDao(emptyList()), chunkDao, gateway, { it() }
+            FakeChapterDao(listOf(chapter(7, 1, 10, "", 1L), chapter(8, 1, 10, "", 1L), chapter(9, 1, 10, "", 1L))),
+            FakeVolumeDao(emptyList()), chunkDao, gateway, { it() }
         ).retrieve(1, "任意查询", topK = 5, excludeChapterId = 7)
 
         // 当前章（7）被排除
@@ -444,6 +446,24 @@ class MemoryRepositoryTest {
     fun retrieve_returnsEmptyWhenNoChunks() = runTest {
         val repo = repository(FakeChapterDao(emptyList()), FakeVolumeDao(emptyList()), FakeChunkDao())
         assertTrue(repo.retrieve(1, "任意查询", topK = 5).isEmpty())
+    }
+
+    @Test
+    fun retrieve_excludesChunksOfDeletedChapters() = runTest {
+        val chunkDao = FakeChunkDao()
+        chunkDao.rows.addAll(
+            listOf(7L to "已删章节片段", 8L to "现存章节片段").mapIndexed { i, (chapterId, text) ->
+                MemoryChunk(
+                    bookId = 1, volumeId = null, chapterId = chapterId, chunkIndex = i, text = text,
+                    hash = "h$i", chapterUpdatedAt = 1L, dim = 4, vector = encodeVector(fakeVector(text))
+                )
+            }
+        )
+        // 章节 7 已被删除（现存章节只有 8）：其向量块即便残留也不能被召回
+        val repo = repository(FakeChapterDao(listOf(chapter(8, 1, 10, "", 1L))), FakeVolumeDao(emptyList()), chunkDao)
+        val result = repo.retrieve(1, "已删章节片段", topK = 5)
+        assertTrue(result.none { it == "已删章节片段" })
+        assertEquals(listOf("现存章节片段"), result)
     }
 
     @Test
