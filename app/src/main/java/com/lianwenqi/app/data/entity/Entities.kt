@@ -3,6 +3,7 @@ package com.lianwenqi.app.data.entity
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
+import com.lianwenqi.app.util.shortHash
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
@@ -367,9 +368,31 @@ data class SessionPrefix(
      * 其完整字段（表）作为「新增大纲资料」随当轮用户消息落库；记录 id 后，
      * 后续重复命中的条目不再重复提交，只有新命中的才追加。
      */
-    val autoOutlineIds: List<Long> = emptyList()
+    val autoOutlineIds: List<Long> = emptyList(),
+    /**
+     * 已提交过的长期记忆检索片段（只增不减，存片段文本的稳定短哈希）：
+     * 命中的片段随当轮用户消息落库后记入这里，后续轮次即使再次召回同一片段也不再重复提交，
+     * 避免同一批参考资料在多轮里反复占 token（内容仍在历史对话里，不会丢）。
+     */
+    val autoMemoryKeys: List<String> = emptyList()
 ) {
     fun encode(): String = prefixJson.encodeToString(serializer(), this)
+
+    /** 长期记忆去重：剔除本会话已提交过的检索片段，只返回尚未提交过的新片段 */
+    fun freshMemoryHits(hits: List<String>): List<String> =
+        hits.filterNot { shortHash(it) in autoMemoryKeys }
+
+    /**
+     * 该大纲条目的内容是否已在本会话上下文中可用：
+     * 已在前置预设（[outlines] 且大纲前缀化开启）、已追加到历史尾部（[tailOutlines]）、
+     * 或已被「适配性筛选」注入过（[autoOutlineIds]）都算「已有」，无需重复提交完整内容。
+     */
+    fun outlineInjected(id: Long, outlinePrefixOn: Boolean): Boolean =
+        id in autoOutlineIds || id in tailOutlines || (outlinePrefixOn && outlines.any { it.id == id })
+
+    /** 把本轮新注入的大纲条目 id 记回集合（只增不减，重复 / 重复项均幂等） */
+    fun markOutlinesInjected(ids: List<Long>): SessionPrefix =
+        copy(autoOutlineIds = autoOutlineIds + ids.filterNot { it in autoOutlineIds }.distinct())
 
     /** 拼接前置「参考资料」文本；[includeChapters] / [includeOutlines] 对应该前缀化开关 */
     fun renderReference(includeChapters: Boolean, includeOutlines: Boolean): String =

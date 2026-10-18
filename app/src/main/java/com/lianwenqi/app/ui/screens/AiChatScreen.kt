@@ -120,6 +120,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.lianwenqi.app.ai.GenerationDialog
+import com.lianwenqi.app.ai.SummaryFailureChoice
 import com.lianwenqi.app.data.PromptLog
 import com.lianwenqi.app.data.entity.AiModel
 import com.lianwenqi.app.data.entity.Book
@@ -982,6 +984,8 @@ fun AiAssistantDrawer(
     onDismiss: () -> Unit,
     /** 把某条 AI 回答的正文写入当前章节（覆盖 + 一键排版） */
     onWriteToChapter: (String) -> Unit,
+    /** 把「生成梗概」产出的梗概写回当前章节的梗概（经编辑器本地缓冲，避免被整章保存覆盖） */
+    onGeneratedSummary: (String) -> Unit,
     /** 在当前书新建一个章节并跳转过去 */
     onNewChapter: () -> Unit
 ) {
@@ -1000,7 +1004,7 @@ fun AiAssistantDrawer(
             exit = slideOutHorizontally(targetOffsetX = { it }),
             modifier = Modifier.align(Alignment.CenterEnd)
         ) {
-            AiAssistantPanel(bookId, chapterId, onDismiss, onWriteToChapter, onNewChapter)
+            AiAssistantPanel(bookId, chapterId, onDismiss, onWriteToChapter, onGeneratedSummary, onNewChapter)
         }
     }
 }
@@ -1011,6 +1015,7 @@ private fun AiAssistantPanel(
     chapterId: Long,
     onDismiss: () -> Unit,
     onWriteToChapter: (String) -> Unit,
+    onGeneratedSummary: (String) -> Unit,
     onNewChapter: () -> Unit
 ) {
     val vm = appViewModel(key = "ai-quick-$bookId-$chapterId") {
@@ -1047,6 +1052,9 @@ private fun AiAssistantPanel(
     val memoryVectorizing by vm.memoryVectorizing.collectAsState()
     val memorySearch by vm.memorySearchState.collectAsState()
     val memoryToolReady by vm.memoryToolConfigured.collectAsState()
+    val generationDialog by vm.generationDialog.collectAsState()
+    val generationRunning by vm.generationRunning.collectAsState()
+    val generationMessage by vm.generationMessage.collectAsState()
 
     // 当前打开的章节不进入上下文
     val contextChapters = chapters.filter { it.id != chapterId }
@@ -1333,9 +1341,13 @@ private fun AiAssistantPanel(
                 preview = { vm.contextPreview() }
             )
 
-            // 「＋本章梗概」「快捷提示词」快捷按钮行（发送按钮已并入上方输入卡片）
+            // 「＋本章梗概」「快捷提示词」「生成梗概」「生成正文」快捷按钮行
+            //（发送按钮已并入上方输入卡片）；抽屉较窄时横向滚动，保证末尾的生成按钮可见可点
             Row(
-                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                    .horizontalScroll(rememberScrollState()),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
@@ -1376,6 +1388,63 @@ private fun AiAssistantPanel(
                         )
                     }
                 )
+                // 「生成梗概」：按「生成梗概」配置（是否限定范围 → 是否先弹标签选择）直接生成并写回本章梗概
+                FilterChip(
+                    selected = false,
+                    enabled = !generationRunning && !sending,
+                    onClick = {
+                        focusManager.clearFocus()
+                        keyboard?.hide()
+                        openPanel = null
+                        manifestState = 0
+                        vm.startGenerateSummary(onGeneratedSummary)
+                    },
+                    modifier = Modifier.height(32.dp),
+                    label = {
+                        Text(
+                            "生成梗概",
+                            style = MaterialTheme.typography.labelMedium,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
+                )
+                // 「生成正文」：生成前先一次性弹完所有决策弹窗，产出作为一条 AI 回答展示，由用户手动写入正文
+                FilterChip(
+                    selected = false,
+                    enabled = !generationRunning && !sending,
+                    onClick = {
+                        focusManager.clearFocus()
+                        keyboard?.hide()
+                        openPanel = null
+                        manifestState = 0
+                        vm.startGenerateContent(onGeneratedSummary)
+                    },
+                    modifier = Modifier.height(32.dp),
+                    label = {
+                        Text(
+                            "生成正文",
+                            style = MaterialTheme.typography.labelMedium,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
+                )
+                if (generationRunning) {
+                    FilterChip(
+                        selected = true,
+                        onClick = { vm.cancelGeneration() },
+                        modifier = Modifier.height(32.dp),
+                        label = {
+                            Text(
+                                "停止生成",
+                                style = MaterialTheme.typography.labelMedium,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+                    )
+                }
             }
 
             // 快捷提示词面板：在对话框下方展开
@@ -1456,6 +1525,87 @@ private fun AiAssistantPanel(
                 Toast.LENGTH_SHORT
             ).show()
         }
+    }
+
+    // 生成相关提示（已生成 / 超上限已截断 / 略短 / 失败等）
+    LaunchedEffect(generationMessage) {
+        generationMessage?.let {
+            Toast.makeText(panelContext, it, Toast.LENGTH_SHORT).show()
+            vm.clearGenerationMessage()
+        }
+    }
+
+    // 生成流程的选择型弹窗：全部在收集阶段弹完，任一取消（含点遮罩 / 返回键）即终止整个流程
+    when (val dialog = generationDialog) {
+        GenerationDialog.PickSummaryOutlines -> {
+            var picked by remember { mutableStateOf(emptySet<Long>()) }
+            OutlinePickerDialog(
+                items = outline,
+                selected = picked,
+                pinnedCategories = pinnedCats,
+                onToggle = { id -> picked = if (id in picked) picked - id else picked + id },
+                onToggleAll = { ids -> picked = if (ids.all { it in picked }) picked - ids else picked + ids },
+                onDismiss = { vm.cancelGeneration() },
+                confirmText = "确定",
+                onConfirm = { vm.confirmSummaryOutlines(picked.toList()) },
+                showCancel = true
+            )
+        }
+
+        is GenerationDialog.AskMemoryRetrieval -> AlertDialog(
+            onDismissRequest = { vm.cancelGeneration() },
+            title = { Text("是否启用记忆检索") },
+            text = {
+                Text(
+                    "本次将以本章梗概作为检索词：\n\n${dialog.queryDigest}\n\n" +
+                        "开启：命中的本书正文片段作为参考资料一并生成；\n" +
+                        "关闭：仅按本章梗概与本会话前缀生成。"
+                )
+            },
+            confirmButton = { TextButton(onClick = { vm.chooseMemoryRetrieval(true) }) { Text("开启") } },
+            dismissButton = {
+                Row {
+                    TextButton(onClick = { vm.chooseMemoryRetrieval(false) }) { Text("关闭") }
+                    TextButton(onClick = { vm.cancelGeneration() }) { Text("取消") }
+                }
+            }
+        )
+
+        is GenerationDialog.SummaryFailed -> AlertDialog(
+            onDismissRequest = { vm.resolveSummaryFailed(SummaryFailureChoice.CANCEL) },
+            title = { Text("梗概生成失败") },
+            text = {
+                Text(
+                    if (dialog.hasExisting) {
+                        "本章梗概未能生成。可以重试，或直接使用本章已有的梗概继续生成正文。"
+                    } else {
+                        "本章梗概未能生成，且本章暂无可用梗概。请重试，或取消本次生成。"
+                    }
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { vm.resolveSummaryFailed(SummaryFailureChoice.RETRY) }) { Text("重试梗概") }
+            },
+            dismissButton = {
+                Row {
+                    if (dialog.hasExisting) {
+                        TextButton(onClick = {
+                            vm.resolveSummaryFailed(SummaryFailureChoice.USE_EXISTING)
+                        }) { Text("使用已有梗概") }
+                    }
+                    TextButton(onClick = { vm.resolveSummaryFailed(SummaryFailureChoice.CANCEL) }) { Text("取消") }
+                }
+            }
+        )
+
+        is GenerationDialog.Notice -> AlertDialog(
+            onDismissRequest = { vm.cancelGeneration() },
+            title = { Text("无法生成") },
+            text = { Text(dialog.text) },
+            confirmButton = { TextButton(onClick = { vm.cancelGeneration() }) { Text("确定") } }
+        )
+
+        null -> Unit
     }
 
     // 「查看日志」：分「预设 / 上下文 / 本轮」三部分回显本轮发送时的提示词（默认收起，逐层展开）
@@ -3664,7 +3814,12 @@ private fun OutlinePickerDialog(
     pinnedCategories: Set<String>,
     onToggle: (Long) -> Unit,
     onToggleAll: (Set<Long>) -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    /** 「确定」按钮文案；与 [onConfirm] 一起用于需要「取消 / 确定」语义的场景（如生成梗概的范围选择） */
+    confirmText: String = "完成",
+    onConfirm: () -> Unit = onDismiss,
+    /** 显示「取消」按钮（关闭 / 点击遮罩仍走 [onDismiss]，语义为取消） */
+    showCancel: Boolean = false
 ) {
     var search by remember { mutableStateOf("") }
     // 标签筛选：null=全部，否则为分类存储值
@@ -3763,7 +3918,10 @@ private fun OutlinePickerDialog(
                 }
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("完成") } }
+        confirmButton = { TextButton(onClick = onConfirm) { Text(confirmText) } },
+        dismissButton = if (showCancel) {
+            { TextButton(onClick = onDismiss) { Text("取消") } }
+        } else null
     )
 }
 

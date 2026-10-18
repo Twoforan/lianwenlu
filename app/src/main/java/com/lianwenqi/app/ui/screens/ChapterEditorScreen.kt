@@ -265,6 +265,15 @@ fun ChapterEditorScreen(
     // 「写入当前章节」待确认的 AI 正文：本章已有正文时先弹窗询问，确认后再覆盖写入
     var pendingAiWrite by remember { mutableStateOf<String?>(null) }
 
+    // 把「生成梗概」产出的梗概写回本章：更新本地缓冲后立即落库。
+    // 必须改本地缓冲，否则切章 / 退出编辑页时的整章保存会用旧缓冲把新梗概覆盖回去。
+    fun applyGeneratedSummary(text: String) {
+        val next = text.trim()
+        summary = next
+        summaryExpanded = true
+        vm.saveNow(title, next, content.text, content.selection.start)
+    }
+
     // 把 AI 回答正文覆盖写入本章正文，并一键排版后落库
     fun writeAiToChapter(text: String) {
         keyboard?.hide()
@@ -655,6 +664,7 @@ fun ChapterEditorScreen(
             onWriteToChapter = { text ->
                 if (content.text.isBlank()) writeAiToChapter(text) else pendingAiWrite = text
             },
+            onGeneratedSummary = { applyGeneratedSummary(it) },
             onNewChapter = {
                 // 新建章节后跳转到新章节，并保持侧边 AI 对话栏打开
                 vm.createChapter(null) { newId ->

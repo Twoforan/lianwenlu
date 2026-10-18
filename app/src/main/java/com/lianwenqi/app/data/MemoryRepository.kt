@@ -32,6 +32,9 @@ private const val MAX_PER_CHAPTER = 2
 /** 范围偏好对余弦分数的最大加权幅度（±15%）：够把候选偏向所选范围，又不会压过语义相关度 */
 private const val POSITION_BIAS = 0.15f
 
+/** 生成正文的记忆检索默认相似度阈值：低于它的召回片段直接丢弃，避免不相关片段占上下文 */
+const val DEFAULT_MEMORY_MIN_SCORE = 0.75f
+
 /** 余弦召回的一条命中：正文片段、所属章节与余弦分数 */
 private data class Recall(val text: String, val chapterId: Long, val score: Float)
 
@@ -130,6 +133,28 @@ class MemoryRepository(
         topK: Int,
         excludeChapterId: Long?,
         scope: String
+    ): List<String> = retrieveTop(bookId, query, topK, excludeChapterId, scope, minScore = 0f)
+
+    /**
+     * 带相似度阈值的检索：生成正文前做记忆检索时使用（低于 [minScore] 的召回片段直接丢弃，
+     * 避免不相关片段白占上下文）。接口 [MemoryGateway.retrieve] 保持不变，避免破坏测试 fake。
+     */
+    suspend fun retrieveScored(
+        bookId: Long,
+        query: String,
+        topK: Int = MemoryGateway.DEFAULT_TOP_K,
+        excludeChapterId: Long? = null,
+        scope: String = MemorySearchScope.RANDOM,
+        minScore: Float = DEFAULT_MEMORY_MIN_SCORE
+    ): List<String> = retrieveTop(bookId, query, topK, excludeChapterId, scope, minScore)
+
+    private suspend fun retrieveTop(
+        bookId: Long,
+        query: String,
+        topK: Int,
+        excludeChapterId: Long?,
+        scope: String,
+        minScore: Float
     ): List<String> {
         if (query.isBlank()) return emptyList()
         // 只召回「现存章节」的向量块：章节被删除后其向量即使因异常尚未物理清理，
@@ -157,7 +182,7 @@ class MemoryRepository(
                     row.chapterId,
                     cosineSimilarity(queryVector, vector) * (positionBias?.get(row.chapterId) ?: 1f)
                 )
-            }.filter { it.score > 0f }
+            }.filter { it.score > 0f && it.score >= minScore }
                 .sortedByDescending { it.score }
                 .take(RECALL_TOP_K)
         }

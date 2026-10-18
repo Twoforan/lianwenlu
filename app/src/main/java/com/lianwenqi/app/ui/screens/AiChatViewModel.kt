@@ -3,6 +3,20 @@ package com.lianwenqi.app.ui.screens
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lianwenqi.app.AppContainer
+import com.lianwenqi.app.ai.AiRequest
+import com.lianwenqi.app.ai.FlowState
+import com.lianwenqi.app.ai.GenerationDialog
+import com.lianwenqi.app.ai.GenerationDialogKind
+import com.lianwenqi.app.ai.GenerationMode
+import com.lianwenqi.app.ai.GenerationPlan
+import com.lianwenqi.app.ai.RetrievalMode
+import com.lianwenqi.app.ai.SummaryFailureChoice
+import com.lianwenqi.app.ai.buildContentTurns
+import com.lianwenqi.app.ai.buildRetrievalQuery
+import com.lianwenqi.app.ai.buildSummaryReferenceBlock
+import com.lianwenqi.app.ai.buildSummaryTurns
+import com.lianwenqi.app.ai.contentDialogOrder
+import com.lianwenqi.app.ai.enforceWordRange
 import com.lianwenqi.app.data.AiChapterImporter
 import com.lianwenqi.app.data.AiOutlineImporter
 import com.lianwenqi.app.data.ChatEvent
@@ -33,6 +47,9 @@ import com.lianwenqi.app.util.AI_TOOL_IMPORT_CHAPTER
 import com.lianwenqi.app.util.AI_TOOL_WRITE_OUTLINE
 import com.lianwenqi.app.util.AiChapterBlock
 import com.lianwenqi.app.util.AiOutlineBlock
+import com.lianwenqi.app.util.shortHash
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
@@ -291,6 +308,457 @@ class AiChatViewModel(
 
     /** 本次等待的向量化进度（弹窗选「是」后显示，避免界面看起来卡住） */
     val memoryVectorizing = MutableStateFlow<VectorizeProgress?>(null)
+
+    // ---------------- 生成梗概 / 生成正文 ----------------
+    // 状态机：CollectingConfig 阶段一次性弹完所有选择型弹窗并写入 GenerationPlan；
+    // Executing 阶段只读 plan，不再弹任何需要用户输入的窗。任一弹窗取消即整体终止，不发模型请求。
+
+    private val _generationState = MutableStateFlow(FlowState.Idle)
+    val generationState: StateFlow<FlowState> = _generationState.asStateFlow()
+
+    /** 当前需要 UI 弹出的选择型弹窗；为空表示无需弹窗 */
+    private val _generationDialog = MutableStateFlow<GenerationDialog?>(null)
+    val generationDialog: StateFlow<GenerationDialog?> = _generationDialog.asStateFlow()
+
+    /** 本次生成计划（收集完成后只读） */
+    private val _generationPlan = MutableStateFlow<GenerationPlan?>(null)
+    val generationPlan: StateFlow<GenerationPlan?> = _generationPlan.asStateFlow()
+
+    /** 生成的提示 / 兜底文案（超上限已截断、略短等），展示后由 UI 调用 [clearGenerationMessage] 清空 */
+    val generationMessage = MutableStateFlow<String?>(null)
+
+    /** 执行阶段为 true：两个生成按钮禁用，并提供「停止生成」 */
+    val generationRunning: StateFlow<Boolean> = _generationState
+        .map { it == FlowState.Executing }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    fun clearGenerationMessage() {
+        generationMessage.value = null
+    }
+
+    private var generationJob: Job? = null
+    private var generationCancelled = false
+    private var generationOutlinePick: CompletableDeferred<List<Long>?>? = null
+    private var generationMemoryAsk: CompletableDeferred<Boolean?>? = null
+    private var generationSummaryFailed: CompletableDeferred<SummaryFailureChoice>? = null
+
+    /** 梗概子调用结果 */
+    private sealed interface SummaryCall {
+        data class Ok(val text: String) : SummaryCall
+        data class Failed(val message: String) : SummaryCall
+    }
+
+    /** 侧边抽屉「生成梗概」：限定范围开启时先弹标签选择，否则直接执行；生成的梗概交给 [onSummary] 写回编辑器 */
+    fun startGenerateSummary(onSummary: (String) -> Unit) = launchGeneration { sid ->
+        if (fixedChapterId == null) {
+            noticeThenCancel("请在章节编辑页使用「生成梗概」")
+            return@launchGeneration
+        }
+        val plan = GenerationPlan(
+            mode = GenerationMode.SUMMARY_ONLY,
+            summaryWordRange = prefs.genSummaryWordRange.first(),
+            contentWordRange = null,
+            selectedOutlineIds = if (prefs.genSummaryLimitScope.first()) {
+                askSummaryOutlines() ?: return@launchGeneration
+            } else {
+                emptyList()
+            },
+            memoryRetrieval = RetrievalMode.OFF
+        )
+        _generationPlan.value = plan
+        startExecuting()
+        when (val r = runSummaryCall(sid, plan)) {
+            is SummaryCall.Ok -> {
+                onSummary(r.text)
+                _generationState.value = FlowState.Done
+            }
+            is SummaryCall.Failed -> {
+                generationMessage.value = r.message
+                _generationState.value = FlowState.Failed
+            }
+        }
+    }
+
+    /**
+     * 侧边抽屉「生成正文」：按固定顺序一次性弹完所有决策弹窗（梗概标签多选 → 记忆检索询问），
+     * 之后进入 Executing 只读执行；任一弹窗取消即整体终止。
+     */
+    fun startGenerateContent(onSummary: (String) -> Unit) = launchGeneration { sid ->
+        val chapterId = fixedChapterId
+        if (chapterId == null) {
+            noticeThenCancel("请在章节编辑页使用「生成正文」")
+            return@launchGeneration
+        }
+        val withSummary = prefs.genContentWithSummary.first()
+        val limitScope = prefs.genSummaryLimitScope.first()
+        val mode = if (withSummary) {
+            GenerationMode.CONTENT_WITH_SUMMARY
+        } else {
+            if (bookRepository.getChapter(chapterId)?.summary.orEmpty().isBlank()) {
+                noticeThenCancel("请先填写本章梗概，或在设置中开启「同时生成梗概」")
+                return@launchGeneration
+            }
+            GenerationMode.CONTENT_ONLY
+        }
+        val memoryCfg = prefs.genContentMemoryMode.first()
+        var picked = emptyList<Long>()
+        var memory = if (memoryCfg == RetrievalMode.ON) RetrievalMode.ON else RetrievalMode.OFF
+        // ① 选梗概参考标签 ② 询问记忆检索：顺序固定，前一个确定后才弹下一个；任一取消即整体终止
+        for (kind in contentDialogOrder(mode, limitScope, memoryCfg == RetrievalMode.ASK)) {
+            when (kind) {
+                GenerationDialogKind.PICK_SUMMARY_OUTLINES ->
+                    picked = askSummaryOutlines() ?: return@launchGeneration
+                GenerationDialogKind.ASK_MEMORY ->
+                    memory = if (askMemoryRetrieval(retrievalQueryDigest(chapterId, picked)) == true) {
+                        RetrievalMode.ON
+                    } else {
+                        RetrievalMode.OFF
+                    }
+            }
+        }
+        if (generationCancelled) return@launchGeneration
+        val plan = GenerationPlan(
+            mode = mode,
+            summaryWordRange = prefs.genSummaryWordRange.first(),
+            contentWordRange = prefs.genContentWordRange.first(),
+            selectedOutlineIds = picked,
+            memoryRetrieval = memory
+        )
+        _generationPlan.value = plan
+        startExecuting()
+
+        val memoryCap = prefs.memoryBlockQuota.first()
+        val memoryScope = prefs.memorySearchScope.first()
+        val summary = if (mode == GenerationMode.CONTENT_WITH_SUMMARY) {
+            awaitSummaryWithRetry(sid, plan, onSummary)
+                ?: run {
+                    if (!generationCancelled) _generationState.value = FlowState.Failed
+                    return@launchGeneration
+                }
+        } else {
+            bookRepository.getChapter(chapterId)?.summary.orEmpty()
+        }
+
+        val memoryBlock = if (plan.memoryRetrieval == RetrievalMode.ON) {
+            buildMemoryBlock(sid, plan, chapterId, summary, memoryCap, memoryScope)
+        } else {
+            ""
+        }
+
+        val modelId = activeModelId.value
+        if (modelId <= 0L) {
+            generationMessage.value = "请先在设置中配置并选择一个模型"
+            _generationState.value = FlowState.Failed
+            return@launchGeneration
+        }
+        val prefix = readSessionPrefix(sid)
+        // 「适配性筛选」开启时，把「本章梗概」命中的非常驻化大纲条目一并并入正文参考资料。
+        // 生成正文是一次性无历史请求、不落库，故只注入、不记回 autoOutlineIds，
+        // 否则会让后续聊天轮次误以为这些条目已在历史里而跳过提交。
+        val outlineSlot = if (prefs.prefixAdaptiveFilterEnabled.first()) {
+            val matched = adaptiveMatchedOutlineIds(summary).mapNotNull { renderOutlineEntry(it) }
+            listOf(prefix.reference, renderAdaptiveOutlineBlock(prefix.sessionPrefix, matched))
+                .filter { it.isNotBlank() }
+                .joinToString("\n")
+        } else {
+            prefix.reference
+        }
+        val turns = buildContentTurns(
+            summary = summary,
+            outlineSlot = outlineSlot,
+            memoryBlock = memoryBlock,
+            userInput = input.value,
+            range = plan.contentWordRange
+        )
+        val result = configRepository.sendToModel(
+            modelId, AiRequest(turns = turns, model = "", temperature = 0f, maxTokens = 0)
+        )
+        if (generationCancelled) return@launchGeneration
+        if (!result.success) {
+            generationMessage.value = result.error?.userMessage ?: "生成失败"
+            _generationState.value = FlowState.Failed
+            return@launchGeneration
+        }
+        val raw = result.content.trim()
+        if (raw.isBlank()) {
+            generationMessage.value = "模型返回空内容"
+            _generationState.value = FlowState.Failed
+            return@launchGeneration
+        }
+        val enforced = enforceWordRange(raw, plan.contentWordRange)
+        if (enforced.over) {
+            generationMessage.value = "正文超出设定上限，已截断到最后一个完整句子"
+        } else if (enforced.under) {
+            generationMessage.value = "正文略短于设定下限，可继续让 AI 补写"
+        }
+        // 生成结果作为一条普通 AI 回答进入本会话：不自动写入正文，由用户在编辑器点「写入本章正文」决定
+        chatRepository.addMessage(
+            sid, ChatRole.ASSISTANT, enforced.text,
+            promptTokens = result.promptTokens,
+            completionTokens = result.completionTokens,
+            cachedTokens = result.cachedTokens,
+            chapterId = chapterId
+        )
+        _generationState.value = FlowState.Done
+    }
+
+    /** 标签多选弹窗「确定」 */
+    fun confirmSummaryOutlines(ids: List<Long>) {
+        generationOutlinePick?.complete(ids)
+        generationOutlinePick = null
+    }
+
+    /** 记忆检索询问弹窗：开启 / 关闭；取消（含 onDismiss）走 [cancelGeneration] */
+    fun chooseMemoryRetrieval(enable: Boolean) {
+        generationMemoryAsk?.complete(enable)
+        generationMemoryAsk = null
+    }
+
+    /** 梗概失败三选项 */
+    fun resolveSummaryFailed(choice: SummaryFailureChoice) {
+        generationSummaryFailed?.complete(choice)
+        generationSummaryFailed = null
+    }
+
+    /**
+     * 取消生成：弹窗关闭 / 用户点「取消」/ 点「停止生成」都走这里。
+     * 收集阶段取消 → Cancelled 且不发出任何模型请求；执行阶段取消 → 中止在途请求并置 Cancelled。
+     */
+    fun cancelGeneration() {
+        val state = _generationState.value
+        if (state != FlowState.CollectingConfig && state != FlowState.Executing) return
+        generationCancelled = true
+        generationOutlinePick?.complete(null)
+        generationOutlinePick = null
+        generationMemoryAsk?.complete(null)
+        generationMemoryAsk = null
+        generationSummaryFailed?.complete(SummaryFailureChoice.CANCEL)
+        generationSummaryFailed = null
+        _generationDialog.value = null
+        _generationState.value = FlowState.Cancelled
+        generationJob?.cancel()
+        generationJob = null
+    }
+
+    private fun launchGeneration(block: suspend (Long) -> Unit) {
+        if (_generationState.value == FlowState.Executing) return
+        generationJob?.cancel()
+        generationCancelled = false
+        generationMessage.value = null
+        _generationState.value = FlowState.CollectingConfig
+        generationJob = viewModelScope.launch {
+            val sid = _sessionId.value
+            if (sid == null) {
+                _generationDialog.value = null
+                _generationState.value = FlowState.Failed
+                generationMessage.value = "请先在本章侧边对话中建立会话后再生成"
+                return@launch
+            }
+            try {
+                block(sid)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                _generationState.value = FlowState.Failed
+                generationMessage.value = e.message ?: "生成失败"
+            }
+        }
+    }
+
+    private fun startExecuting() {
+        _generationDialog.value = null
+        _generationState.value = FlowState.Executing
+    }
+
+    /** 纯提示弹窗（点确定 / 关闭即终止流程） */
+    private fun noticeThenCancel(text: String) {
+        _generationState.value = FlowState.CollectingConfig
+        _generationDialog.value = GenerationDialog.Notice(text)
+    }
+
+    private suspend fun askSummaryOutlines(): List<Long>? {
+        val deferred = CompletableDeferred<List<Long>?>()
+        generationOutlinePick = deferred
+        _generationState.value = FlowState.CollectingConfig
+        _generationDialog.value = GenerationDialog.PickSummaryOutlines
+        return try {
+            deferred.await()
+        } finally {
+            generationOutlinePick = null
+            if (_generationDialog.value === GenerationDialog.PickSummaryOutlines) _generationDialog.value = null
+        }
+    }
+
+    private suspend fun askMemoryRetrieval(digest: String): Boolean? {
+        val deferred = CompletableDeferred<Boolean?>()
+        generationMemoryAsk = deferred
+        _generationState.value = FlowState.CollectingConfig
+        _generationDialog.value = GenerationDialog.AskMemoryRetrieval(digest)
+        return try {
+            deferred.await()
+        } finally {
+            generationMemoryAsk = null
+            if (_generationDialog.value is GenerationDialog.AskMemoryRetrieval) _generationDialog.value = null
+        }
+    }
+
+    private suspend fun askSummaryFailure(hasExisting: Boolean): SummaryFailureChoice? {
+        val deferred = CompletableDeferred<SummaryFailureChoice>()
+        generationSummaryFailed = deferred
+        _generationState.value = FlowState.CollectingConfig
+        _generationDialog.value = GenerationDialog.SummaryFailed(hasExisting)
+        return try {
+            deferred.await()
+        } finally {
+            generationSummaryFailed = null
+            if (_generationDialog.value is GenerationDialog.SummaryFailed) _generationDialog.value = null
+        }
+    }
+
+    /**
+     * 执行一次梗概生成（独立 messages，不进入正文请求的历史）。
+     * 参考资料 = 本会话常规前缀 + 用户选定标签的内容（已提交过的只写「参见大纲『X』」）。
+     */
+    private suspend fun runSummaryCall(sid: Long, plan: GenerationPlan): SummaryCall {
+        val modelId = activeModelId.value
+        if (modelId <= 0L) return SummaryCall.Failed("请先在设置中配置并选择一个模型")
+        val prefix = readSessionPrefix(sid)
+        val pickedBlock = if (plan.selectedOutlineIds.isEmpty()) {
+            ""
+        } else {
+            // 先把完整渲染文本取出来（读取库是挂起操作），再交给纯函数决定「参见」还是「完整内容」
+            val fullText = plan.selectedOutlineIds
+                .mapNotNull { id -> renderOutlineEntry(id)?.let { id to it.text } }
+                .toMap()
+            buildSummaryReferenceBlock(
+                outlineIds = plan.selectedOutlineIds,
+                injected = { id -> prefix.sessionPrefix.outlineInjected(id, prefix.outlineOn) },
+                label = { id -> _outline.value.firstOrNull { it.id == id }?.let { outlineHeadOf(it) } ?: id.toString() },
+                renderFull = { id -> fullText[id] }
+            )
+        }
+        // 注意：这里【不要】把选中的大纲记入 autoOutlineIds。
+        // autoOutlineIds 的语义是「内容已随某轮消息历史持久化，后续只需写『参见大纲』」，
+        // 而生成流程的参考资料块是一次性请求、不落库也不进历史；一旦标记，
+        // 下一轮就会退化成「参见大纲『X』」，模型反而拿不到内容。
+        // 因而只读 outlineInjected（判断是否真在会话前缀/历史里），不做写入，
+        // 顺带让同一章的多次重生成保持参考资料块逐字节一致，利于命中前缀缓存。
+        val reference = buildString {
+            if (prefix.reference.isNotBlank()) append("【本会话参考资料】\n").append(prefix.reference).append('\n')
+            if (pickedBlock.isNotBlank()) append(pickedBlock).append('\n')
+        }.trim()
+        val turns = buildSummaryTurns(input.value, plan.summaryWordRange, reference)
+        val result = configRepository.sendToModel(
+            modelId, AiRequest(turns = turns, model = "", temperature = 0f, maxTokens = 0)
+        )
+        if (!result.success) return SummaryCall.Failed(result.error?.userMessage ?: "生成梗概失败")
+        val raw = result.content.trim()
+        if (raw.isBlank()) return SummaryCall.Failed("梗概生成失败：模型返回空内容")
+        val enforced = enforceWordRange(raw, plan.summaryWordRange)
+        if (enforced.over) {
+            generationMessage.value = "梗概超出设定上限，已截断到最后一个完整句子"
+        } else if (enforced.under) {
+            generationMessage.value = "梗概略短于设定下限，可直接使用"
+        }
+        return SummaryCall.Ok(enforced.text)
+    }
+
+    /**
+     * 同时生成梗概模式下的梗概子调用：失败时显式三选项（重试 / 使用已有 / 取消）。
+     * 静默失败会造成「梗概为空但正文已生成」的数据不一致，因此必须暴露给用户。
+     * 返回 null 表示流程终止（取消）。
+     */
+    private suspend fun awaitSummaryWithRetry(
+        sid: Long,
+        plan: GenerationPlan,
+        onSummary: (String) -> Unit
+    ): String? {
+        val chapterId = fixedChapterId ?: return null
+        while (true) {
+            when (val r = runSummaryCall(sid, plan)) {
+                is SummaryCall.Ok -> {
+                    // 生成的梗概静默写回本章梗概（经编辑器本地缓冲，避免被下次整章保存覆盖）
+                    onSummary(r.text)
+                    return r.text
+                }
+                is SummaryCall.Failed -> {
+                    while (true) {
+                        val existing = bookRepository.getChapter(chapterId)?.summary.orEmpty()
+                        when (askSummaryFailure(hasExisting = existing.isNotBlank())) {
+                            SummaryFailureChoice.RETRY -> break
+                            SummaryFailureChoice.USE_EXISTING -> {
+                                if (existing.isNotBlank()) return existing
+                                // 本章没有可用梗概：留在弹窗继续选择
+                            }
+                            SummaryFailureChoice.CANCEL -> {
+                                if (!generationCancelled) generationMessage.value = "已取消：${r.message}"
+                                return null
+                            }
+                            null -> return null
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * 生成正文前的记忆检索参考块：以本章梗概（+ 选定标签）为 query 做向量检索，
+     * 召回后复用 [SessionPrefix.freshMemoryHits] 去重（已提交过的片段不再重复注入），
+     * 新的去重键写回会话前缀。
+     */
+    private suspend fun buildMemoryBlock(
+        sid: Long,
+        plan: GenerationPlan,
+        chapterId: Long,
+        summary: String,
+        topK: Int,
+        scope: String
+    ): String {
+        if (summary.isBlank()) return ""
+        val bookId = currentMemoryBookId() ?: return ""
+        val heads = plan.selectedOutlineIds.mapNotNull { id ->
+            _outline.value.firstOrNull { it.id == id }?.let { outlineHeadOf(it) }
+        }
+        val query = buildRetrievalQuery(summary, heads)
+        if (query.isBlank()) return ""
+        memorySearchState.value = MemorySearchState.SEARCHING
+        val hits = try {
+            container.memoryRepository.retrieveScored(
+                bookId = bookId,
+                query = query,
+                topK = topK.coerceAtLeast(1),
+                excludeChapterId = chapterId,
+                scope = scope
+            )
+        } catch (e: Throwable) {
+            emptyList()
+        }
+        memorySearchState.value = MemorySearchState.DONE
+        if (hits.isEmpty()) return ""
+        val sp = readSessionPrefix(sid).sessionPrefix
+        val fresh = sp.freshMemoryHits(hits)
+        if (fresh.isEmpty()) return ""
+        chatRepository.updateSessionPrefix(
+            sid, sp.copy(autoMemoryKeys = sp.autoMemoryKeys + fresh.map { shortHash(it) }).encode()
+        )
+        return buildString {
+            append("【参考资料·本书相关正文片段】\n")
+            fresh.forEachIndexed { i, t -> append("片段${i + 1}：").append(t).append('\n') }
+            append("（以上片段来自本书已写正文，仅供写作参考，请勿照抄或复述。）")
+        }
+    }
+
+    /** 记忆检索询问弹窗里展示的检索词摘要：以本章梗概（+ 选定标签）构造，超长截断 */
+    private suspend fun retrievalQueryDigest(chapterId: Long, outlineIds: List<Long>): String {
+        val summary = bookRepository.getChapter(chapterId)?.summary.orEmpty().trim()
+        if (summary.isBlank()) return "（本章尚无梗概，将改用你在输入框中填写的内容作为检索词）"
+        val heads = outlineIds.mapNotNull { id ->
+            _outline.value.firstOrNull { it.id == id }?.let { outlineHeadOf(it) }
+        }
+        val q = buildRetrievalQuery(summary, heads).replace('\n', ' ')
+        return if (q.length > 120) q.take(120) + "…" else q
+    }
 
     // ---------------- AI 工具 ----------------
 
@@ -846,7 +1314,8 @@ class AiChatViewModel(
                     tailBooks = emptyList(),
                     tailOutlines = emptyList(),
                     tailChapters = emptyList(),
-                    autoOutlineIds = emptyList()
+                    autoOutlineIds = emptyList(),
+                    autoMemoryKeys = emptyList()
                 )
             } else {
                 // 清空预设并标记为未初始化：下次发送会按当前新书重新冻结，原书内容不再进入请求
@@ -1017,9 +1486,19 @@ class AiChatViewModel(
         // 「＋本章梗概」与「本轮新勾选的大纲 / 上下文」都作为附加提示词随消息落库（气泡里不显示），
         // 成为历史对话的一部分（挂在消息尾端，不进最前面的参考资料预设块）。
         // 下一轮从数据库重建历史时与上一轮实际发送的内容逐字节一致 → 前缀不被改写 → 缓存命中稳定。
-        // 长期记忆检索命中片段同样挂在本轮用户消息尾端落库（进入历史对话的上下文部分最后），不写会话前缀。
+        // 长期记忆检索命中片段同样挂在本轮用户消息尾端落库（进入历史对话的上下文部分最后），
+        // 片段文本本身不写会话前缀，只把去重键记进前缀的 autoMemoryKeys。
         val prefix = prepareSessionPrefix(sid)
-        val memoryRef = memoryReferenceForText(text)
+        // 长期记忆检索：只注入本会话尚未提交过的片段（已提交过的仍在历史对话里，不会丢），
+        // 本轮新片段的去重键随即写回会话前缀，后续轮次即使再次召回同一片段也不再重复提交
+        val memory = memoryReferenceForText(text, prefix.sessionPrefix)
+        if (memory.freshKeys.isNotEmpty()) {
+            val sp = prefix.sessionPrefix
+            chatRepository.updateSessionPrefix(
+                sid, sp.copy(autoMemoryKeys = sp.autoMemoryKeys + memory.freshKeys).encode()
+            )
+        }
+        val memoryRef = memory.text
         val summaryBlock = chapterBlockSuffix()
         // 顺序：新增参考资料 → 本章梗概 → 检索片段（片段参考资料）→ 适配性筛选新增大纲资料 → 用户提示词
         val extra = listOf(prefix.newReference, summaryBlock, memoryRef, prefix.autoOutlineMaterial)
@@ -1342,24 +1821,11 @@ class AiChatViewModel(
         var autoOutlineMaterial = ""
         if (outlineOn && prefs.prefixAdaptiveFilterEnabled.first()) {
             val summary = fixedChapterId?.let { bookRepository.getChapter(it)?.summary.orEmpty() }.orEmpty()
-            if (summary.isNotBlank()) {
-                val pinned = _pinnedOutlineCategories.value
-                val matchedIds = _outline.value
-                    .filter { it.category !in pinned }
-                    .filter { item ->
-                        val head = outlineHeadOf(item)
-                        head.isNotBlank() && summary.contains(head)
-                    }
-                    .map { it.id }
-                val freshIds = matchedIds.filterNot { it in sp.autoOutlineIds }
-                if (freshIds.isNotEmpty()) {
-                    val freshEntries = freshIds.mapNotNull { renderOutlineEntry(it) }
-                    sp = sp.copy(autoOutlineIds = sp.autoOutlineIds + freshIds)
-                    val text = sp.renderEntries(emptyList(), freshEntries, emptyList())
-                    if (text.isNotBlank()) {
-                        autoOutlineMaterial = "以下是新增大纲资料，请在写作时参考：\n$text"
-                    }
-                }
+            val freshIds = adaptiveMatchedOutlineIds(summary).filterNot { it in sp.autoOutlineIds }
+            if (freshIds.isNotEmpty()) {
+                val freshEntries = freshIds.mapNotNull { renderOutlineEntry(it) }
+                sp = sp.markOutlinesInjected(freshIds)
+                autoOutlineMaterial = renderAdaptiveOutlineBlock(sp, freshEntries)
             }
         }
 
@@ -1374,7 +1840,8 @@ class AiChatViewModel(
             outlineOn = outlineOn,
             outlineEntries = if (outlineOn) sp.outlines else emptyList(),
             newReference = if (appended.isBlank()) "" else "以下是新增参考资料，请在写作时参考：\n$appended",
-            autoOutlineMaterial = autoOutlineMaterial
+            autoOutlineMaterial = autoOutlineMaterial,
+            sessionPrefix = sp
         )
     }
 
@@ -1384,7 +1851,30 @@ class AiChatViewModel(
         return fields.firstOrNull()?.second?.ifBlank { item.title } ?: item.title
     }
 
-    /** 只读取已冻结的会话前缀（重新生成 / 编辑重发等不新增用户消息的场景），不做任何写入 */
+    /**
+     * 「适配性筛选」命中判定（聊天发送与生成正文共用同一套规则）：
+     * 非常驻化分类下、「显示标签」被 [summary] 命中的大纲条目 id；梗概为空时返回空。
+     */
+    private fun adaptiveMatchedOutlineIds(summary: String): List<Long> {
+        if (summary.isBlank()) return emptyList()
+        val pinned = _pinnedOutlineCategories.value
+        return _outline.value
+            .filter { it.category !in pinned }
+            .filter { item ->
+                val head = outlineHeadOf(item)
+                head.isNotBlank() && summary.contains(head)
+            }
+            .map { it.id }
+    }
+
+    /** 把适配性命中的大纲条目渲染成「新增大纲资料」块（措辞与聊天发送路径一致） */
+    private fun renderAdaptiveOutlineBlock(sp: SessionPrefix, entries: List<PrefixEntry>): String {
+        if (entries.isEmpty()) return ""
+        val text = sp.renderEntries(emptyList(), entries, emptyList())
+        return if (text.isBlank()) "" else "以下是新增大纲资料，请在写作时参考：\n$text"
+    }
+
+    /** 只读取已冻结的会话前缀（重新生成 / 编辑重发 / 生成梗概正文等不新增用户消息的场景），不做任何写入 */
     private suspend fun readSessionPrefix(sid: Long): PreparedPrefix {
         val contextOn = prefs.prefixContextEnabled.first()
         val outlineOn = prefs.prefixOutlineEnabled.first()
@@ -1394,7 +1884,8 @@ class AiChatViewModel(
             reference = sp.renderReference(includeChapters = contextOn, includeOutlines = outlineOn),
             contextOn = contextOn,
             outlineOn = outlineOn,
-            outlineEntries = if (outlineOn) sp.outlines else emptyList()
+            outlineEntries = if (outlineOn) sp.outlines else emptyList(),
+            sessionPrefix = sp
         )
     }
 
@@ -1454,8 +1945,13 @@ class AiChatViewModel(
         /** 本轮新勾选内容渲染出的文本（挂到当轮用户消息尾端），无新增时为空 */
         val newReference: String = "",
         /** 「适配性筛选」本轮新命中的大纲资料（挂在检索片段之后、用户提示词之前），无新增时为空 */
-        val autoOutlineMaterial: String = ""
+        val autoOutlineMaterial: String = "",
+        /** 会话前缀快照：供长期记忆去重与写回使用（重新生成路径无新消息，用不到） */
+        val sessionPrefix: SessionPrefix = SessionPrefix()
     )
+
+    /** 长期记忆检索结果：本轮实际注入的参考资料文本 + 其中新片段的去重键（写回会话前缀用） */
+    private data class MemoryRef(val text: String = "", val freshKeys: List<String> = emptyList())
 
     /**
      * 「＋本章梗概」：勾选时随消息发送但不在气泡显示的附加提示词（含章节名与梗概）。
@@ -1476,20 +1972,22 @@ class AiChatViewModel(
      * 导航栏 AI 对话没有「本章」，回退用本轮提示词；被检索内容 = 本书已向量化的正文块。
      * 命中片段拼成附带提示词，随本轮用户消息一起落库（进入历史对话的上下文部分最后），
      * 从而在后续轮次里也能被模型看到；不写会话前缀，前缀字节结构不变。
-     * 未勾选 / 未绑定书 / 未配置 Embedding / 无命中时一律返回空串，不影响正常发送。
+     * 去重：本会话已提交过的片段（[SessionPrefix.autoMemoryKeys]）不再重复注入，
+     * 只有新召回的片段才进入本轮，避免同一批参考资料在多轮里反复占 token。
+     * 未勾选 / 未绑定书 / 未配置 Embedding / 无命中（或命中片段全部已提交过）时一律返回空，不影响正常发送。
      */
-    private suspend fun memoryReferenceForText(userText: String): String {
-        if (!memoryRetrievalEnabled.value) return ""
-        val bookId = currentMemoryBookId() ?: return ""
+    private suspend fun memoryReferenceForText(userText: String, sp: SessionPrefix): MemoryRef {
+        if (!memoryRetrievalEnabled.value) return MemoryRef()
+        val bookId = currentMemoryBookId() ?: return MemoryRef()
         // 编辑器侧边助手：query 一律取「本章梗概」，本章无梗概则不做检索（勾选时已提示）；
         // 导航栏 AI 对话：没有「本章」，回退用本轮提示词。
         val chapterId = fixedChapterId
         val query = if (chapterId != null) {
-            bookRepository.getChapter(chapterId)?.summary.orEmpty().also { if (it.isBlank()) return "" }
+            bookRepository.getChapter(chapterId)?.summary.orEmpty().also { if (it.isBlank()) return MemoryRef() }
         } else {
             userText
         }
-        if (query.isBlank()) return ""
+        if (query.isBlank()) return MemoryRef()
         // 检索耗时（本地工具为 CPU 推理，首次还要加载重排模型）：如实上报状态，界面显示「正在检索中」
         memorySearchState.value = MemorySearchState.SEARCHING
         val hits = try {
@@ -1509,15 +2007,19 @@ class AiChatViewModel(
             if (container.memoryRepository.vectorSourceStale(bookId)) {
                 memoryToast.value = "本书向量由其它向量化工具生成，请先重新向量化后再使用记忆检索"
             }
-            return ""
+            return MemoryRef()
         }
-        return buildString {
+        // 去重：本会话已提交过的片段不再重复注入（内容仍在历史对话里，不会丢）
+        val fresh = sp.freshMemoryHits(hits)
+        if (fresh.isEmpty()) return MemoryRef()
+        val text = buildString {
             append("【参考资料·本书相关正文片段】\n")
-            hits.forEachIndexed { i, text -> append("片段${i + 1}：").append(text).append('\n') }
+            fresh.forEachIndexed { i, t -> append("片段${i + 1}：").append(t).append('\n') }
             // 结尾再点一次：这些片段是「检索结果」，只供写文模型参考，
             // 必须由写文模型加工后回答用户，不能把片段本身当成回答输出
             append("（以上片段来自本书已写正文，仅供写作参考，请勿照抄或复述；请按用户的具体要求作答。）")
         }
+        return MemoryRef(text, fresh.map { shortHash(it) })
     }
 }
 

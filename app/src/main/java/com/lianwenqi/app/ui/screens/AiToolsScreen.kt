@@ -1,6 +1,7 @@
 package com.lianwenqi.app.ui.screens
 
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -12,6 +13,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -28,6 +30,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.RangeSlider
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -41,6 +45,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
@@ -50,8 +55,11 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lianwenqi.app.AppContainer
+import com.lianwenqi.app.ai.RetrievalMode
 import com.lianwenqi.app.data.AiChapterImporter
 import com.lianwenqi.app.data.AiOutlineImporter
+import com.lianwenqi.app.data.GEN_CONTENT_WORDS_MAX
+import com.lianwenqi.app.data.GEN_SUMMARY_WORDS_MAX
 import com.lianwenqi.app.data.SortMode
 import com.lianwenqi.app.data.entity.Book
 import com.lianwenqi.app.data.entity.BookGroup
@@ -70,6 +78,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 import kotlinx.coroutines.withContext
 
 class AiToolsViewModel(private val container: AppContainer) : ViewModel() {
@@ -95,6 +104,34 @@ class AiToolsViewModel(private val container: AppContainer) : ViewModel() {
     fun setOutlineToolEnabled(v: Boolean) = viewModelScope.launch { prefs.setAiToolOutlineEnabled(v) }
 
     fun setChapterToolEnabled(v: Boolean) = viewModelScope.launch { prefs.setAiToolChapterEnabled(v) }
+
+    // 「生成梗概 / 生成正文」配置（AI 工具页的「生成设置」子页读写）
+    val genSummaryWordRange: StateFlow<IntRange> =
+        prefs.genSummaryWordRange.stateIn(viewModelScope, SharingStarted.Eagerly, 0..GEN_SUMMARY_WORDS_MAX)
+
+    val genSummaryLimitScope: StateFlow<Boolean> =
+        prefs.genSummaryLimitScope.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    val genContentWordRange: StateFlow<IntRange> =
+        prefs.genContentWordRange.stateIn(viewModelScope, SharingStarted.Eagerly, 0..GEN_CONTENT_WORDS_MAX)
+
+    val genContentMemoryMode: StateFlow<RetrievalMode> =
+        prefs.genContentMemoryMode.stateIn(viewModelScope, SharingStarted.Eagerly, RetrievalMode.ASK)
+
+    val genContentWithSummary: StateFlow<Boolean> =
+        prefs.genContentWithSummary.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    fun setGenSummaryWordRange(min: Int, max: Int) =
+        viewModelScope.launch { prefs.setGenSummaryWordRange(min, max) }
+
+    fun setGenSummaryLimitScope(v: Boolean) = viewModelScope.launch { prefs.setGenSummaryLimitScope(v) }
+
+    fun setGenContentWordRange(min: Int, max: Int) =
+        viewModelScope.launch { prefs.setGenContentWordRange(min, max) }
+
+    fun setGenContentMemoryMode(v: RetrievalMode) = viewModelScope.launch { prefs.setGenContentMemoryMode(v) }
+
+    fun setGenContentWithSummary(v: Boolean) = viewModelScope.launch { prefs.setGenContentWithSummary(v) }
 
     /** 完整表单新建书籍，返回新书 id */
     suspend fun createBookFull(r: BookFormResult): Long = bookRepository.createBook(
@@ -152,9 +189,19 @@ fun AiToolsScreen(onBack: () -> Unit) {
     var expandedIds by remember { mutableStateOf(AI_TOOLS.map { it.id }.toSet()) }
     var showImport by remember { mutableStateOf(false) }
     var showChapterImport by remember { mutableStateOf(false) }
+    var showGenSettings by remember { mutableStateOf(false) }
 
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
+
+    // 系统返回键：停在「生成设置」子页面时，先回到 AI 工具页，而不是直接退出到设置页
+    BackHandler(enabled = showGenSettings) { showGenSettings = false }
+
+    // 「生成设置」子页面：就地替换本页内容，返回时回到本页
+    if (showGenSettings) {
+        AiGenerateSettingsScreen(vm, onBack = { showGenSettings = false })
+        return
+    }
 
     Scaffold(
         topBar = {
@@ -356,6 +403,32 @@ fun AiToolsScreen(onBack: () -> Unit) {
                     }
                 }
             }
+
+            // 生成设置：生成梗概 / 生成正文的字数、范围、记忆检索与同时生成梗概
+            Card(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable { showGenSettings = true }
+                        .padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("生成设置", fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "生成梗概 / 生成正文的字数范围、限定范围、记忆检索与同时生成梗概",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Icon(
+                        Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
         }
     }
 
@@ -373,6 +446,173 @@ fun AiToolsScreen(onBack: () -> Unit) {
         )
     }
 }
+
+/**
+ * 生成设置：生成梗概 / 生成正文的字数范围、限定范围、记忆检索与同时生成梗概。
+ *
+ * 说明：请求的 max_tokens 由模型自身配置决定，这里的字数只写进提示词做硬约束；
+ * 超出上限时应用侧会截断到最后一个完整句子并提示，低于下限只提示、不自动重试（避免额外 token）。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun AiGenerateSettingsScreen(vm: AiToolsViewModel, onBack: () -> Unit) {
+    val summaryRange by vm.genSummaryWordRange.collectAsState()
+    val limitScope by vm.genSummaryLimitScope.collectAsState()
+    val contentRange by vm.genContentWordRange.collectAsState()
+    val memoryMode by vm.genContentMemoryMode.collectAsState()
+    val withSummary by vm.genContentWithSummary.collectAsState()
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("生成设置") },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                    }
+                }
+            )
+        }
+    ) { padding ->
+        Column(
+            Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp)
+        ) {
+            Text("生成梗概", style = MaterialTheme.typography.titleSmall)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "限定字数（0–$GEN_SUMMARY_WORDS_MAX）：生成的梗概要落在这个区间内；下限拉到 0 表示不约束下限。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(8.dp))
+            WordRangeSlider(
+                range = summaryRange,
+                cap = GEN_SUMMARY_WORDS_MAX,
+                onChange = { min, max -> vm.setGenSummaryWordRange(min, max) }
+            )
+
+            Spacer(Modifier.height(8.dp))
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("限定梗概范围")
+                    Text(
+                        "开启后点「生成梗概」会先让你按大纲条目多选，只按选中的设定生成；" +
+                            "已在本会话上下文中的标签只写「参见大纲」，不重复提交内容",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(checked = limitScope, onCheckedChange = { vm.setGenSummaryLimitScope(it) })
+            }
+
+            Spacer(Modifier.height(16.dp))
+            HorizontalDivider()
+            Spacer(Modifier.height(16.dp))
+
+            Text("生成正文", style = MaterialTheme.typography.titleSmall)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "限定字数（0–$GEN_CONTENT_WORDS_MAX）：生成的正文要落在这个区间内；下限拉到 0 表示不约束下限。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(8.dp))
+            WordRangeSlider(
+                range = contentRange,
+                cap = GEN_CONTENT_WORDS_MAX,
+                onChange = { min, max -> vm.setGenContentWordRange(min, max) }
+            )
+
+            Spacer(Modifier.height(16.dp))
+            Text("记忆检索", style = MaterialTheme.typography.titleSmall)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "生成正文前是否按本章梗概检索本书已写正文，命中片段作为参考资料一并生成（检索段数沿用长期记忆里的区块设置）。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(8.dp))
+            genMemoryOptions.forEach { option ->
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable { vm.setGenContentMemoryMode(option.value) }
+                        .padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    RadioButton(
+                        selected = memoryMode == option.value,
+                        onClick = { vm.setGenContentMemoryMode(option.value) }
+                    )
+                    Column(Modifier.weight(1f)) {
+                        Text(option.label)
+                        Text(
+                            option.hint,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(16.dp))
+            HorizontalDivider()
+            Spacer(Modifier.height(16.dp))
+
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("生成正文的同时生成梗概")
+                    Text(
+                        "开启后点「生成正文」会先按生成梗概的配置生成梗概并静默写入本章梗概，再据此生成正文；" +
+                            "关闭时若本章没有梗概会提示先填写",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(checked = withSummary, onCheckedChange = { vm.setGenContentWithSummary(it) })
+            }
+        }
+    }
+}
+
+/** 字数区间滑条：0 到 [cap] 的连续双滑块，右侧实时显示所选区间 */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun WordRangeSlider(range: IntRange, cap: Int, onChange: (Int, Int) -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        RangeSlider(
+            value = range.first.toFloat()..range.last.toFloat(),
+            onValueChange = { onChange(it.start.roundToInt(), it.endInclusive.roundToInt()) },
+            valueRange = 0f..cap.toFloat(),
+            modifier = Modifier.weight(1f)
+        )
+        Spacer(Modifier.width(12.dp))
+        Text("${range.first}–${range.last} 字", style = MaterialTheme.typography.titleSmall)
+    }
+}
+
+private data class GenMemoryOption(val value: RetrievalMode, val label: String, val hint: String)
+
+private val genMemoryOptions = listOf(
+    GenMemoryOption(RetrievalMode.ON, "开启", "每次生成正文前自动按本章梗概检索本书正文片段并注入参考资料"),
+    GenMemoryOption(RetrievalMode.OFF, "关闭", "不检索，只用本章梗概与本会话前缀生成"),
+    GenMemoryOption(RetrievalMode.ASK, "询问", "每次生成正文前弹窗询问是否启用（默认）")
+)
 
 /** 导入大纲弹窗：选书（可现场新建）+ 粘贴文本 + 解析导入 */
 @Composable

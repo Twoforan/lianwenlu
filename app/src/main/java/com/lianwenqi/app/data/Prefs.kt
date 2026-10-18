@@ -11,6 +11,10 @@ import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.lianwenqi.app.ai.RETRIEVAL_ASK
+import com.lianwenqi.app.ai.RetrievalMode
+import com.lianwenqi.app.ai.retrievalModeOf
+import com.lianwenqi.app.ai.storage
 import com.lianwenqi.app.data.entity.ContextSnapshot
 import com.lianwenqi.app.data.entity.decodeContextSnapshot
 import com.lianwenqi.app.util.FormatSettings
@@ -47,6 +51,10 @@ object MemorySearchScope {
 /** 记忆检索区块数（注入参考资料的段数）的取值下限与上限 */
 const val MEMORY_BLOCK_QUOTA_MIN = 5
 const val MEMORY_BLOCK_QUOTA_MAX = 20
+
+/** 生成梗概 / 生成正文 字数滑条的合法上限（下限 0 表示不约束） */
+const val GEN_SUMMARY_WORDS_MAX = 500
+const val GEN_CONTENT_WORDS_MAX = 6000
 
 /** 全局偏好设置：夜间模式、排序、排版、样式等 */
 class Prefs(private val context: Context) {
@@ -104,8 +112,17 @@ class Prefs(private val context: Context) {
         // 前缀词管理：自定义前缀（纯文本）
         val prefixCustomText = stringPreferencesKey("prefix_custom_text")
 
-        // 前缀词管理：适配性筛选（默认关闭）
+        // 「适配性筛选」：开启后首轮只全选「常驻化」分类下的大纲，非常驻大纲按本章梗概动态匹配注入（默认关闭）
         val prefixAdaptiveFilter = booleanPreferencesKey("prefix_adaptive_filter_enabled")
+
+        // 生成工具：生成梗概 / 生成正文的配置
+        val genSummaryMinWords = intPreferencesKey("gen_summary_min_words")
+        val genSummaryMaxWords = intPreferencesKey("gen_summary_max_words")
+        val genSummaryLimitScope = booleanPreferencesKey("gen_summary_limit_scope")
+        val genContentMinWords = intPreferencesKey("gen_content_min_words")
+        val genContentMaxWords = intPreferencesKey("gen_content_max_words")
+        val genContentMemoryMode = stringPreferencesKey("gen_content_memory_mode")
+        val genContentWithSummary = booleanPreferencesKey("gen_content_with_summary")
 
         // 长期记忆（书本向量化）：向量化工具（互斥）、默认开启、自动续跑、默认勾选检索
         val memoryToolMode = stringPreferencesKey("memory_tool_mode")
@@ -182,6 +199,28 @@ class Prefs(private val context: Context) {
     /** 「适配性筛选」：开启后首轮只全选「常驻化」分类下的大纲，非常驻大纲按本章梗概动态匹配注入（默认关闭） */
     val prefixAdaptiveFilterEnabled: Flow<Boolean> =
         context.dataStore.data.map { it[K.prefixAdaptiveFilter] ?: false }
+
+    /** 「生成梗概」的字数区间（0..500，下限 0 表示不约束） */
+    val genSummaryWordRange: Flow<IntRange> = context.dataStore.data.map {
+        wordsRange(it[K.genSummaryMinWords] ?: 0, it[K.genSummaryMaxWords] ?: GEN_SUMMARY_WORDS_MAX, GEN_SUMMARY_WORDS_MAX)
+    }
+
+    /** 「生成梗概」是否限定梗概范围（开启后点击需先选择大纲标签，默认关闭） */
+    val genSummaryLimitScope: Flow<Boolean> =
+        context.dataStore.data.map { it[K.genSummaryLimitScope] ?: false }
+
+    /** 「生成正文」的字数区间（0..6000，下限 0 表示不约束） */
+    val genContentWordRange: Flow<IntRange> = context.dataStore.data.map {
+        wordsRange(it[K.genContentMinWords] ?: 0, it[K.genContentMaxWords] ?: GEN_CONTENT_WORDS_MAX, GEN_CONTENT_WORDS_MAX)
+    }
+
+    /** 「生成正文」的记忆检索三态（开 / 关 / 询问，默认询问） */
+    val genContentMemoryMode: Flow<RetrievalMode> =
+        context.dataStore.data.map { retrievalModeOf(it[K.genContentMemoryMode] ?: RETRIEVAL_ASK) }
+
+    /** 「生成正文」是否同时生成梗概（生成后静默写入本章梗概，默认关闭） */
+    val genContentWithSummary: Flow<Boolean> =
+        context.dataStore.data.map { it[K.genContentWithSummary] ?: false }
 
     /** 向量化工具（互斥）：api = 厂商 Embedding API；local = 本地 GGUF 工具；off = 关闭 */
     val memoryToolMode: Flow<String> =
@@ -309,6 +348,19 @@ class Prefs(private val context: Context) {
     suspend fun setPrefixOutlineEnabled(v: Boolean) = writePrefs { it[K.prefixOutlineEnabled] = v }
     suspend fun setPrefixCustomText(v: String) = writePrefs { it[K.prefixCustomText] = v }
     suspend fun setPrefixAdaptiveFilterEnabled(v: Boolean) = writePrefs { it[K.prefixAdaptiveFilter] = v }
+    suspend fun setGenSummaryWordRange(min: Int, max: Int) = writePrefs {
+        val r = wordsRange(min, max, GEN_SUMMARY_WORDS_MAX)
+        it[K.genSummaryMinWords] = r.first
+        it[K.genSummaryMaxWords] = r.last
+    }
+    suspend fun setGenSummaryLimitScope(v: Boolean) = writePrefs { it[K.genSummaryLimitScope] = v }
+    suspend fun setGenContentWordRange(min: Int, max: Int) = writePrefs {
+        val r = wordsRange(min, max, GEN_CONTENT_WORDS_MAX)
+        it[K.genContentMinWords] = r.first
+        it[K.genContentMaxWords] = r.last
+    }
+    suspend fun setGenContentMemoryMode(v: RetrievalMode) = writePrefs { it[K.genContentMemoryMode] = v.storage }
+    suspend fun setGenContentWithSummary(v: Boolean) = writePrefs { it[K.genContentWithSummary] = v }
     suspend fun setMemoryToolMode(v: String) = writePrefs { it[K.memoryToolMode] = v }
     suspend fun setMemoryEmbeddingBaseUrl(v: String) = writePrefs { it[K.memoryEmbeddingBaseUrl] = v }
     suspend fun setMemoryEmbeddingApiKey(v: String) = writePrefs { it[K.memoryEmbeddingApiKey] = v }
@@ -495,6 +547,13 @@ class Prefs(private val context: Context) {
                 (value as? String)?.let { prefs[outlineFieldsKey(toBookId, category)] = it }
             }
         }
+    }
+
+    /** 字数区间规整：夹取到 [0, cap] 并保证下限不大于上限 */
+    private fun wordsRange(min: Int, max: Int, cap: Int): IntRange {
+        val a = min.coerceIn(0, cap)
+        val b = max.coerceIn(0, cap)
+        return if (a <= b) a..b else b..a
     }
 
     private suspend fun <T> Flow<T>.firstValue(): T = first()
