@@ -96,6 +96,33 @@ class BookRepository(private val db: AppDatabase) {
         bookDao.deleteById(bookId)
     }
 
+    /**
+     * 「复制本书」：新建一本空白书（只有默认首卷首章），把原书的大纲条目完整复制过去
+     * （分类标签、字段、排序位置一并保留）。新书标题自动加序号，从（1）开始取第一个未被占用的。
+     * 返回新书 id（原书不存在时返回 0）。
+     */
+    suspend fun copyBookOutline(sourceBookId: Long): Long = db.withTransaction {
+        val src = bookDao.getById(sourceBookId) ?: return@withTransaction 0L
+        // 去掉原标题末尾已有的（n）作为基准名，避免复制副本时叠加成「书名（1）（1）」
+        val base = src.title.replace(Regex("（\\d+）$"), "")
+        val existing = bookDao.getAll().map { it.title }.toSet()
+        var index = 1
+        while ("$base（$index）" in existing) index++
+        val newId = createBook(
+            title = "$base（$index）",
+            intro = src.intro,
+            coverPath = src.coverPath,
+            coverColor = src.coverColor,
+            volumePrefix = src.volumePrefix,
+            chapterPrefix = src.chapterPrefix,
+            groupId = src.groupId
+        )
+        outlineDao.getByBook(sourceBookId).forEach { item ->
+            outlineDao.insert(item.copy(id = 0, bookId = newId))
+        }
+        newId
+    }
+
     /** 更新书籍信息（编辑：封面 / 书名 / 简介 / 分组 / 前缀等） */
     suspend fun updateBook(book: Book) =
         bookDao.update(book.copy(updatedAt = System.currentTimeMillis()))

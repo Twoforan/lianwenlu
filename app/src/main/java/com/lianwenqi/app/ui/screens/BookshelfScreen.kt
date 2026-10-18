@@ -30,6 +30,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.DriveFileMove
@@ -513,11 +514,19 @@ fun BookshelfScreen(
                             ExportUtil.shareFile(context, f, "text/plain", "分享书籍")
                         }
                     },
-                    SheetActionItem(
-                        Icons.Filled.VerticalAlignTop,
-                        if (item.book.pinned) "取消置顶" else "置顶本书"
-                    ) {
+                    SheetActionItem(Icons.Filled.VerticalAlignTop, if (item.book.pinned) "取消置顶" else "置顶本书") {
                         vm.togglePin(item.book); sheetBook = null
+                    },
+                    SheetActionItem(Icons.Filled.ContentCopy, "复制本书") {
+                        val srcTitle = item.book.title
+                        sheetBook = null
+                        vm.copyBookOutline(item.book.id) { title ->
+                            Toast.makeText(
+                                context,
+                                if (title != null) "已复制《$srcTitle》的大纲到《$title》" else "复制失败",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
                     },
                     SheetActionItem(Icons.Filled.DeleteOutline, "删除本书", danger = true) {
                         deleteTarget = item.book

@@ -2359,14 +2359,14 @@ private fun LogTextNode(title: String, text: String) {
 }
 
 /**
- * 「查看日志」弹窗：按「预设日志（命中缓存）→ 上下文日志（命中缓存）→ 本轮提示词日志（新增缓存）」
+ * 「查看日志」弹窗（标题「提交日志」）：按「预设日志 → 上下文日志 → 本轮提示词日志」
  * 三层回显本轮发送时的提示词，所有节点默认收起、逐层展开。
  */
 @Composable
 private fun PromptLogDialog(log: PromptLog?, onClose: () -> Unit) {
     AlertDialog(
         onDismissRequest = onClose,
-        title = { Text("提示词日志") },
+        title = { Text("提交日志") },
         text = {
             if (log == null) {
                 Text("本轮没有记录提示词日志（旧消息或未发送成功）")
@@ -2377,8 +2377,8 @@ private fun PromptLogDialog(log: PromptLog?, onClose: () -> Unit) {
                         .heightIn(max = 440.dp)
                         .verticalScroll(rememberScrollState())
                 ) {
-                    // 一、预设日志：会话建立时冻结、每轮复用（命中缓存）
-                    LogSectionTitle("预设日志（命中缓存部分）")
+                    // 一、预设日志：会话建立时冻结、每轮复用
+                    LogSectionTitle("预设日志")
                     LogTextNode("预设提示词", log.systemPrompt)
                     LogTextNode("自定义前缀", log.customPrefix)
                     LogNode("大纲内容") {
@@ -2395,8 +2395,8 @@ private fun PromptLogDialog(log: PromptLog?, onClose: () -> Unit) {
                         }
                     }
 
-                    // 二、上下文日志：历史上已发送过的轮次（命中缓存）
-                    LogSectionTitle("上下文日志（命中缓存部分）")
+                    // 二、上下文日志：历史上已发送过的轮次
+                    LogSectionTitle("上下文日志")
                     if (log.rounds.isEmpty()) {
                         Text(
                             "（无历史轮次）",
@@ -2420,8 +2420,8 @@ private fun PromptLogDialog(log: PromptLog?, onClose: () -> Unit) {
                         }
                     }
 
-                    // 三、本轮提示词日志：本轮新拼入、尚未进缓存的部分
-                    LogSectionTitle("本轮提示词日志（未命中缓存部分）")
+                    // 三、本轮提示词日志：本轮新拼入的部分
+                    LogSectionTitle("本轮提示词日志")
                     LogTextNode("本章梗概", log.summary)
                     if (log.memory.isNotBlank()) LogTextNode("记忆检索参考资料", log.memory)
                     if (log.autoOutline.isNotBlank()) LogTextNode("新增大纲参考资料", log.autoOutline)

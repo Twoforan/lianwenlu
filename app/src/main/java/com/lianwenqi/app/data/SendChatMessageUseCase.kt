@@ -32,7 +32,7 @@ data class PromptLogRound(val user: String = "", val assistant: String = "")
 
 /**
  * 一次发送时的「提示词日志」快照，供「查看日志 / 查看本轮提示词」弹窗回显。
- * 按「预设日志（命中缓存部分）→ 上下文日志（命中缓存部分）→ 本轮提示词日志（未命中缓存部分）」组织。
+ * 按「预设日志 → 上下文日志 → 本轮提示词日志」组织。
  */
 @Serializable
 data class PromptLog(
@@ -203,7 +203,12 @@ class SendChatMessageUseCase(
             .joinToString("\n")
         // 只取该用户消息之前的上下文，避免把同组的其他回答版本带进历史。
         // 0 表示不限：携带全部历史，长对话下前缀更稳定、缓存命中率更高
-        val maxContext = configRepository.getModel(request.modelId)?.maxContext ?: 20
+        val model = configRepository.getModel(request.modelId)
+        val maxContext = model?.maxContext ?: 20
+        // 实际生效的系统提示词：模型配置里的「预设提示词」优先（真正随请求发出），
+        // 仅当模型未配置预设时才回退到请求里带的自定义系统提示词。
+        // 日志必须记录这个「实际值」，否则「预设提示词」一栏会永远为空。
+        val effectiveSystemPrompt = model?.systemPrompt?.takeIf { it.isNotBlank() } ?: request.systemPrompt
         val history = allMessages
             .filter { it.id <= request.historyEndId }
             .filter { it.role == ChatRole.USER || it.role == ChatRole.ASSISTANT }
@@ -265,7 +270,7 @@ class SendChatMessageUseCase(
                 completionTokens = result.completionTokens,
                 cachedTokens = result.cachedTokens,
                 chapterId = request.chapterId,
-                promptLog = buildPromptLog(request, turns, history, allMessages).encode()
+                promptLog = buildPromptLog(request, turns, history, allMessages, effectiveSystemPrompt).encode()
             )
             // AI 工具：回答里带可导入标记块时，按勾选的工具挨个上报，由 UI 逐个询问是否导入。
             // 若标记存在却无法解析（畸形 JSON），上报 Error，让用户知道工具没生效。
@@ -293,14 +298,15 @@ class SendChatMessageUseCase(
     }.buffer(Channel.UNLIMITED)
 
     /**
-     * 组装本轮「提示词日志」快照：预设 / 上下文（命中缓存部分）与本轮新增（未命中缓存部分），
+     * 组装本轮「提交日志」快照：预设 / 上下文 / 本轮新增三部分，
      * 供聊天页「查看日志 / 查看本轮提示词」弹窗回显。
      */
     private fun buildPromptLog(
         request: SendChatRequest,
         turns: List<ChatTurn>,
         history: List<ChatTurn>,
-        allMessages: List<ChatMessage>
+        allMessages: List<ChatMessage>,
+        systemPrompt: String
     ): PromptLog {
         // 历史轮次：一条用户发言 + 紧随其后的助手回答算作一轮
         val rounds = mutableListOf<PromptLogRound>()
@@ -322,7 +328,7 @@ class SendChatMessageUseCase(
         }
         pendingUser?.let { rounds += PromptLogRound(it, "") }
         return PromptLog(
-            systemPrompt = request.systemPrompt,
+            systemPrompt = systemPrompt,
             customPrefix = request.prefixText,
             outlines = request.logContext.outlines,
             rounds = rounds,

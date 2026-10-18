@@ -100,6 +100,12 @@ class BookshelfViewModel(private val container: AppContainer) : ViewModel() {
     /** 批量删除所选书籍 */
     fun deleteBooks(ids: Set<Long>) = viewModelScope.launch { ids.forEach { bookRepository.deleteBook(it) } }
 
+    /** 复制本书：新建空白书并完整复制原书大纲，回调返回新书标题（失败为 null） */
+    fun copyBookOutline(bookId: Long, onCopied: (String?) -> Unit) = viewModelScope.launch {
+        val newId = bookRepository.copyBookOutline(bookId)
+        onCopied(if (newId > 0) bookRepository.getBook(newId)?.title else null)
+    }
+
     fun moveToGroup(bookId: Long, groupId: Long?) = viewModelScope.launch {
         bookRepository.moveToGroup(bookId, groupId)
     }
