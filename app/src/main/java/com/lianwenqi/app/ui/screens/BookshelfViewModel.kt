@@ -100,9 +100,14 @@ class BookshelfViewModel(private val container: AppContainer) : ViewModel() {
     /** 批量删除所选书籍 */
     fun deleteBooks(ids: Set<Long>) = viewModelScope.launch { ids.forEach { bookRepository.deleteBook(it) } }
 
-    /** 复制本书：新建空白书并完整复制原书大纲，回调返回新书标题（失败为 null） */
+    /**
+     * 复制本书：新建空白书并完整复制原书大纲。
+     * 大纲在大库里是数据行，此外「常驻化分类 / 自定义分类 / 字段模板」按书籍 id 存在 DataStore，
+     * 必须一并迁移到新书，否则新书里已常驻化的分类会丢失。回调返回新书标题（失败为 null）。
+     */
     fun copyBookOutline(bookId: Long, onCopied: (String?) -> Unit) = viewModelScope.launch {
         val newId = bookRepository.copyBookOutline(bookId)
+        if (newId > 0) prefs.copyOutlinePrefs(bookId, newId)
         onCopied(if (newId > 0) bookRepository.getBook(newId)?.title else null)
     }
 

@@ -471,5 +471,31 @@ class Prefs(private val context: Context) {
     private fun pinnedOutlineCategoriesKey(bookId: Long) =
         stringPreferencesKey("outline_pinned_cats_$bookId")
 
+    // ---------------- 复制书籍：迁移大纲相关偏好 ----------------
+
+    /**
+     * 「复制本书」时把原书的大纲相关偏好一并迁移到新书：分类标签列表、每个分类的字段模板，
+     * 以及「常驻化」的分类集合。
+     *
+     * 这些数据按书籍 id 存在 DataStore 里，不随数据库的 outline_item 行一起复制；若不迁移，
+     * 新书会丢失「已常驻化的分类」（本应常驻的大纲在首轮上下文里消失），自定义分类与字段表也会丢失。
+     */
+    suspend fun copyOutlinePrefs(fromBookId: Long, toBookId: Long) {
+        val all = context.dataStore.data.first()
+        val categories = all[outlineCategoriesKey(fromBookId)]
+        val pinned = all[pinnedOutlineCategoriesKey(fromBookId)]
+        val fieldsPrefix = "outline_fields_${fromBookId}_"
+        val fields = all.asMap().entries
+            .filter { it.key.name.startsWith(fieldsPrefix) }
+            .associate { it.key.name.removePrefix(fieldsPrefix) to it.value }
+        writePrefs { prefs ->
+            categories?.let { prefs[outlineCategoriesKey(toBookId)] = it }
+            pinned?.let { prefs[pinnedOutlineCategoriesKey(toBookId)] = it }
+            fields.forEach { (category, value) ->
+                (value as? String)?.let { prefs[outlineFieldsKey(toBookId, category)] = it }
+            }
+        }
+    }
+
     private suspend fun <T> Flow<T>.firstValue(): T = first()
 }
