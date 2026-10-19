@@ -13,6 +13,7 @@ import com.lianwenqi.app.ai.GenerationPlan
 import com.lianwenqi.app.ai.RetrievalMode
 import com.lianwenqi.app.ai.SUMMARY_FALLBACK_INPUT
 import com.lianwenqi.app.ai.CONTENT_FALLBACK_INPUT
+import com.lianwenqi.app.ai.PRIOR_CONTEXT_HEADER
 import com.lianwenqi.app.ai.SummaryFailureChoice
 import com.lianwenqi.app.ai.buildContentTurns
 import com.lianwenqi.app.ai.buildGenerationPrefixTurns
@@ -373,6 +374,7 @@ class AiChatViewModel(
             noticeThenCancel("请在章节编辑页使用「生成梗概」")
             return@launchGeneration
         }
+        val chapterTitle = bookRepository.getChapter(chapterId)?.title.orEmpty()
         val plan = GenerationPlan(
             mode = GenerationMode.SUMMARY_ONLY,
             summaryWordRange = prefs.genSummaryWordRange.first(),
@@ -408,11 +410,11 @@ class AiChatViewModel(
         )
         // 选定标签的内容已随本轮消息落库，此时记入前缀去重（后续轮次只写「参见大纲『X』」）
         markGenerationOutlines(sid, ref.sessionPrefix, ref.freshOutlineIds)
-        // 生成请求：聊天同构前缀块 +（开关开启时）本会话历史 + 生成专用块（指令 + 新增参考资料 + 用户输入）
+        // 生成请求：聊天同构前缀块 +（开关开启时）「前情提要」参考资料块 + 生成专用块（指令 + 新增参考资料 + 用户输入）
         val history =
             if (prefs.genCarryHistory.first()) generationHistory(sid, userId, modelId) else GenerationHistory()
         val turns = assembleGenerationTurns(
-            prefix, ref, history, buildSummaryTurns(userPrompt, plan.summaryWordRange, ref.extra)
+            prefix, ref, history, buildSummaryTurns(userPrompt, plan.summaryWordRange, ref.extra, chapterTitle)
         )
         when (val r = runSummaryCall(plan, turns)) {
             is SummaryCall.Ok -> {
@@ -454,6 +456,7 @@ class AiChatViewModel(
             noticeThenCancel("请在章节编辑页使用「生成正文」")
             return@launchGeneration
         }
+        val chapterTitle = bookRepository.getChapter(chapterId)?.title.orEmpty()
         val withSummary = prefs.genContentWithSummary.first()
         val limitScope = prefs.genSummaryLimitScope.first()
         val mode = if (withSummary) {
@@ -518,7 +521,7 @@ class AiChatViewModel(
             awaitSummaryWithRetry(
                 plan,
                 assembleGenerationTurns(
-                    prefix, ref, history, buildSummaryTurns(input.value, plan.summaryWordRange, ref.extra)
+                    prefix, ref, history, buildSummaryTurns(input.value, plan.summaryWordRange, ref.extra, chapterTitle)
                 ),
                 onSummary
             )
@@ -564,7 +567,8 @@ class AiChatViewModel(
                 outlineSlot = listOf(ref.extra, adaptive).filter { it.isNotBlank() }.joinToString("\n\n"),
                 memoryBlock = memoryRef.text,
                 userInput = input.value,
-                range = plan.contentWordRange
+                range = plan.contentWordRange,
+                chapterTitle = chapterTitle
             )
         )
         val result = configRepository.sendToModel(
@@ -910,9 +914,10 @@ class AiChatViewModel(
     }
 
     /**
-     * 生成请求可携带的「本会话历史对话」块：与聊天发送的历史同构
-     * （只保留生效版本、按 maxContext 截断、把附加提示词拼回用户轮次），
-     * 但只取 [beforeId] 之前的轮次 —— 本轮生成自己的用户消息不作为它自己的历史。
+     * 生成请求可携带的「前情提要」块：取 [beforeId] 之前的本会话轮次
+     * （只保留生效版本、按 maxContext 截断），渲染成「用户：… / 助手：…」的扁平文本，
+     * 由 [assembleGenerationTurns] 作为 System 参考资料块发出 —— 不作为对话轮次，
+     * 避免模型把上一章的成品当成自己「正在续写的回答」而反复复用。
      * [rounds] 供「提交日志」的上下文日志回显，与实际发送内容一致。
      */
     private suspend fun generationHistory(sid: Long, beforeId: Long, modelId: Long): GenerationHistory {
@@ -923,9 +928,9 @@ class AiChatViewModel(
             // 同一轮只保留「当前生效」的那条回答（多次重新生成的废弃候选不进上下文）
             .filter { it.role == ChatRole.USER || it.active }
             .let { if (maxContext > 0) it.takeLast(maxContext) else it }
-        val turns = raw.map {
-            val extra = it.promptExtra
-            ChatTurn(it.role, if (extra.isBlank()) it.content else extra + "\n\n" + it.content)
+        // 前情提要只取可见的对话内容（隐藏的附加参考资料块不进前情提要，避免与上方参考资料重复）
+        val prior = raw.joinToString("\n") { m ->
+            (if (m.role == ChatRole.USER) "用户：" else "助手：") + m.content.trim()
         }
         val rounds = mutableListOf<PromptLogRound>()
         raw.forEach { m ->
@@ -937,12 +942,13 @@ class AiChatViewModel(
                 rounds[rounds.lastIndex] = rounds.last().copy(assistant = m.content)
             }
         }
-        return GenerationHistory(turns, rounds)
+        return GenerationHistory(prior, rounds)
     }
 
     /**
-     * 组装生成请求的 messages：聊天同构前缀块 +（开关开启时）本会话历史 + 生成专用块 [tail]。
+     * 组装生成请求的 messages：聊天同构前缀块 +（开关开启时）「前情提要」参考资料块 + 生成专用块 [tail]。
      * 前缀块与聊天请求逐字节一致，故两条路径能命中同一段供应商侧前缀缓存；
+     * 前情提要只作参考资料发出（不是对话轮次），故模型不会把上一章的成品当成正在续写的回答；
      * 生成专用块只在前缀之后追加，不会破坏前缀的字节稳定性。
      */
     private fun assembleGenerationTurns(
@@ -960,7 +966,7 @@ class AiChatViewModel(
                 reference = ref.sharedReference
             )
         )
-        addAll(history.turns)
+        if (history.prior.isNotBlank()) add(ChatTurn(ChatRole.SYSTEM, PRIOR_CONTEXT_HEADER + history.prior))
         addAll(tail)
     }
 
@@ -2220,9 +2226,12 @@ class AiChatViewModel(
         val freshOutlineIds: List<Long> = emptyList()
     )
 
-    /** 生成请求携带的历史对话块：实际发送的轮次 + 「提交日志」的上下文轮次回显 */
+    /**
+     * 生成请求携带的历史对话：以「前情提要」参考资料文本发出（不再作为对话轮次），
+     * [rounds] 仍供「提交日志」的上下文日志回显。
+     */
     private data class GenerationHistory(
-        val turns: List<ChatTurn> = emptyList(),
+        val prior: String = "",
         val rounds: List<PromptLogRound> = emptyList()
     )
 

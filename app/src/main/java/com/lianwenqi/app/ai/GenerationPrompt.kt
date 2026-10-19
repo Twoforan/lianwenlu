@@ -23,6 +23,19 @@ const val CONTENT_FALLBACK_INPUT = "请开始撰写本章正文。"
 const val REFERENCE_BLOCK_HEADER = "以下是参考资料，请在写作时参考：\n"
 
 /**
+ * 「前情提要」块抬头：生成请求携带的本会话历史不再作为「对话轮次」发出，
+ * 而是渲染成这一段参考资料，避免模型把它当成自己「正在续写的回答」而反复复用上一轮成品。
+ */
+const val PRIOR_CONTEXT_HEADER = "【前情提要】\n以下为历史对话，请作为本章的前情提要参考：\n"
+
+/**
+ * 生成任务的开头：有章名时点明「现在撰写的是『第2章』」，无章名时退回「为当前章节」。
+ */
+private fun taskHead(chapterTitle: String, action: String): String =
+    if (chapterTitle.isBlank()) "你的任务：$action。\n"
+    else "你的任务：现在撰写的是「${chapterTitle.trim()}」，请$action。\n"
+
+/**
  * 生成请求与聊天请求共用的前段块：自定义前缀 → 工具块（勾选时）→ 「以下是参考资料」。
  * 顺序与 [com.lianwenqi.app.data.SendChatMessageUseCase] 组装聊天请求时完全一致，
  * 用来让两边命中同一段供应商侧前缀缓存；生成专用块（[buildSummaryTurns] / [buildContentTurns]）
@@ -61,12 +74,13 @@ private fun hasLowerBound(range: IntRange?): Boolean =
 fun buildSummaryTurns(
     input: String,
     range: IntRange?,
-    referenceBlock: String = ""
+    referenceBlock: String = "",
+    chapterTitle: String = ""
 ): List<ChatTurn> {
     val max = upperBound(range)
     val lower = if (hasLowerBound(range)) range!!.first else null
     val instruction = buildString {
-        append("你的任务：为当前章节生成梗概。\n")
+        append(taskHead(chapterTitle, "为本章生成梗概"))
         when {
             max == null -> Unit
             lower == null -> append("字数硬约束：最终输出不要超过 ").append(max).append(" 字（含标点）。\n")
@@ -96,6 +110,7 @@ fun buildSummaryTurns(
 /**
  * 生成正文的 messages，块顺序固定为：
  * 系统写作指令 → 本章梗概槽位 → 大纲 / 人物设定槽位 → 记忆检索参考资料块（仅启用时）→ 用户即时输入。
+ * （调用方可在本块之前插入「前情提要」参考资料块，见 [PRIOR_CONTEXT_HEADER]。）
  *
  * 参考资料各块独立成段、顺序稳定：同一章重新生成正文时只有最后一句用户输入会变，
  * 前面部分逐字节一致，供应商侧前缀缓存可持续命中。
@@ -106,12 +121,13 @@ fun buildContentTurns(
     outlineSlot: String,
     memoryBlock: String,
     userInput: String,
-    range: IntRange?
+    range: IntRange?,
+    chapterTitle: String = ""
 ): List<ChatTurn> {
     val max = upperBound(range)
     val lower = if (hasLowerBound(range)) range!!.first else null
     val instruction = buildString {
-        append("你的任务：为当前章节撰写正文。\n")
+        append(taskHead(chapterTitle, "依据下方「本章梗概」撰写本章正文"))
         when {
             max == null -> Unit
             lower == null -> append("字数硬约束：最终正文不要超过 ").append(max).append(" 字（含标点）。\n")

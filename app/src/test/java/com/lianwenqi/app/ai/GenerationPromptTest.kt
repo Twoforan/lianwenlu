@@ -65,6 +65,19 @@ class GenerationPromptTest {
     }
 
     @Test
+    fun buildContentTurns_pointsOutChapterTitle() {
+        val turns = buildContentTurns("梗概", "大纲", "", "写", null, chapterTitle = "第2章")
+        assertTrue(turns[0].content.contains("现在撰写的是「第2章」"))
+        assertTrue(turns[0].content.contains("依据下方「本章梗概」"))
+    }
+
+    @Test
+    fun buildSummaryTurns_pointsOutChapterTitle() {
+        val turns = buildSummaryTurns("梗概", null, "", chapterTitle = "第2章")
+        assertTrue(turns[0].content.contains("现在撰写的是「第2章」"))
+    }
+
+    @Test
     fun buildGenerationPrefixTurns_mirrorsChatBlockOrderAndHeader() {
         val turns = buildGenerationPrefixTurns(
             customPrefix = "前缀文本",
