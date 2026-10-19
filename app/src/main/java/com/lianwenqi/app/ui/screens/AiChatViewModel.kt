@@ -4,14 +4,18 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lianwenqi.app.AppContainer
 import com.lianwenqi.app.ai.AiRequest
+import com.lianwenqi.app.ai.ChatTurn
 import com.lianwenqi.app.ai.FlowState
 import com.lianwenqi.app.ai.GenerationDialog
 import com.lianwenqi.app.ai.GenerationDialogKind
 import com.lianwenqi.app.ai.GenerationMode
 import com.lianwenqi.app.ai.GenerationPlan
 import com.lianwenqi.app.ai.RetrievalMode
+import com.lianwenqi.app.ai.SUMMARY_FALLBACK_INPUT
+import com.lianwenqi.app.ai.CONTENT_FALLBACK_INPUT
 import com.lianwenqi.app.ai.SummaryFailureChoice
 import com.lianwenqi.app.ai.buildContentTurns
+import com.lianwenqi.app.ai.buildGenerationPrefixTurns
 import com.lianwenqi.app.ai.buildRetrievalQuery
 import com.lianwenqi.app.ai.buildSummaryReferenceBlock
 import com.lianwenqi.app.ai.buildSummaryTurns
@@ -20,9 +24,12 @@ import com.lianwenqi.app.ai.enforceWordRange
 import com.lianwenqi.app.data.AiChapterImporter
 import com.lianwenqi.app.data.AiOutlineImporter
 import com.lianwenqi.app.data.ChatEvent
+import com.lianwenqi.app.data.GEN_KIND_SUMMARY
 import com.lianwenqi.app.data.MemoryGateway
+import com.lianwenqi.app.data.PromptLog
 import com.lianwenqi.app.data.PromptLogContext
 import com.lianwenqi.app.data.PromptLogNode
+import com.lianwenqi.app.data.PromptLogRound
 import com.lianwenqi.app.data.SendChatMessageUseCase
 import com.lianwenqi.app.data.SendChatRequest
 import com.lianwenqi.app.data.VectorizeProgress
@@ -344,13 +351,25 @@ class AiChatViewModel(
 
     /** 梗概子调用结果 */
     private sealed interface SummaryCall {
-        data class Ok(val text: String) : SummaryCall
+        /** 成功产出：[promptTokens] 等随回答落库，供界面展示 token 消耗与缓存命中率 */
+        data class Ok(
+            val text: String,
+            val promptTokens: Int = 0,
+            val completionTokens: Int = 0,
+            val cachedTokens: Int = 0
+        ) : SummaryCall
+
         data class Failed(val message: String) : SummaryCall
     }
 
-    /** 侧边抽屉「生成梗概」：限定范围开启时先弹标签选择，否则直接执行；生成的梗概交给 [onSummary] 写回编辑器 */
-    fun startGenerateSummary(onSummary: (String) -> Unit) = launchGeneration { sid ->
-        if (fixedChapterId == null) {
+    /**
+     * 侧边抽屉「生成梗概」：限定范围开启时先弹标签选择，否则直接执行。
+     * 生成结果作为一条普通 AI 回答进入本会话（用户消息 = 输入框提示词 + 「生成梗概」标记），
+     * 不再自动写回本章；由用户在回答操作栏点「写入梗概」决定是否写入。
+     */
+    fun startGenerateSummary() = launchGeneration { sid ->
+        val chapterId = fixedChapterId
+        if (chapterId == null) {
             noticeThenCancel("请在章节编辑页使用「生成梗概」")
             return@launchGeneration
         }
@@ -367,9 +386,55 @@ class AiChatViewModel(
         )
         _generationPlan.value = plan
         startExecuting()
-        when (val r = runSummaryCall(sid, plan)) {
+        val modelId = activeModelId.value
+        if (modelId <= 0L) {
+            generationMessage.value = "请先在设置中配置并选择一个模型"
+            _generationState.value = FlowState.Failed
+            return@launchGeneration
+        }
+        // 生成路径也走 [prepareSessionPrefix]：首次调用把已勾选的大纲 / 上下文冻结成会话前缀，
+        // 之后逐轮复用 → 参考资料前缀跨轮逐字节稳定，缓存命中率随轮次提高
+        val prefix = prepareSessionPrefix(sid, applyAdaptive = false)
+        val ref = buildGenerationReference(prefix, plan.selectedOutlineIds)
+        val userPrompt = input.value
+        // 像普通发送一样落一条「用户消息」：输入框提示词 + 「生成梗概」标记；
+        // 本轮新增的参考资料随消息落库成为历史的一部分，故上面对选定标签的「已提交」标记语义成立
+        val userId = chatRepository.addMessage(
+            sid, ChatRole.USER,
+            generationUserContent(genLabelSummary, userPrompt),
+            contextSnapshot = currentSnapshot().encode(),
+            promptExtra = ref.extra,
+            chapterId = chapterId
+        )
+        // 选定标签的内容已随本轮消息落库，此时记入前缀去重（后续轮次只写「参见大纲『X』」）
+        markGenerationOutlines(sid, ref.sessionPrefix, ref.freshOutlineIds)
+        // 生成请求：聊天同构前缀块 +（开关开启时）本会话历史 + 生成专用块（指令 + 新增参考资料 + 用户输入）
+        val history =
+            if (prefs.genCarryHistory.first()) generationHistory(sid, userId, modelId) else GenerationHistory()
+        val turns = assembleGenerationTurns(
+            prefix, ref, history, buildSummaryTurns(userPrompt, plan.summaryWordRange, ref.extra)
+        )
+        when (val r = runSummaryCall(plan, turns)) {
             is SummaryCall.Ok -> {
-                onSummary(r.text)
+                chatRepository.addMessage(
+                    sid, ChatRole.ASSISTANT, r.text,
+                    replyToId = userId,
+                    promptTokens = r.promptTokens,
+                    completionTokens = r.completionTokens,
+                    cachedTokens = r.cachedTokens,
+                    chapterId = chapterId,
+                    promptLog = buildGenerationLog(
+                        modelId = modelId,
+                        prefix = prefix,
+                        rounds = history.rounds,
+                        genKind = GEN_KIND_SUMMARY,
+                        summary = "",
+                        memory = "",
+                        autoOutline = ref.autoOutlineLog,
+                        userPrompt = userPrompt,
+                        fullPrompt = userPrompt.trim().ifBlank { SUMMARY_FALLBACK_INPUT }
+                    ).encode()
+                )
                 _generationState.value = FlowState.Done
             }
             is SummaryCall.Failed -> {
@@ -427,10 +492,36 @@ class AiChatViewModel(
         _generationPlan.value = plan
         startExecuting()
 
+        val modelId = activeModelId.value
+        if (modelId <= 0L) {
+            generationMessage.value = "请先在设置中配置并选择一个模型"
+            _generationState.value = FlowState.Failed
+            return@launchGeneration
+        }
         val memoryCap = prefs.memoryBlockQuota.first()
         val memoryScope = prefs.memorySearchScope.first()
+
+        // 生成路径也走 [prepareSessionPrefix]：首次调用把已勾选的大纲 / 上下文冻结成会话前缀
+        val prefix = prepareSessionPrefix(sid, applyAdaptive = false)
+        // 选定标签只在「会生成梗概」时作为指定大纲参考资料提交：
+        // 已在本会话前缀里的只写「参见大纲『X』」；未提交过的取完整内容并入本轮新增参考资料
+        val ref = buildGenerationReference(
+            prefix,
+            if (mode == GenerationMode.CONTENT_ONLY) emptyList() else plan.selectedOutlineIds
+        )
+        var sp = ref.sessionPrefix
+
+        // 生成请求携带的历史：本轮的用户消息在正文落库前才写入，故此处取到当前全部轮次
+        val history =
+            if (prefs.genCarryHistory.first()) generationHistory(sid, Long.MAX_VALUE, modelId) else GenerationHistory()
         val summary = if (mode == GenerationMode.CONTENT_WITH_SUMMARY) {
-            awaitSummaryWithRetry(sid, plan, onSummary)
+            awaitSummaryWithRetry(
+                plan,
+                assembleGenerationTurns(
+                    prefix, ref, history, buildSummaryTurns(input.value, plan.summaryWordRange, ref.extra)
+                ),
+                onSummary
+            )
                 ?: run {
                     if (!generationCancelled) _generationState.value = FlowState.Failed
                     return@launchGeneration
@@ -439,36 +530,42 @@ class AiChatViewModel(
             bookRepository.getChapter(chapterId)?.summary.orEmpty()
         }
 
-        val memoryBlock = if (plan.memoryRetrieval == RetrievalMode.ON) {
-            buildMemoryBlock(sid, plan, chapterId, summary, memoryCap, memoryScope)
+        // 「适配性筛选」：以本轮实际使用的梗概匹配非常驻化大纲条目的「显示标签」，
+        // 命中的（此前未提交过的）作为「新增大纲资料」随本轮用户消息落库，并记入前缀去重
+        val adaptive = if (prefs.prefixAdaptiveFilterEnabled.first()) {
+            val freshIds = adaptiveMatchedOutlineIds(summary).filterNot { sp.outlineInjected(it, prefix.outlineOn) }
+            if (freshIds.isEmpty()) {
+                ""
+            } else {
+                val entries = freshIds.mapNotNull { renderOutlineEntry(it) }
+                sp = sp.markOutlinesInjected(freshIds)
+                chatRepository.updateSessionPrefix(sid, sp.encode())
+                renderAdaptiveOutlineBlock(sp, entries)
+            }
         } else {
             ""
         }
 
-        val modelId = activeModelId.value
-        if (modelId <= 0L) {
-            generationMessage.value = "请先在设置中配置并选择一个模型"
-            _generationState.value = FlowState.Failed
-            return@launchGeneration
-        }
-        val prefix = readSessionPrefix(sid)
-        // 「适配性筛选」开启时，把「本章梗概」命中的非常驻化大纲条目一并并入正文参考资料。
-        // 生成正文是一次性无历史请求、不落库，故只注入、不记回 autoOutlineIds，
-        // 否则会让后续聊天轮次误以为这些条目已在历史里而跳过提交。
-        val outlineSlot = if (prefs.prefixAdaptiveFilterEnabled.first()) {
-            val matched = adaptiveMatchedOutlineIds(summary).mapNotNull { renderOutlineEntry(it) }
-            listOf(prefix.reference, renderAdaptiveOutlineBlock(prefix.sessionPrefix, matched))
-                .filter { it.isNotBlank() }
-                .joinToString("\n")
+        val memoryRef = if (plan.memoryRetrieval == RetrievalMode.ON) {
+            buildMemoryBlock(plan, chapterId, summary, memoryCap, memoryScope, sp)
         } else {
-            prefix.reference
+            MemoryRef()
         }
-        val turns = buildContentTurns(
-            summary = summary,
-            outlineSlot = outlineSlot,
-            memoryBlock = memoryBlock,
-            userInput = input.value,
-            range = plan.contentWordRange
+        if (memoryRef.freshKeys.isNotEmpty()) {
+            sp = sp.copy(autoMemoryKeys = sp.autoMemoryKeys + memoryRef.freshKeys)
+            chatRepository.updateSessionPrefix(sid, sp.encode())
+        }
+
+        val turns = assembleGenerationTurns(
+            prefix, ref, history,
+            buildContentTurns(
+                summary = summary,
+                // 生成专用块只带本轮新增的大纲资料；已冻结的会话前缀已在前段共享块里
+                outlineSlot = listOf(ref.extra, adaptive).filter { it.isNotBlank() }.joinToString("\n\n"),
+                memoryBlock = memoryRef.text,
+                userInput = input.value,
+                range = plan.contentWordRange
+            )
         )
         val result = configRepository.sendToModel(
             modelId, AiRequest(turns = turns, model = "", temperature = 0f, maxTokens = 0)
@@ -491,13 +588,36 @@ class AiChatViewModel(
         } else if (enforced.under) {
             generationMessage.value = "正文略短于设定下限，可继续让 AI 补写"
         }
+        // 先落「用户消息」：输入框提示词 + 「生成正文」标记；本轮新增的参考资料随消息落库成为历史的一部分
+        val userPrompt = input.value
+        val userId = chatRepository.addMessage(
+            sid, ChatRole.USER,
+            generationUserContent(genLabelContent, userPrompt),
+            contextSnapshot = currentSnapshot().encode(),
+            promptExtra = listOf(ref.extra, adaptive, memoryRef.text).filter { it.isNotBlank() }.joinToString("\n\n"),
+            chapterId = chapterId
+        )
+        // 选定标签的内容已随本轮消息落库，此时记入前缀去重（后续轮次只写「参见大纲『X』」）
+        markGenerationOutlines(sid, sp, ref.freshOutlineIds)
         // 生成结果作为一条普通 AI 回答进入本会话：不自动写入正文，由用户在编辑器点「写入本章正文」决定
         chatRepository.addMessage(
             sid, ChatRole.ASSISTANT, enforced.text,
+            replyToId = userId,
             promptTokens = result.promptTokens,
             completionTokens = result.completionTokens,
             cachedTokens = result.cachedTokens,
-            chapterId = chapterId
+            chapterId = chapterId,
+            promptLog = buildGenerationLog(
+                modelId = modelId,
+                prefix = prefix,
+                rounds = history.rounds,
+                genKind = "",
+                summary = summary,
+                memory = memoryRef.text,
+                autoOutline = listOf(ref.autoOutlineLog, adaptive).filter { it.isNotBlank() }.joinToString("\n\n"),
+                userPrompt = userPrompt,
+                fullPrompt = userPrompt.trim().ifBlank { CONTENT_FALLBACK_INPUT }
+            ).encode()
         )
         _generationState.value = FlowState.Done
     }
@@ -617,37 +737,11 @@ class AiChatViewModel(
 
     /**
      * 执行一次梗概生成（独立 messages，不进入正文请求的历史）。
-     * 参考资料 = 本会话常规前缀 + 用户选定标签的内容（已提交过的只写「参见大纲『X』」）。
+     * messages 由调用方组装（见 [assembleGenerationTurns]）：聊天同构前缀块 +（可选）历史 + 生成专用块。
      */
-    private suspend fun runSummaryCall(sid: Long, plan: GenerationPlan): SummaryCall {
+    private suspend fun runSummaryCall(plan: GenerationPlan, turns: List<ChatTurn>): SummaryCall {
         val modelId = activeModelId.value
         if (modelId <= 0L) return SummaryCall.Failed("请先在设置中配置并选择一个模型")
-        val prefix = readSessionPrefix(sid)
-        val pickedBlock = if (plan.selectedOutlineIds.isEmpty()) {
-            ""
-        } else {
-            // 先把完整渲染文本取出来（读取库是挂起操作），再交给纯函数决定「参见」还是「完整内容」
-            val fullText = plan.selectedOutlineIds
-                .mapNotNull { id -> renderOutlineEntry(id)?.let { id to it.text } }
-                .toMap()
-            buildSummaryReferenceBlock(
-                outlineIds = plan.selectedOutlineIds,
-                injected = { id -> prefix.sessionPrefix.outlineInjected(id, prefix.outlineOn) },
-                label = { id -> _outline.value.firstOrNull { it.id == id }?.let { outlineHeadOf(it) } ?: id.toString() },
-                renderFull = { id -> fullText[id] }
-            )
-        }
-        // 注意：这里【不要】把选中的大纲记入 autoOutlineIds。
-        // autoOutlineIds 的语义是「内容已随某轮消息历史持久化，后续只需写『参见大纲』」，
-        // 而生成流程的参考资料块是一次性请求、不落库也不进历史；一旦标记，
-        // 下一轮就会退化成「参见大纲『X』」，模型反而拿不到内容。
-        // 因而只读 outlineInjected（判断是否真在会话前缀/历史里），不做写入，
-        // 顺带让同一章的多次重生成保持参考资料块逐字节一致，利于命中前缀缓存。
-        val reference = buildString {
-            if (prefix.reference.isNotBlank()) append("【本会话参考资料】\n").append(prefix.reference).append('\n')
-            if (pickedBlock.isNotBlank()) append(pickedBlock).append('\n')
-        }.trim()
-        val turns = buildSummaryTurns(input.value, plan.summaryWordRange, reference)
         val result = configRepository.sendToModel(
             modelId, AiRequest(turns = turns, model = "", temperature = 0f, maxTokens = 0)
         )
@@ -660,7 +754,12 @@ class AiChatViewModel(
         } else if (enforced.under) {
             generationMessage.value = "梗概略短于设定下限，可直接使用"
         }
-        return SummaryCall.Ok(enforced.text)
+        return SummaryCall.Ok(
+            enforced.text,
+            promptTokens = result.promptTokens,
+            completionTokens = result.completionTokens,
+            cachedTokens = result.cachedTokens
+        )
     }
 
     /**
@@ -669,13 +768,13 @@ class AiChatViewModel(
      * 返回 null 表示流程终止（取消）。
      */
     private suspend fun awaitSummaryWithRetry(
-        sid: Long,
         plan: GenerationPlan,
+        turns: List<ChatTurn>,
         onSummary: (String) -> Unit
     ): String? {
         val chapterId = fixedChapterId ?: return null
         while (true) {
-            when (val r = runSummaryCall(sid, plan)) {
+            when (val r = runSummaryCall(plan, turns)) {
                 is SummaryCall.Ok -> {
                     // 生成的梗概静默写回本章梗概（经编辑器本地缓冲，避免被下次整章保存覆盖）
                     onSummary(r.text)
@@ -704,24 +803,24 @@ class AiChatViewModel(
 
     /**
      * 生成正文前的记忆检索参考块：以本章梗概（+ 选定标签）为 query 做向量检索，
-     * 召回后复用 [SessionPrefix.freshMemoryHits] 去重（已提交过的片段不再重复注入），
-     * 新的去重键写回会话前缀。
+     * 召回后复用 [SessionPrefix.freshMemoryHits] 去重（已提交过的片段不再重复注入）。
+     * 只返回本轮新片段的文本与去重键，写回会话前缀由调用方在落库消息之后完成。
      */
     private suspend fun buildMemoryBlock(
-        sid: Long,
         plan: GenerationPlan,
         chapterId: Long,
         summary: String,
         topK: Int,
-        scope: String
-    ): String {
-        if (summary.isBlank()) return ""
-        val bookId = currentMemoryBookId() ?: return ""
+        scope: String,
+        sp: SessionPrefix
+    ): MemoryRef {
+        if (summary.isBlank()) return MemoryRef()
+        val bookId = currentMemoryBookId() ?: return MemoryRef()
         val heads = plan.selectedOutlineIds.mapNotNull { id ->
             _outline.value.firstOrNull { it.id == id }?.let { outlineHeadOf(it) }
         }
         val query = buildRetrievalQuery(summary, heads)
-        if (query.isBlank()) return ""
+        if (query.isBlank()) return MemoryRef()
         memorySearchState.value = MemorySearchState.SEARCHING
         val hits = try {
             container.memoryRepository.retrieveScored(
@@ -735,19 +834,170 @@ class AiChatViewModel(
             emptyList()
         }
         memorySearchState.value = MemorySearchState.DONE
-        if (hits.isEmpty()) return ""
-        val sp = readSessionPrefix(sid).sessionPrefix
+        if (hits.isEmpty()) return MemoryRef()
         val fresh = sp.freshMemoryHits(hits)
-        if (fresh.isEmpty()) return ""
-        chatRepository.updateSessionPrefix(
-            sid, sp.copy(autoMemoryKeys = sp.autoMemoryKeys + fresh.map { shortHash(it) }).encode()
-        )
-        return buildString {
+        if (fresh.isEmpty()) return MemoryRef()
+        val text = buildString {
             append("【参考资料·本书相关正文片段】\n")
             fresh.forEachIndexed { i, t -> append("片段${i + 1}：").append(t).append('\n') }
             append("（以上片段来自本书已写正文，仅供写作参考，请勿照抄或复述。）")
         }
+        return MemoryRef(text = text, freshKeys = fresh.map { shortHash(it) })
     }
+
+    /** 生成路径落库的「用户消息」正文：输入框提示词 + 生成标记，用于在对话里区分生成轮次 */
+    private fun generationUserContent(label: String, prompt: String): String =
+        if (prompt.isBlank()) label else "$label\n$prompt"
+
+    /**
+     * 生成路径的参考资料组装：与聊天请求逐字一致的 [GenerationRef.sharedReference]、
+     * 生成专用块里的 [GenerationRef.extra]（同时随本轮用户消息落库）。
+     * 选定的「梗概范围」标签（[SessionPrefix.outlineInjected] 判定）：
+     * - 已在本会话前缀里的只写「参见大纲『X』」；
+     * - 未提交过的取完整内容并入本轮新增参考资料，其 id 由 [freshOutlineIds] 带回，
+     *   等消息落库后由 [markGenerationOutlines] 记入前缀去重，后续轮次退化为「参见大纲『X』」。
+     */
+    private suspend fun buildGenerationReference(
+        prefix: PreparedPrefix,
+        outlineIds: List<Long>
+    ): GenerationRef {
+        val sp = prefix.sessionPrefix
+        val pickedBlock = if (outlineIds.isEmpty()) {
+            ""
+        } else {
+            // 先把完整渲染文本取出来（读取库是挂起操作），再交给纯函数决定「参见」还是「完整内容」
+            val fullText = outlineIds.mapNotNull { id -> renderOutlineEntry(id)?.let { id to it.text } }.toMap()
+            buildSummaryReferenceBlock(
+                outlineIds = outlineIds,
+                injected = { id -> sp.outlineInjected(id, prefix.outlineOn) },
+                label = { id -> _outline.value.firstOrNull { it.id == id }?.let { outlineHeadOf(it) } ?: id.toString() },
+                renderFull = { id -> fullText[id] }
+            )
+        }
+        // 本轮新增参考资料：新勾选的书籍/章节/大纲 + 「适配性筛选」新增大纲资料 + 选定标签
+        val extra = listOf(prefix.newReference, prefix.autoOutlineMaterial, pickedBlock)
+            .filter { it.isNotBlank() }
+            .joinToString("\n\n")
+        return GenerationRef(
+            sessionPrefix = sp,
+            // 与聊天请求的前置参考资料逐字一致：会话前缀 +（前缀化关闭时）实时上下文
+            sharedReference = chatStyleReference(prefix),
+            extra = extra,
+            autoOutlineLog = listOf(prefix.autoOutlineMaterial, pickedBlock)
+                .filter { it.isNotBlank() }
+                .joinToString("\n\n"),
+            freshOutlineIds = outlineIds.filterNot { sp.outlineInjected(it, prefix.outlineOn) }
+        )
+    }
+
+    /**
+     * 与聊天发送逐字一致的「参考资料」文本：冻结的会话前缀 + 前缀化关闭时的实时上下文
+     * （拼装方式与 [runGeneration] 传入 [SendChatRequest.referencePrefix] / selection 后
+     * [SendChatMessageUseCase] 的 `reference` 完全相同），用于两条路径共享服务端前缀缓存。
+     */
+    private suspend fun chatStyleReference(prefix: PreparedPrefix): String {
+        val live = liveSelection(prefix.contextOn, prefix.outlineOn)
+        val context = chatRepository.buildContext(
+            bookIds = live.bookIds,
+            chapterIds = live.chapterIds,
+            outlineIds = live.outlineIds,
+            contentChapterIds = live.contentChapterIds.toSet(),
+            summaryChapterIds = live.summaryChapterIds.toSet()
+        )
+        return listOf(prefix.reference, context)
+            .filter { it.isNotBlank() }
+            .joinToString("\n")
+    }
+
+    /**
+     * 生成请求可携带的「本会话历史对话」块：与聊天发送的历史同构
+     * （只保留生效版本、按 maxContext 截断、把附加提示词拼回用户轮次），
+     * 但只取 [beforeId] 之前的轮次 —— 本轮生成自己的用户消息不作为它自己的历史。
+     * [rounds] 供「提交日志」的上下文日志回显，与实际发送内容一致。
+     */
+    private suspend fun generationHistory(sid: Long, beforeId: Long, modelId: Long): GenerationHistory {
+        val maxContext = configRepository.getModel(modelId)?.maxContext ?: 20
+        val raw = chatRepository.getMessages(sid)
+            .filter { it.id < beforeId }
+            .filter { it.role == ChatRole.USER || it.role == ChatRole.ASSISTANT }
+            // 同一轮只保留「当前生效」的那条回答（多次重新生成的废弃候选不进上下文）
+            .filter { it.role == ChatRole.USER || it.active }
+            .let { if (maxContext > 0) it.takeLast(maxContext) else it }
+        val turns = raw.map {
+            val extra = it.promptExtra
+            ChatTurn(it.role, if (extra.isBlank()) it.content else extra + "\n\n" + it.content)
+        }
+        val rounds = mutableListOf<PromptLogRound>()
+        raw.forEach { m ->
+            if (m.role == ChatRole.USER) {
+                rounds += PromptLogRound(user = m.content)
+            } else if (rounds.isEmpty()) {
+                rounds += PromptLogRound(assistant = m.content)
+            } else {
+                rounds[rounds.lastIndex] = rounds.last().copy(assistant = m.content)
+            }
+        }
+        return GenerationHistory(turns, rounds)
+    }
+
+    /**
+     * 组装生成请求的 messages：聊天同构前缀块 +（开关开启时）本会话历史 + 生成专用块 [tail]。
+     * 前缀块与聊天请求逐字节一致，故两条路径能命中同一段供应商侧前缀缓存；
+     * 生成专用块只在前缀之后追加，不会破坏前缀的字节稳定性。
+     */
+    private fun assembleGenerationTurns(
+        prefix: PreparedPrefix,
+        ref: GenerationRef,
+        history: GenerationHistory,
+        tail: List<ChatTurn>
+    ): List<ChatTurn> = buildList {
+        addAll(
+            buildGenerationPrefixTurns(
+                customPrefix = prefix.custom,
+                // 生成路径由编辑器侧边 AI 触发（不携带 AI 工具），此处与聊天页保持同一判定
+                writeOutlineTool = writeOutlineToolOn(),
+                chapterImportTool = chapterImportToolOn(),
+                reference = ref.sharedReference
+            )
+        )
+        addAll(history.turns)
+        addAll(tail)
+    }
+
+    /** 选定标签已随本轮消息落库，记入会话前缀去重：下一轮只写「参见大纲『X』」 */
+    private suspend fun markGenerationOutlines(sid: Long, sp: SessionPrefix, ids: List<Long>) {
+        if (ids.isEmpty()) return
+        chatRepository.updateSessionPrefix(sid, sp.markOutlinesInjected(ids).encode())
+    }
+
+    /**
+     * 生成路径落库回答的「提示词日志」：与聊天发送一致的三级结构（预设 / 上下文 / 本轮提示词），
+     * 供「查看日志 / 查看本轮提示词」回显。[rounds] 为本次请求实际携带的历史轮次
+     * （「生成工具携带本会话历史消息」关闭时为空）。
+     */
+    private suspend fun buildGenerationLog(
+        modelId: Long,
+        prefix: PreparedPrefix,
+        rounds: List<PromptLogRound>,
+        genKind: String,
+        summary: String,
+        memory: String,
+        autoOutline: String,
+        userPrompt: String,
+        fullPrompt: String
+    ): PromptLog = PromptLog(
+        // 实际生效的预设提示词：模型配置里的 systemPrompt（真正随请求发出）
+        systemPrompt = configRepository.getModel(modelId)?.systemPrompt.orEmpty(),
+        customPrefix = prefix.custom,
+        outlines = prefix.outlineEntries.map { PromptLogNode(outlineLogTitle(it.text), it.text) },
+        rounds = rounds,
+        summary = summary,
+        memory = memory,
+        autoOutline = autoOutline,
+        userPrompt = userPrompt,
+        fullPrompt = fullPrompt,
+        genKind = genKind
+    )
 
     /** 记忆检索询问弹窗里展示的检索词摘要：以本章梗概（+ 选定标签）构造，超长截断 */
     private suspend fun retrievalQueryDigest(chapterId: Long, outlineIds: List<Long>): String {
@@ -1728,8 +1978,11 @@ class AiChatViewModel(
      *   原位替换；从未冻结过的新条目渲染成文本作为「尾部追加」返回，由调用方挂到当轮用户消息尾端
      *   （成为历史对话的一部分），从而不破坏「预设 + 历史对话」的前缀字节结构。
      * 只增不减：取消勾选不移除已冻结内容，也不允许重复追加。
+     *
+     * @param applyAdaptive 是否顺带执行「适配性筛选」。生成路径传 false：
+     *   生成时正文与梗概可能不同步（同时生成梗概时用的是新梗概），故由调用方以实际使用的梗概单独匹配。
      */
-    private suspend fun prepareSessionPrefix(sid: Long): PreparedPrefix {
+    private suspend fun prepareSessionPrefix(sid: Long, applyAdaptive: Boolean = true): PreparedPrefix {
         val contextOn = prefs.prefixContextEnabled.first()
         val outlineOn = prefs.prefixOutlineEnabled.first()
         val session = chatRepository.getSession(sid)
@@ -1819,7 +2072,7 @@ class AiChatViewModel(
         // 命中的条目（此前未提交过的）渲染成「新增大纲资料」，随当轮用户消息在检索片段之后、
         // 提示词之前注入；已提交过的 id 记入 [SessionPrefix.autoOutlineIds]，后续不重复提交。
         var autoOutlineMaterial = ""
-        if (outlineOn && prefs.prefixAdaptiveFilterEnabled.first()) {
+        if (applyAdaptive && outlineOn && prefs.prefixAdaptiveFilterEnabled.first()) {
             val summary = fixedChapterId?.let { bookRepository.getChapter(it)?.summary.orEmpty() }.orEmpty()
             val freshIds = adaptiveMatchedOutlineIds(summary).filterNot { it in sp.autoOutlineIds }
             if (freshIds.isNotEmpty()) {
@@ -1952,6 +2205,30 @@ class AiChatViewModel(
 
     /** 长期记忆检索结果：本轮实际注入的参考资料文本 + 其中新片段的去重键（写回会话前缀用） */
     private data class MemoryRef(val text: String = "", val freshKeys: List<String> = emptyList())
+
+    /** 生成路径的参考资料组装结果（见 [buildGenerationReference]） */
+    private data class GenerationRef(
+        /** 组装时的会话前缀快照（选定标签的「已提交」判定与后续记忆去重写回都基于它） */
+        val sessionPrefix: SessionPrefix = SessionPrefix(),
+        /** 与聊天请求逐字一致的前置参考资料（会话前缀 + 实时上下文），用于共享服务端前缀缓存 */
+        val sharedReference: String = "",
+        /** 生成专用块的参考资料：本轮新增（新勾选内容 + 选定标签 + 适配性命中） */
+        val extra: String = "",
+        /** 「查看日志」用：本轮新增的大纲参考资料 */
+        val autoOutlineLog: String = "",
+        /** 本轮首次提交的选定标签 id：随消息落库后记入前缀去重 */
+        val freshOutlineIds: List<Long> = emptyList()
+    )
+
+    /** 生成请求携带的历史对话块：实际发送的轮次 + 「提交日志」的上下文轮次回显 */
+    private data class GenerationHistory(
+        val turns: List<ChatTurn> = emptyList(),
+        val rounds: List<PromptLogRound> = emptyList()
+    )
+
+    /** 生成路径落库的「用户消息」标记：把生成轮次与普通对话区分开 */
+    private val genLabelSummary = "生成梗概"
+    private val genLabelContent = "生成正文"
 
     /**
      * 「＋本章梗概」：勾选时随消息发送但不在气泡显示的附加提示词（含章节名与梗概）。

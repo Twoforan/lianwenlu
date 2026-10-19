@@ -48,11 +48,13 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Article
+import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
@@ -62,8 +64,11 @@ import androidx.compose.material.icons.filled.EditNote
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.MenuBook
+import androidx.compose.material.icons.filled.NoteAdd
 import androidx.compose.material.icons.filled.ReceiptLong
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.Send
@@ -107,9 +112,14 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
@@ -120,8 +130,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.lianwenqi.app.ai.GenerationDialog
 import com.lianwenqi.app.ai.SummaryFailureChoice
+import com.lianwenqi.app.data.GEN_KIND_SUMMARY
 import com.lianwenqi.app.data.PromptLog
 import com.lianwenqi.app.data.entity.AiModel
 import com.lianwenqi.app.data.entity.Book
@@ -393,6 +407,14 @@ fun AiChatScreen(initialBookId: Long?) {
                         }
                     }
                 }
+
+                // 工具条上方的冒泡提示：检索中（浮在对话区底部，不占用工具条宽度）
+                if (memorySearch == MemorySearchState.SEARCHING && memoryRetrieval) {
+                    FloatingStatusBubble(
+                        text = "搜索中",
+                        modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 8.dp)
+                    )
+                }
             }
 
             // 「查看日志」：分「预设 / 上下文 / 本轮」三部分回显本轮发送时的提示词（默认收起，逐层展开）
@@ -454,7 +476,6 @@ fun AiChatScreen(initialBookId: Long?) {
                     onClick = { vm.toggleMemoryRetrieval() },
                     label = { Text("记忆检索") }
                 )
-                MemorySearchIndicator(memorySearch, memoryRetrieval)
                 // AI 工具多选（被工具页关闭的工具不出现在列表里）
                 if (outlineToolEnabled || chapterToolEnabled) {
                     AssistChip(
@@ -986,8 +1007,10 @@ fun AiAssistantDrawer(
     onWriteToChapter: (String) -> Unit,
     /** 把「生成梗概」产出的梗概写回当前章节的梗概（经编辑器本地缓冲，避免被整章保存覆盖） */
     onGeneratedSummary: (String) -> Unit,
-    /** 在当前书新建一个章节并跳转过去 */
-    onNewChapter: () -> Unit
+    /** 跳转到本卷下一章节；没有下一章时新建章节再跳转 */
+    onNextChapter: () -> Unit,
+    /** 抽屉里改章节名后通知编辑器同步本地标题缓冲，避免退出编辑页时用旧标题覆盖回去 */
+    onChapterRenamed: (Long, String) -> Unit
 ) {
     Box(Modifier.fillMaxSize()) {
         AnimatedVisibility(visible = visible, enter = fadeIn(), exit = fadeOut()) {
@@ -1004,11 +1027,14 @@ fun AiAssistantDrawer(
             exit = slideOutHorizontally(targetOffsetX = { it }),
             modifier = Modifier.align(Alignment.CenterEnd)
         ) {
-            AiAssistantPanel(bookId, chapterId, onDismiss, onWriteToChapter, onGeneratedSummary, onNewChapter)
+            AiAssistantPanel(
+                bookId, chapterId, onDismiss, onWriteToChapter, onGeneratedSummary, onNextChapter, onChapterRenamed
+            )
         }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun AiAssistantPanel(
     bookId: Long,
@@ -1016,7 +1042,8 @@ private fun AiAssistantPanel(
     onDismiss: () -> Unit,
     onWriteToChapter: (String) -> Unit,
     onGeneratedSummary: (String) -> Unit,
-    onNewChapter: () -> Unit
+    onNextChapter: () -> Unit,
+    onChapterRenamed: (Long, String) -> Unit
 ) {
     val vm = appViewModel(key = "ai-quick-$bookId-$chapterId") {
         // 侧边 AI 助手：不启用 AI 工具（工具提示词不随请求发送，也不解析工具区块）
@@ -1094,37 +1121,65 @@ private fun AiAssistantPanel(
                 .fillMaxSize()
                 .windowInsetsPadding(WindowInsets.statusBars)
         ) {
-            Row(
+            Column(
                 Modifier
                     .fillMaxWidth()
-                    .padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 4.dp),
-                verticalAlignment = Alignment.CenterVertically
+                    .padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 4.dp)
             ) {
-                Text("AI 助手", fontWeight = FontWeight.Bold)
-                Spacer(Modifier.width(8.dp))
-                // 模型选择移到标题右侧
-                ModelSelectorChip(
-                    models = models,
-                    providers = providers,
-                    activeId = activeModelId,
-                    maxLabelWidth = 96.dp,
-                    onSelect = { vm.setModel(it) }
-                )
-                Spacer(Modifier.weight(1f))
-                // 新建对话移到关闭按钮左侧
-                IconButton(
-                    onClick = {
-                        focusManager.clearFocus()
-                        keyboard?.hide()
-                        openPanel = null
-                        manifestState = 0
-                        vm.newSession()
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("AI", fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.width(8.dp))
+                    // 模型选择移到标题右侧
+                    ModelSelectorChip(
+                        models = models,
+                        providers = providers,
+                        activeId = activeModelId,
+                        maxLabelWidth = 96.dp,
+                        onSelect = { vm.setModel(it) }
+                    )
+                    Spacer(Modifier.weight(1f))
+                    // 新建对话移到关闭按钮左侧
+                    IconButton(
+                        onClick = {
+                            focusManager.clearFocus()
+                            keyboard?.hide()
+                            openPanel = null
+                            manifestState = 0
+                            vm.newSession()
+                        }
+                    ) {
+                        Icon(Icons.Filled.Add, contentDescription = "新开对话")
                     }
-                ) {
-                    Icon(Icons.Filled.Add, contentDescription = "新开对话")
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Filled.Close, contentDescription = "关闭")
+                    }
                 }
-                IconButton(onClick = onDismiss) {
-                    Icon(Icons.Filled.Close, contentDescription = "关闭")
+                // 当前所在章节：长按可改章节名（保存后同步到书籍）
+                val currentChapterTitle = chapters.firstOrNull { it.id == chapterId }?.title.orEmpty()
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .combinedClickable(
+                            onClick = {},
+                            onLongClick = { renamingChapterId = chapterId }
+                        )
+                        .padding(horizontal = 6.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Filled.MenuBook,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        "当前章节：${currentChapterTitle.ifBlank { "未命名章节" }}",
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
             }
 
@@ -1172,7 +1227,9 @@ private fun AiAssistantPanel(
                     onViewLog = { logTarget = it },
                     onViewPrompt = { promptTarget = it },
                     onStop = { vm.stopGenerating() },
-                    onWriteToChapter = onWriteToChapter
+                    onWriteToChapter = onWriteToChapter,
+                    // 「写入梗概」只对本章的回答生效，避免在别的章节的抽屉里误写到当前章节
+                    onWriteSummary = { target -> if (target.chapterId == chapterId) onGeneratedSummary(target.content) }
                 )
             }
             Box(
@@ -1232,6 +1289,19 @@ private fun AiAssistantPanel(
                         }
                     }
                 }
+
+                // 工具条上方的冒泡提示：检索中 / 生成中（浮在对话区底部，不占用工具条宽度）
+                val busyText = when {
+                    generationRunning -> "生成中"
+                    memorySearch == MemorySearchState.SEARCHING && memoryRetrieval -> "搜索中"
+                    else -> null
+                }
+                if (busyText != null) {
+                    FloatingStatusBubble(
+                        text = busyText,
+                        modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 8.dp)
+                    )
+                }
             }
 
             errorMsg?.let {
@@ -1275,27 +1345,32 @@ private fun AiAssistantPanel(
                 )
             }
 
-            // 按钮行
+            // 按钮行：按可用宽度等分容纳，不横向滚动
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 16.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                SelectorButton("上下文", openPanel == "context") {
+                SelectorButton("上下文", openPanel == "context", Modifier.weight(1.14f)) {
                     openPanel = if (openPanel == "context") null else "context"
                     manifestState = 0
                 }
-                SelectorButton("大纲", openPanel == "outline") {
+                SelectorButton("大纲", openPanel == "outline", Modifier.weight(0.94f)) {
                     openPanel = if (openPanel == "outline") null else "outline"
                     manifestState = 0
                 }
                 // 长期记忆检索（与「上下文 / 大纲」同排的勾选框）；未配置向量化工具时不可勾选
-                SmallChip("记忆检索", memoryRetrieval, { vm.toggleMemoryRetrieval() }, enabled = memoryToolReady)
-                MemorySearchIndicator(memorySearch, memoryRetrieval)
-                // 在当前书新建章节并直接跳转过去
-                SmallChip("新建章节", false, { onNewChapter() })
+                SmallChip(
+                    "记忆检索",
+                    memoryRetrieval,
+                    { vm.toggleMemoryRetrieval() },
+                    enabled = memoryToolReady,
+                    modifier = Modifier.weight(1.06f)
+                )
+                // 跳转到本卷下一章节；没有下一章时新建章节再跳转
+                SmallChip("下一章", false, { onNextChapter() }, modifier = Modifier.weight(0.86f))
             }
 
             if (editingUserMsgId > 0L) {
@@ -1310,6 +1385,7 @@ private fun AiAssistantPanel(
                 value = input,
                 onValueChange = { vm.input.value = it },
                 placeholder = "向ai提问",
+                showSend = false,
                 sendEnabled = !sending && input.isNotBlank(),
                 onSend = {
                     focusManager.clearFocus()
@@ -1341,30 +1417,27 @@ private fun AiAssistantPanel(
                 preview = { vm.contextPreview() }
             )
 
-            // 「＋本章梗概」「快捷提示词」「生成梗概」「生成正文」快捷按钮行
-            //（发送按钮已并入上方输入卡片）；抽屉较窄时横向滚动，保证末尾的生成按钮可见可点
+            // 底部操作行：＋本章梗概（仅图标）· 快捷提示词（仅图标）· 梗概 / 正文（图标 + 纸飞机）· 发送（仅纸飞机）
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
-                    .horizontalScroll(rememberScrollState()),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    .padding(horizontal = 16.dp, vertical = 6.dp)
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .padding(horizontal = 4.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                FilterChip(
+                // 本章梗概：切换是否把本章梗概纳入本次请求（仅图标，用梗概图标代替原来的＋号）
+                AssistantBarAction(
+                    modifier = Modifier.weight(1f),
                     selected = summaryOn,
                     onClick = { vm.toggleCurrentSummary() },
-                    modifier = Modifier.height(32.dp),
-                    label = {
-                        Text(
-                            "＋本章梗概",
-                            style = MaterialTheme.typography.labelMedium,
-                            maxLines = 1,
-                            softWrap = false
-                        )
-                    }
+                    icon = SummarizeIcon,
+                    contentDescription = "本章梗概"
                 )
-                FilterChip(
+                // 快捷提示词：展开 / 收起快捷提示词面板（仅图标）
+                AssistantBarAction(
+                    modifier = Modifier.weight(1f),
                     selected = openPanel == "prompt",
                     onClick = {
                         focusManager.clearFocus()
@@ -1372,46 +1445,28 @@ private fun AiAssistantPanel(
                         openPanel = if (openPanel == "prompt") null else "prompt"
                         manifestState = 0
                     },
-                    modifier = Modifier.height(32.dp),
-                    label = {
-                        Text(
-                            "快捷提示词",
-                            style = MaterialTheme.typography.labelMedium,
-                            maxLines = 1,
-                            softWrap = false
-                        )
-                        Icon(
-                            if (openPanel == "prompt") Icons.Filled.KeyboardArrowDown
-                            else Icons.Filled.KeyboardArrowUp,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp)
-                        )
-                    }
+                    icon = Icons.Filled.Bolt,
+                    contentDescription = "快捷提示词"
                 )
-                // 「生成梗概」：按「生成梗概」配置（是否限定范围 → 是否先弹标签选择）直接生成并写回本章梗概
-                FilterChip(
-                    selected = false,
+                // 梗概：按「生成梗概」配置（是否限定范围 → 是否先弹标签选择）直接生成；
+                // 产出作为一条 AI 回答展示，由用户在操作栏点「写入梗概」决定是否写回本章
+                AssistantBarAction(
+                    modifier = Modifier.weight(1.25f),
                     enabled = !generationRunning && !sending,
                     onClick = {
                         focusManager.clearFocus()
                         keyboard?.hide()
                         openPanel = null
                         manifestState = 0
-                        vm.startGenerateSummary(onGeneratedSummary)
+                        vm.startGenerateSummary()
                     },
-                    modifier = Modifier.height(32.dp),
-                    label = {
-                        Text(
-                            "生成梗概",
-                            style = MaterialTheme.typography.labelMedium,
-                            maxLines = 1,
-                            softWrap = false
-                        )
-                    }
+                    icon = Icons.AutoMirrored.Filled.Send,
+                    contentDescription = "生成梗概",
+                    label = "梗概"
                 )
-                // 「生成正文」：生成前先一次性弹完所有决策弹窗，产出作为一条 AI 回答展示，由用户手动写入正文
-                FilterChip(
-                    selected = false,
+                // 正文：生成前先一次性弹完所有决策弹窗，产出作为一条 AI 回答展示，由用户手动写入正文
+                AssistantBarAction(
+                    modifier = Modifier.weight(1.25f),
                     enabled = !generationRunning && !sending,
                     onClick = {
                         focusManager.clearFocus()
@@ -1420,29 +1475,31 @@ private fun AiAssistantPanel(
                         manifestState = 0
                         vm.startGenerateContent(onGeneratedSummary)
                     },
-                    modifier = Modifier.height(32.dp),
-                    label = {
-                        Text(
-                            "生成正文",
-                            style = MaterialTheme.typography.labelMedium,
-                            maxLines = 1,
-                            softWrap = false
-                        )
-                    }
+                    icon = Icons.AutoMirrored.Filled.Send,
+                    contentDescription = "生成正文",
+                    label = "正文"
                 )
+                // 发送（仅纸飞机）
+                AssistantBarAction(
+                    modifier = Modifier.weight(1f),
+                    enabled = !sending && input.isNotBlank(),
+                    onClick = {
+                        focusManager.clearFocus()
+                        keyboard?.hide()
+                        vm.send()
+                    },
+                    icon = Icons.AutoMirrored.Filled.Send,
+                    contentDescription = "发送"
+                )
+                // 生成中：可随时停止
                 if (generationRunning) {
-                    FilterChip(
+                    AssistantBarAction(
+                        modifier = Modifier.weight(1.3f),
                         selected = true,
                         onClick = { vm.cancelGeneration() },
-                        modifier = Modifier.height(32.dp),
-                        label = {
-                            Text(
-                                "停止生成",
-                                style = MaterialTheme.typography.labelMedium,
-                                maxLines = 1,
-                                softWrap = false
-                            )
-                        }
+                        icon = Icons.Filled.Close,
+                        contentDescription = "停止生成",
+                        label = "停止"
                     )
                 }
             }
@@ -1552,24 +1609,93 @@ private fun AiAssistantPanel(
             )
         }
 
-        is GenerationDialog.AskMemoryRetrieval -> AlertDialog(
+        // 记忆检索询问（对齐设计稿）：关闭 / 开启；点 × / 遮罩 / 返回即终止整个生成流程
+        is GenerationDialog.AskMemoryRetrieval -> Dialog(
             onDismissRequest = { vm.cancelGeneration() },
-            title = { Text("是否启用记忆检索") },
-            text = {
-                Text(
-                    "本次将以本章梗概作为检索词：\n\n${dialog.queryDigest}\n\n" +
-                        "开启：命中的本书正文片段作为参考资料一并生成；\n" +
-                        "关闭：仅按本章梗概与本会话前缀生成。"
-                )
-            },
-            confirmButton = { TextButton(onClick = { vm.chooseMemoryRetrieval(true) }) { Text("开启") } },
-            dismissButton = {
-                Row {
-                    TextButton(onClick = { vm.chooseMemoryRetrieval(false) }) { Text("关闭") }
-                    TextButton(onClick = { vm.cancelGeneration() }) { Text("取消") }
+            properties = DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp)
+                    .clip(RoundedCornerShape(24.dp))
+                    .background(PickerSurface)
+            ) {
+                Row(
+                    Modifier.fillMaxWidth().padding(start = 18.dp, end = 8.dp, top = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        Modifier.size(44.dp).clip(CircleShape).background(PickerSoft),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.Filled.Search,
+                            contentDescription = null,
+                            tint = PickerPurple,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Text("是否启用记忆检索", color = PickerInk, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.weight(1f))
+                    IconButton(onClick = { vm.cancelGeneration() }) {
+                        Icon(Icons.Filled.Close, contentDescription = "关闭", tint = PickerMuted)
+                    }
+                }
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 18.dp)
+                        .clip(RoundedCornerShape(18.dp))
+                        .background(PickerSoftRow)
+                        .padding(16.dp)
+                ) {
+                    Text(
+                        "本次将以本章梗概作为检索词：",
+                        color = PickerInk,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    Text(dialog.queryDigest, color = PickerMuted, fontSize = 13.sp, lineHeight = 20.sp)
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        "开启：命中的本书正文片段作为参考资料一并生成；\n关闭：仅按本章梗概与本会话前缀生成。",
+                        color = PickerMuted,
+                        fontSize = 12.sp,
+                        lineHeight = 19.sp
+                    )
+                }
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 14.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(15.dp))
+                            .border(1.dp, PickerBorder, RoundedCornerShape(15.dp))
+                            .clickable { vm.chooseMemoryRetrieval(false) }
+                            .padding(vertical = 14.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("关闭", color = PickerInk, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(15.dp))
+                            .background(Brush.linearGradient(listOf(PickerPurple2, PickerPurple)))
+                            .clickable { vm.chooseMemoryRetrieval(true) }
+                            .padding(vertical = 14.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("开启", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    }
                 }
             }
-        )
+        }
 
         is GenerationDialog.SummaryFailed -> AlertDialog(
             onDismissRequest = { vm.resolveSummaryFailed(SummaryFailureChoice.CANCEL) },
@@ -1625,7 +1751,12 @@ private fun AiAssistantPanel(
         ChapterRenameDialog(
             chapterId = target,
             chapters = chapters,
-            onConfirm = { vm.renameChapter(target, it); renamingChapterId = null },
+            onConfirm = {
+                vm.renameChapter(target, it)
+                // 同步编辑器本地标题缓冲，避免退出编辑页时把新名字覆盖回旧名字
+                onChapterRenamed(target, it.trim())
+                renamingChapterId = null
+            },
             onDismiss = { renamingChapterId = null }
         )
     }
@@ -1767,24 +1898,26 @@ private fun SessionRebindDialog(
     )
 }
 
-/** 底部选择按钮，如 [上下文 ∧] [大纲 ∨] [模型选择 ∨] */
+/** 底部选择按钮（仅保留文字，如 [上下文] [大纲]）；展开时高亮 */
 @Composable
-private fun SelectorButton(label: String, open: Boolean, onClick: () -> Unit) {
+private fun SelectorButton(label: String, open: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(10.dp)
     Row(
-        Modifier
-            .clip(RoundedCornerShape(8.dp))
-            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(8.dp))
+        modifier
+            .clip(shape)
+            .background(if (open) PickerSoft else Color.Transparent)
+            .border(1.dp, if (open) PickerBorder else MaterialTheme.colorScheme.outline, shape)
             .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .padding(horizontal = 8.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center
     ) {
-        Text(label, style = MaterialTheme.typography.bodySmall)
-        Spacer(Modifier.width(4.dp))
-        Icon(
-            if (open) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
-            contentDescription = null,
-            modifier = Modifier.size(16.dp),
-            tint = MaterialTheme.colorScheme.onSurfaceVariant
+        Text(
+            label,
+            style = MaterialTheme.typography.bodySmall,
+            color = if (open) PickerPurple else MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            softWrap = false
         )
     }
 }
@@ -1832,14 +1965,108 @@ private fun FilterDropdown(
     }
 }
 
+/**
+ * 「本章梗概」用的梗概图标：一页文稿 + 三行文字（右上角折角）。
+ * 线稿矢量，跟随 Icon 的 tint 着色，生成设置页的「生成梗概」图标也复用它。
+ */
+internal val SummarizeIcon: ImageVector by lazy {
+    ImageVector.Builder(
+        name = "Summarize",
+        defaultWidth = 24.dp,
+        defaultHeight = 24.dp,
+        viewportWidth = 24f,
+        viewportHeight = 24f
+    ).apply {
+        path(
+            stroke = SolidColor(Color.Black),
+            strokeLineWidth = 1.8f,
+            strokeLineCap = StrokeCap.Round,
+            strokeLineJoin = StrokeJoin.Round
+        ) {
+            // 页身：右上角留出折角
+            moveTo(14.2f, 3.6f)
+            horizontalLineTo(7.2f)
+            curveTo(6.1f, 3.6f, 5.2f, 4.5f, 5.2f, 5.6f)
+            verticalLineTo(18.4f)
+            curveTo(5.2f, 19.5f, 6.1f, 20.4f, 7.2f, 20.4f)
+            horizontalLineTo(16.8f)
+            curveTo(17.9f, 20.4f, 18.8f, 19.5f, 18.8f, 18.4f)
+            verticalLineTo(8.2f)
+            close()
+            // 折角
+            moveTo(14.2f, 3.6f)
+            verticalLineTo(7.3f)
+            curveTo(14.2f, 7.8f, 14.6f, 8.2f, 15.1f, 8.2f)
+            horizontalLineTo(18.8f)
+            // 正文三行（末行短）
+            moveTo(8.4f, 11.2f)
+            horizontalLineTo(15.6f)
+            moveTo(8.4f, 14.2f)
+            horizontalLineTo(15.6f)
+            moveTo(8.4f, 17.2f)
+            horizontalLineTo(12.4f)
+        }
+    }.build()
+}
+
+/** 侧边 AI 抽屉底部操作行的一个动作：可仅图标，也可「图标 + 文案」 */
+@Composable
+private fun AssistantBarAction(
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+    enabled: Boolean = true,
+    selected: Boolean = false,
+    icon: ImageVector? = null,
+    contentDescription: String? = null,
+    label: String? = null
+) {
+    val tint = when {
+        !enabled -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+        selected -> MaterialTheme.colorScheme.primary
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    Row(
+        modifier
+            .height(40.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(
+                if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f) else Color.Transparent
+            )
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center
+    ) {
+        icon?.let {
+            Icon(it, contentDescription = contentDescription, tint = tint, modifier = Modifier.size(19.dp))
+            if (label != null) Spacer(Modifier.width(5.dp))
+        }
+        label?.let {
+            Text(
+                it,
+                color = tint,
+                style = MaterialTheme.typography.labelMedium,
+                maxLines = 1,
+                softWrap = false
+            )
+        }
+    }
+}
+
 /** 面板顶部的紧凑筛选标签 */
 @Composable
-private fun SmallChip(label: String, selected: Boolean, onClick: () -> Unit, enabled: Boolean = true) {
+private fun SmallChip(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    enabled: Boolean = true,
+    modifier: Modifier = Modifier
+) {
     FilterChip(
         selected = selected,
         enabled = enabled,
         onClick = onClick,
-        modifier = Modifier.height(30.dp),
+        modifier = modifier.height(30.dp),
         label = {
             Text(
                 label,
@@ -1851,76 +2078,101 @@ private fun SmallChip(label: String, selected: Boolean, onClick: () -> Unit, ena
     )
 }
 
-/**
- * 「记忆检索」旁的状态指示：本地向量化工具走本机 CPU 推理，
- * 一轮检索要向量化 query 再重排候选（首次还会加载重排模型），耗时较长。
- * 这里如实显示检索的真实生命周期（正在检索中 → 检索完成），避免界面看起来像卡死。
- */
+// ── 选择面板 / 弹窗配色（对齐四份设计稿：纸白底 + 淡紫点缀） ──
+private val PickerInk = Color(0xFF302E60)
+private val PickerMuted = Color(0xFF8886AD)
+private val PickerPurple = Color(0xFF6E60E0)
+private val PickerPurple2 = Color(0xFF9586F0)
+private val PickerSoft = Color(0xFFF1EDFF)
+private val PickerLine = Color(0xFFECE8F4)
+private val PickerBorder = Color(0xFFE3DCFB)
+private val PickerSurface = Color(0xFFFFFEFD)
+private val PickerSoftRow = Color(0xFFF8F6FF)
+private val PickerSearchBg = Color(0xFFFAF9FF)
+private val PickerInactive = Color(0xFFAAA5C5)
+
+/** 设计稿里的圆角方形勾选框（淡紫填充 + 白色对勾） */
 @Composable
-private fun MemorySearchIndicator(state: MemorySearchState, enabled: Boolean) {
-    if (!enabled || state == MemorySearchState.IDLE) return
-    val searching = state == MemorySearchState.SEARCHING
-    Row(
-        Modifier.height(30.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp)
+private fun GenCheckbox(
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+    boxSize: Dp = 20.dp
+) {
+    val shape = RoundedCornerShape(boxSize / 4)
+    Box(
+        modifier
+            .size(boxSize)
+            .clip(shape)
+            .background(if (checked) PickerPurple else Color.White)
+            .border(1.6.dp, if (checked) PickerPurple else PickerInactive, shape)
+            .clickable { onCheckedChange(!checked) },
+        contentAlignment = Alignment.Center
     ) {
-        if (searching) {
-            CircularProgressIndicator(
-                modifier = Modifier.size(14.dp),
-                strokeWidth = 2.dp,
-                color = MaterialTheme.colorScheme.primary
+        if (checked) {
+            Icon(
+                Icons.Filled.Check,
+                contentDescription = null,
+                tint = Color.White,
+                modifier = Modifier.size(boxSize * 0.6f)
             )
         }
+    }
+}
+
+/** 设计稿里的药丸筛选标签：选中态淡紫底 + 紫色文字 */
+@Composable
+private fun GenPill(label: String, selected: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(12.dp)
+    Box(
+        modifier
+            .clip(shape)
+            .background(if (selected) Color(0xFFEEE8FF) else Color.White)
+            .border(1.dp, if (selected) Color(0xFFD9CEFF) else Color(0xFFDDD5FA), shape)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 8.dp)
+    ) {
         Text(
-            if (searching) "正在检索中" else "检索完成",
-            style = MaterialTheme.typography.labelMedium,
-            color = if (searching) MaterialTheme.colorScheme.primary
-            else MaterialTheme.colorScheme.onSurfaceVariant,
+            label,
+            color = if (selected) PickerPurple else Color(0xFF5E5B88),
+            fontSize = 13.sp,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
             maxLines = 1,
             softWrap = false
         )
     }
 }
 
-/** 带标题栏的圆角面板容器 */
+/**
+ * 工具条上方的冒泡小弹窗：检索中 / 生成中等耗时过程的轻量提示。
+ * 带阴影的药丸浮在对话区底部，避免挤占工具条宽度（尤其不再占用「下一章」所在的那一行）。
+ */
 @Composable
-private fun PickerBox(
-    title: String,
-    modifier: Modifier = Modifier,
-    trailing: @Composable (() -> Unit)? = null,
-    content: @Composable ColumnScope.() -> Unit
-) {
-    Surface(
-        modifier = modifier.fillMaxWidth().padding(horizontal = 16.dp),
-        shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-        tonalElevation = 2.dp
+private fun FloatingStatusBubble(text: String, modifier: Modifier = Modifier) {
+    val shape = RoundedCornerShape(50)
+    Row(
+        modifier
+            .shadow(6.dp, shape)
+            .clip(shape)
+            .background(PickerSurface)
+            .border(1.dp, PickerBorder, shape)
+            .padding(horizontal = 14.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        Column {
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    title,
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.weight(1f)
-                )
-                trailing?.invoke()
-            }
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            content()
-        }
+        CircularProgressIndicator(
+            modifier = Modifier.size(13.dp),
+            strokeWidth = 2.dp,
+            color = PickerPurple
+        )
+        Text(text, color = PickerPurple, fontSize = 13.sp, maxLines = 1, softWrap = false)
     }
 }
 
 /** 「梗概 / 正文」两列的固定宽度，保证分卷行与章节行左右对齐 */
 private val ContextColumnWidth = 56.dp
 
-/** 上下文选择：全选 / 梗概 / 正文 + 分卷章节树（三列：纳入上下文 / 梗概 / 正文） */
+/** 上下文选择（对齐设计稿）：全选 / 梗概 / 正文 + 分卷章节树（章节 / 梗概 / 正文 三列） */
 @Composable
 private fun ContextPicker(
     chapters: List<Chapter>,
@@ -1943,126 +2195,184 @@ private fun ContextPicker(
 ) {
     // 各分卷的收起状态（默认展开）
     val collapsed = remember { mutableStateMapOf<Long, Boolean>() }
-    Column(Modifier.padding(bottom = 8.dp)) {
-        PickerBox(
-            title = "选择上下文",
-            trailing = {
-                Text(
-                    "已选 ${selected.size} 章",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .clip(RoundedCornerShape(18.dp))
+            .background(PickerSurface)
+            .border(1.dp, PickerBorder, RoundedCornerShape(18.dp))
+    ) {
+        // 头部：图标 + 标题 + 已选数量
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            Box(
+                Modifier.size(32.dp).clip(RoundedCornerShape(10.dp)).background(PickerSoft),
+                contentAlignment = Alignment.Center
             ) {
-                SmallChip("全选", allSelected, onToggleAll)
-                SmallChip("梗概", summaryAll, onToggleSummary)
-                SmallChip("正文", contentAll, onToggleContent)
-            }
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            // 三列含义表头：纳入上下文 / 梗概 / 正文
-            Row(
-                Modifier.fillMaxWidth().padding(start = 12.dp, end = 8.dp, top = 4.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    "章节",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.weight(1f)
+                Icon(
+                    Icons.Filled.Description,
+                    contentDescription = null,
+                    tint = PickerPurple,
+                    modifier = Modifier.size(17.dp)
                 )
-                Box(Modifier.width(ContextColumnWidth), contentAlignment = Alignment.Center) {
-                    Text(
-                        "梗概",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                Box(Modifier.width(ContextColumnWidth), contentAlignment = Alignment.Center) {
-                    Text(
-                        "正文",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
             }
-            Column(Modifier.heightIn(max = 300.dp).verticalScroll(rememberScrollState())) {
-                if (chapters.isEmpty()) {
-                    Text(
-                        "暂无可选章节",
-                        Modifier.padding(14.dp),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+            Spacer(Modifier.width(10.dp))
+            Text("选择上下文", color = PickerInk, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.weight(1f))
+            Text(
+                "已选 ${selected.size} 章",
+                color = PickerMuted,
+                fontSize = 12.sp,
+                maxLines = 1,
+                softWrap = false
+            )
+        }
+        HorizontalDivider(color = PickerLine)
+        // 工具行：全选 / 梗概 / 正文
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            GenPill("全选", allSelected) { onToggleAll() }
+            GenPill("梗概", summaryAll) { onToggleSummary() }
+            GenPill("正文", contentAll) { onToggleContent() }
+        }
+        // 三列含义表头：章节 / 梗概 / 正文
+        Row(
+            Modifier.fillMaxWidth().padding(start = 14.dp, end = 12.dp, bottom = 2.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("章节", color = PickerMuted, fontSize = 12.sp, modifier = Modifier.weight(1f))
+            GenColumnLabel("梗概")
+            GenColumnLabel("正文")
+        }
+        Column(Modifier.heightIn(max = 300.dp).verticalScroll(rememberScrollState())) {
+            if (chapters.isEmpty()) {
+                Text("暂无可选章节", Modifier.padding(14.dp), color = PickerMuted, fontSize = 13.sp)
+            }
+            volumes.forEach { v ->
+                val list = chapters.filter { it.volumeId == v.id }
+                if (list.isNotEmpty()) {
+                    val expanded = collapsed[v.id] != true
+                    GenVolumeRow(
+                        label = v.title,
+                        picked = list.count { it.id in selected },
+                        total = list.size,
+                        expanded = expanded,
+                        onToggleExpand = { collapsed[v.id] = expanded },
+                        summarySelected = list.all { it.id in summarySelected },
+                        contentSelected = list.all { it.id in contentSelected },
+                        onToggle = { onToggleVolume(v.id) },
+                        onToggleSummary = { onToggleVolumeSummary(v.id) },
+                        onToggleContent = { onToggleVolumeContent(v.id) }
                     )
-                }
-                volumes.forEach { v ->
-                    val list = chapters.filter { it.volumeId == v.id }
-                    if (list.isNotEmpty()) {
-                        val expanded = collapsed[v.id] != true
-                        VolumeRow(
-                            label = v.title,
-                            allSelected = list.all { it.id in selected },
-                            picked = list.count { it.id in selected },
-                            total = list.size,
-                            expanded = expanded,
-                            onToggleExpand = { collapsed[v.id] = expanded },
-                            summarySelected = list.all { it.id in summarySelected },
-                            contentSelected = list.all { it.id in contentSelected },
-                            onToggleSummary = { onToggleVolumeSummary(v.id) },
-                            onToggleContent = { onToggleVolumeContent(v.id) }
-                        ) { onToggleVolume(v.id) }
-                        if (expanded) {
-                            list.forEach { ch ->
-                                ChapterSelectionRow(
-                                    label = ch.title,
-                                    selected = ch.id in selected,
-                                    summary = ch.id in summarySelected,
-                                    content = ch.id in contentSelected,
-                                    startPadding = 26.dp,
-                                    onToggle = { onToggleChapter(ch.id) },
-                                    onToggleSummary = { onToggleChapterSummary(ch.id) },
-                                    onToggleContent = { onToggleChapterContent(ch.id) }
-                                )
-                            }
+                    if (expanded) {
+                        list.forEach { ch ->
+                            GenChapterRow(
+                                label = ch.title,
+                                selected = ch.id in selected,
+                                summary = ch.id in summarySelected,
+                                content = ch.id in contentSelected,
+                                indented = true,
+                                onToggle = { onToggleChapter(ch.id) },
+                                onToggleSummary = { onToggleChapterSummary(ch.id) },
+                                onToggleContent = { onToggleChapterContent(ch.id) }
+                            )
                         }
                     }
                 }
-                chapters.filter { it.volumeId == null }.forEach { ch ->
-                    ChapterSelectionRow(
-                        label = ch.title,
-                        selected = ch.id in selected,
-                        summary = ch.id in summarySelected,
-                        content = ch.id in contentSelected,
-                        startPadding = 6.dp,
-                        onToggle = { onToggleChapter(ch.id) },
-                        onToggleSummary = { onToggleChapterSummary(ch.id) },
-                        onToggleContent = { onToggleChapterContent(ch.id) }
-                    )
-                }
+            }
+            chapters.filter { it.volumeId == null }.forEach { ch ->
+                GenChapterRow(
+                    label = ch.title,
+                    selected = ch.id in selected,
+                    summary = ch.id in summarySelected,
+                    content = ch.id in contentSelected,
+                    indented = false,
+                    onToggle = { onToggleChapter(ch.id) },
+                    onToggleSummary = { onToggleChapterSummary(ch.id) },
+                    onToggleContent = { onToggleChapterContent(ch.id) }
+                )
             }
         }
     }
 }
 
-/** 「梗概 / 正文」列的复选框：固定宽度、居中，保证跨行对齐 */
+/** 表头列名（固定宽度、居中） */
 @Composable
-private fun ContextColumnCheckbox(checked: Boolean, onToggle: () -> Unit) {
+private fun GenColumnLabel(text: String) {
     Box(Modifier.width(ContextColumnWidth), contentAlignment = Alignment.Center) {
-        Checkbox(checked = checked, onCheckedChange = { onToggle() })
+        Text(text, color = PickerMuted, fontSize = 12.sp)
     }
 }
 
-/** 上下文选择里的章节行：章节是否纳入 + 梗概 + 正文三列 */
+/** 「梗概 / 正文」列的勾选框：固定宽度、居中，保证跨行对齐 */
 @Composable
-private fun ChapterSelectionRow(
+private fun GenColumnCheckbox(checked: Boolean, onToggle: () -> Unit) {
+    Box(Modifier.width(ContextColumnWidth), contentAlignment = Alignment.Center) {
+        GenCheckbox(checked = checked, onCheckedChange = { onToggle() })
+    }
+}
+
+/** 上下文里的分卷行（对齐设计稿）：折叠箭头 + 整卷勾选 + 名称 + 已选数 + 梗概 / 正文两列 */
+@Composable
+private fun GenVolumeRow(
+    label: String,
+    picked: Int,
+    total: Int,
+    expanded: Boolean,
+    onToggleExpand: () -> Unit,
+    summarySelected: Boolean,
+    contentSelected: Boolean,
+    onToggle: () -> Unit,
+    onToggleSummary: () -> Unit,
+    onToggleContent: () -> Unit
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .background(PickerSoftRow)
+            .padding(start = 4.dp, end = 12.dp, top = 6.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        IconButton(onClick = onToggleExpand, modifier = Modifier.size(26.dp)) {
+            Icon(
+                if (expanded) Icons.Filled.KeyboardArrowDown
+                else Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = if (expanded) "收起" else "展开",
+                modifier = Modifier.size(18.dp),
+                tint = PickerMuted
+            )
+        }
+        GenCheckbox(checked = total > 0 && picked == total, onCheckedChange = { onToggle() })
+        Spacer(Modifier.width(8.dp))
+        Text(
+            label,
+            color = PickerInk,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+        Spacer(Modifier.width(6.dp))
+        Text("$picked/$total", color = PickerMuted, fontSize = 12.sp, maxLines = 1, softWrap = false)
+        GenColumnCheckbox(summarySelected, onToggleSummary)
+        GenColumnCheckbox(contentSelected, onToggleContent)
+    }
+}
+
+/** 上下文里的章节行：是否纳入 + 梗概 + 正文三列 */
+@Composable
+private fun GenChapterRow(
     label: String,
     selected: Boolean,
     summary: Boolean,
     content: Boolean,
-    startPadding: Dp,
+    indented: Boolean,
     onToggle: () -> Unit,
     onToggleSummary: () -> Unit,
     onToggleContent: () -> Unit
@@ -2071,108 +2381,29 @@ private fun ChapterSelectionRow(
         Modifier
             .fillMaxWidth()
             .clickable(onClick = onToggle)
-            .padding(start = startPadding, end = 8.dp, top = 2.dp, bottom = 2.dp),
+            .padding(start = if (indented) 22.dp else 12.dp, end = 12.dp, top = 6.dp, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Checkbox(checked = selected, onCheckedChange = { onToggle() })
+        if (indented) {
+            Box(Modifier.size(6.dp).clip(CircleShape).background(PickerInactive))
+            Spacer(Modifier.width(10.dp))
+        }
+        GenCheckbox(checked = selected, onCheckedChange = { onToggle() })
+        Spacer(Modifier.width(8.dp))
         Text(
             label,
-            style = MaterialTheme.typography.bodySmall,
+            color = PickerInk,
+            fontSize = 14.sp,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f)
         )
-        ContextColumnCheckbox(summary, onToggleSummary)
-        ContextColumnCheckbox(content, onToggleContent)
+        GenColumnCheckbox(summary, onToggleSummary)
+        GenColumnCheckbox(content, onToggleContent)
     }
 }
 
-/**
- * 分卷行：整卷选中 + 已选数量；[onToggleExpand] 非空时左侧显示展开/收起箭头。
- * [summarySelected] / [contentSelected] 非空时，右侧追加「梗概 / 正文」两列复选框。
- */
-@Composable
-private fun VolumeRow(
-    label: String,
-    allSelected: Boolean,
-    picked: Int,
-    total: Int,
-    expanded: Boolean = true,
-    onToggleExpand: (() -> Unit)? = null,
-    summarySelected: Boolean? = null,
-    contentSelected: Boolean? = null,
-    onToggleSummary: (() -> Unit)? = null,
-    onToggleContent: (() -> Unit)? = null,
-    onToggle: () -> Unit
-) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
-            .clickable(onClick = onToggle)
-            .padding(start = 2.dp, end = 8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        if (onToggleExpand != null) {
-            IconButton(onClick = onToggleExpand, modifier = Modifier.size(28.dp)) {
-                Icon(
-                    if (expanded) Icons.Filled.KeyboardArrowDown
-                    else Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                    contentDescription = if (expanded) "收起" else "展开",
-                    modifier = Modifier.size(18.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        }
-        Checkbox(checked = allSelected, onCheckedChange = { onToggle() })
-        Text(
-            "$label  $picked/$total",
-            style = MaterialTheme.typography.labelLarge,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f)
-        )
-        if (summarySelected != null && onToggleSummary != null) {
-            ContextColumnCheckbox(summarySelected, onToggleSummary)
-        }
-        if (contentSelected != null && onToggleContent != null) {
-            ContextColumnCheckbox(contentSelected, onToggleContent)
-        }
-    }
-}
-
-@Composable
-private fun ChapterRow(
-    label: String,
-    selected: Boolean,
-    startPadding: Dp,
-    useCheckbox: Boolean = false,
-    onToggle: () -> Unit
-) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onToggle)
-            .padding(start = startPadding, end = 12.dp, top = 2.dp, bottom = 2.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        if (useCheckbox) {
-            Checkbox(checked = selected, onCheckedChange = { onToggle() })
-        } else {
-            RadioButton(selected = selected, onClick = onToggle, modifier = Modifier.size(28.dp))
-        }
-        Text(
-            label,
-            style = if (useCheckbox) MaterialTheme.typography.bodySmall
-            else MaterialTheme.typography.bodyMedium,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
-    }
-}
-
-/** 大纲内容选择：按分类（人设 / 世界观 / 故事大纲 / 灵感库 / 自定义标签）分组整组勾选 */
+/** 大纲内容选择（对齐设计稿）：按分类（人设 / 世界观 / 故事大纲 / 灵感库 / 自定义标签）分组整组勾选 */
 @Composable
 private fun OutlinePicker(
     items: List<OutlineItem>,
@@ -2195,60 +2426,144 @@ private fun OutlinePicker(
     }
     val visibleIds = visible.map { it.id }.toSet()
     val visibleAllSelected = visibleIds.isNotEmpty() && visibleIds.all { it in selected }
-    Column(Modifier.padding(bottom = 8.dp)) {
-        PickerBox(
-            title = "选择大纲",
-            trailing = {
-                Text(
-                    "已选 ${selected.size} 项",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .clip(RoundedCornerShape(18.dp))
+            .background(PickerSurface)
+            .border(1.dp, PickerBorder, RoundedCornerShape(18.dp))
+    ) {
+        // 头部：图标 + 标题 + 已选数量
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                Modifier.size(32.dp).clip(RoundedCornerShape(10.dp)).background(PickerSoft),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    Icons.Filled.ReceiptLong,
+                    contentDescription = null,
+                    tint = PickerPurple,
+                    modifier = Modifier.size(17.dp)
                 )
             }
+            Spacer(Modifier.width(10.dp))
+            Text("选择大纲", color = PickerInk, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.weight(1f))
+            Text(
+                "已选 ${selected.size} 项",
+                color = PickerMuted,
+                fontSize = 12.sp,
+                maxLines = 1,
+                softWrap = false
+            )
+        }
+        HorizontalDivider(color = PickerLine)
+        // 筛选：全选 / 全部大纲 / 常驻大纲 / 普通大纲
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Row(
-                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                SmallChip("全选", visibleAllSelected, { onToggleAll(visibleIds) })
-                SmallChip("全部大纲", scopeFilter == 0, { scopeFilter = 0 })
-                SmallChip("常驻大纲", scopeFilter == 1, { scopeFilter = 1 })
-                SmallChip("普通大纲", scopeFilter == 2, { scopeFilter = 2 })
+            GenPill("全选", visibleAllSelected) { onToggleAll(visibleIds) }
+            GenPill("全部大纲", scopeFilter == 0) { scopeFilter = 0 }
+            GenPill("常驻大纲", scopeFilter == 1) { scopeFilter = 1 }
+            GenPill("普通大纲", scopeFilter == 2) { scopeFilter = 2 }
+        }
+        Column(Modifier.heightIn(max = 260.dp).verticalScroll(rememberScrollState())) {
+            if (visible.isEmpty()) {
+                Text("暂无可选大纲", Modifier.padding(14.dp), color = PickerMuted, fontSize = 13.sp)
             }
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            Column(Modifier.heightIn(max = 240.dp).verticalScroll(rememberScrollState())) {
-                if (visible.isEmpty()) {
-                    Text(
-                        "暂无可选大纲",
-                        Modifier.padding(14.dp),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                visible.groupBy { it.category }.forEach { (category, list) ->
-                    val expanded = collapsed[category] != true
-                    VolumeRow(
-                        label = outlineCategoryLabel(category),
-                        allSelected = list.all { it.id in selected },
-                        picked = list.count { it.id in selected },
-                        total = list.size,
-                        expanded = expanded,
-                        onToggleExpand = { collapsed[category] = expanded }
-                    ) { onToggleCategory(category) }
-                    if (expanded) {
-                        list.forEach { item ->
-                            ChapterRow(
-                                label = item.title,
-                                selected = item.id in selected,
-                                startPadding = 26.dp,
-                                useCheckbox = true
-                            ) { onToggle(item.id) }
-                        }
+            visible.groupBy { it.category }.forEach { (category, list) ->
+                val expanded = collapsed[category] != true
+                GenGroupRow(
+                    label = outlineCategoryLabel(category),
+                    picked = list.count { it.id in selected },
+                    total = list.size,
+                    expanded = expanded,
+                    onToggleExpand = { collapsed[category] = expanded },
+                    onToggle = { onToggleCategory(category) }
+                )
+                if (expanded) {
+                    list.forEach { item ->
+                        GenEntryRow(
+                            label = item.title,
+                            selected = item.id in selected,
+                            onToggle = { onToggle(item.id) }
+                        )
                     }
                 }
             }
         }
+    }
+}
+
+/** 大纲分类分组行：折叠箭头 + 整组勾选 + 分类名 + 已选数 */
+@Composable
+private fun GenGroupRow(
+    label: String,
+    picked: Int,
+    total: Int,
+    expanded: Boolean,
+    onToggleExpand: () -> Unit,
+    onToggle: () -> Unit
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .background(PickerSoftRow)
+            .padding(start = 4.dp, end = 12.dp, top = 6.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        IconButton(onClick = onToggleExpand, modifier = Modifier.size(26.dp)) {
+            Icon(
+                if (expanded) Icons.Filled.KeyboardArrowDown
+                else Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = if (expanded) "收起" else "展开",
+                modifier = Modifier.size(18.dp),
+                tint = PickerMuted
+            )
+        }
+        GenCheckbox(checked = total > 0 && picked == total, onCheckedChange = { onToggle() })
+        Spacer(Modifier.width(10.dp))
+        Text(
+            label,
+            color = PickerInk,
+            fontSize = 15.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+        Text("$picked/$total", color = PickerMuted, fontSize = 12.sp, maxLines = 1, softWrap = false)
+    }
+}
+
+/** 大纲条目行：勾选框 + 标题 */
+@Composable
+private fun GenEntryRow(label: String, selected: Boolean, onToggle: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onToggle)
+            .padding(start = 40.dp, end = 12.dp, top = 7.dp, bottom = 7.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        GenCheckbox(checked = selected, onCheckedChange = { onToggle() })
+        Spacer(Modifier.width(10.dp))
+        Text(
+            label,
+            color = PickerInk,
+            fontSize = 14.sp,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
     }
 }
 
@@ -2800,7 +3115,9 @@ private fun ChatMessageItem(
     onViewPrompt: (ChatMessage) -> Unit,
     onStop: () -> Unit,
     /** 侧边栏 AI 助手专属：把这条回答的正文写入当前章节；为空则不显示该操作（如导航栏 AI 对话页） */
-    onWriteToChapter: ((String) -> Unit)? = null
+    onWriteToChapter: ((String) -> Unit)? = null,
+    /** 侧边栏 AI 助手专属：把「生成梗概」产出的回答写入当前章节梗概；为空则不显示该操作 */
+    onWriteSummary: ((ChatMessage) -> Unit)? = null
 ) {
     when (entry) {
         is ChatEntry.User -> {
@@ -2889,7 +3206,8 @@ private fun ChatMessageItem(
                             onSaveAndSend = onSaveAndSend,
                             onViewLog = onViewLog,
                             onViewPrompt = onViewPrompt,
-                            onWriteToChapter = onWriteToChapter
+                            onWriteToChapter = onWriteToChapter,
+                            onWriteSummary = onWriteSummary
                         )
                     }
                 }
@@ -2909,7 +3227,8 @@ private fun ChatMessageItem(
             onSaveAndSend = onSaveAndSend,
             onViewLog = onViewLog,
             onViewPrompt = onViewPrompt,
-            onWriteToChapter = onWriteToChapter
+            onWriteToChapter = onWriteToChapter,
+            onWriteSummary = onWriteSummary
         )
     }
 }
@@ -2929,7 +3248,9 @@ private fun AssistantBlock(
     onSaveAndSend: (Long, String, Long) -> Unit,
     onViewLog: (ChatMessage) -> Unit,
     onViewPrompt: (ChatMessage) -> Unit,
-    onWriteToChapter: ((String) -> Unit)? = null
+    onWriteToChapter: ((String) -> Unit)? = null,
+    /** 侧边栏 AI 助手专属：把「生成梗概」产出的回答写入当前章节梗概；为空则不显示该操作 */
+    onWriteSummary: ((ChatMessage) -> Unit)? = null
 ) {
     if (ui.editingId == msg.id) {
         MessageCard(
@@ -2989,6 +3310,15 @@ private fun AssistantBlock(
                     MessageAction(Icons.Filled.EditNote, "写入当前章节") {
                         ui.pendingDeleteId = null
                         write(msg.content)
+                    }
+                }
+                // 单独「生成梗概」产出的回答：写入本章梗概改由用户点此图标触发（不再自动写回）
+                onWriteSummary?.let { write ->
+                    if (PromptLog.decode(msg.promptLog)?.genKind == GEN_KIND_SUMMARY) {
+                        MessageAction(Icons.Filled.NoteAdd, "写入梗概") {
+                            ui.pendingDeleteId = null
+                            write(msg)
+                        }
                     }
                 }
                 DeleteAction(msg.id, ui, onDelete)
@@ -3071,14 +3401,16 @@ private fun MessageCard(
 }
 
 /**
- * 统一的对话输入区（参照原型 composer）：外侧圆角描边卡片，内嵌无边框输入框与圆形发送按钮。
+ * 统一的对话输入区（参照原型 composer）：外侧圆角描边卡片，内嵌无边框输入框。
  * 输入行随内容高度自适应，最多 5 行。
+ * 侧边 AI 抽屉的发送按钮已挪到底部操作行，故该入口传 [showSend] = false 隐藏内嵌圆形发送按钮。
  */
 @Composable
 private fun ChatComposer(
     value: String,
     onValueChange: (String) -> Unit,
     placeholder: String,
+    showSend: Boolean = true,
     sendEnabled: Boolean,
     onSend: () -> Unit,
     modifier: Modifier = Modifier
@@ -3110,25 +3442,27 @@ private fun ChatComposer(
                     disabledIndicatorColor = Color.Transparent
                 )
             )
-            Box(
-                Modifier
-                    .padding(end = 2.dp, bottom = 5.dp)
-                    .size(38.dp)
-                    .clip(CircleShape)
-                    .background(
-                        if (sendEnabled) MaterialTheme.colorScheme.primaryContainer
-                        else MaterialTheme.colorScheme.surfaceVariant
+            if (showSend) {
+                Box(
+                    Modifier
+                        .padding(end = 2.dp, bottom = 5.dp)
+                        .size(38.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (sendEnabled) MaterialTheme.colorScheme.primaryContainer
+                            else MaterialTheme.colorScheme.surfaceVariant
+                        )
+                        .clickable(enabled = sendEnabled, onClick = onSend),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.Send,
+                        contentDescription = "发送",
+                        modifier = Modifier.size(18.dp),
+                        tint = if (sendEnabled) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    .clickable(enabled = sendEnabled, onClick = onSend),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    Icons.AutoMirrored.Filled.Send,
-                    contentDescription = "发送",
-                    modifier = Modifier.size(18.dp),
-                    tint = if (sendEnabled) MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                }
             }
         }
     }
@@ -3806,7 +4140,7 @@ private fun ChapterPickerDialog(
     )
 }
 
-/** 大纲多选弹窗：按标签分类筛选 + 搜索标题 / 内容；支持常驻 / 普通大纲筛选 */
+/** 大纲多选弹窗（对齐设计稿）：搜索标题 / 内容 + 分类标签筛选 + 全选 + 取消 / 确定 */
 @Composable
 private fun OutlinePickerDialog(
     items: List<OutlineItem>,
@@ -3822,107 +4156,216 @@ private fun OutlinePickerDialog(
     showCancel: Boolean = false
 ) {
     var search by remember { mutableStateOf("") }
-    // 标签筛选：null=全部，否则为分类存储值
+    // 分类标签筛选：null=全部，否则为分类存储值
     var categoryFilter by remember { mutableStateOf<String?>(null) }
-    // 常驻筛选：0=全部，1=常驻，2=普通
-    var scopeFilter by remember { mutableIntStateOf(0) }
     val categories = items.map { it.category }.distinct()
-
+    val q = search.trim()
     val filtered = items.filter { item ->
         val matchCategory = categoryFilter == null || item.category == categoryFilter
-        val matchScope = when (scopeFilter) {
-            1 -> item.category in pinnedCategories
-            2 -> item.category !in pinnedCategories
-            else -> true
-        }
-        val q = search.trim()
         val matchSearch = q.isBlank() ||
             item.title.contains(q, ignoreCase = true) ||
             item.content.contains(q, ignoreCase = true)
-        matchCategory && matchScope && matchSearch
+        matchCategory && matchSearch
     }
     val filteredIds = filtered.map { it.id }.toSet()
     val filteredAllSelected = filteredIds.isNotEmpty() && filteredIds.all { it in selected }
 
-    AlertDialog(
+    Dialog(
         onDismissRequest = onDismiss,
-        title = { Text("选择大纲（已选 ${selected.size}）") },
-        text = {
-            Column {
-                OutlinedTextField(
-                    value = search,
-                    onValueChange = { search = it },
-                    placeholder = { Text("搜索大纲标题 / 内容") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Spacer(Modifier.height(8.dp))
-                Row(
-                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+                .clip(RoundedCornerShape(24.dp))
+                .background(PickerSurface)
+        ) {
+            // 头部：圆形图标 + 标题 + 已选数量 + 关闭
+            Row(
+                Modifier.fillMaxWidth().padding(start = 18.dp, end = 8.dp, top = 16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    Modifier.size(44.dp).clip(CircleShape).background(PickerSoft),
+                    contentAlignment = Alignment.Center
                 ) {
-                    FilterChip(selected = scopeFilter == 0, onClick = { scopeFilter = 0 },
-                        label = { Text("全部大纲") })
-                    FilterChip(selected = scopeFilter == 1, onClick = { scopeFilter = 1 },
-                        label = { Text("常驻大纲") })
-                    FilterChip(selected = scopeFilter == 2, onClick = { scopeFilter = 2 },
-                        label = { Text("普通大纲") })
-                    FilterChip(selected = filteredAllSelected, onClick = { onToggleAll(filteredIds) },
-                        label = { Text("全选/取消") }, enabled = filteredIds.isNotEmpty())
+                    Icon(
+                        Icons.Filled.ReceiptLong,
+                        contentDescription = null,
+                        tint = PickerPurple,
+                        modifier = Modifier.size(22.dp)
+                    )
                 }
-                Spacer(Modifier.height(4.dp))
-                if (categories.size > 1) {
-                    Row(
-                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        FilterChip(selected = categoryFilter == null, onClick = { categoryFilter = null },
-                            label = { Text("全部标签") })
-                        categories.forEach { c ->
-                            FilterChip(selected = categoryFilter == c, onClick = { categoryFilter = c },
-                                label = { Text(outlineCategoryLabel(c)) })
-                        }
+                Spacer(Modifier.width(12.dp))
+                Text("选择大纲", color = PickerInk, fontSize = 21.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.width(6.dp))
+                Text("（已选 ${selected.size}）", color = PickerMuted, fontSize = 14.sp, maxLines = 1, softWrap = false)
+                Spacer(Modifier.weight(1f))
+                IconButton(onClick = onDismiss) {
+                    Icon(Icons.Filled.Close, contentDescription = "关闭", tint = PickerMuted)
+                }
+            }
+            // 搜索框
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 18.dp, vertical = 12.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(PickerSearchBg)
+                    .border(1.dp, PickerBorder, RoundedCornerShape(16.dp))
+                    .padding(horizontal = 12.dp, vertical = 11.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(Icons.Filled.Search, contentDescription = null, tint = PickerMuted, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Box(Modifier.weight(1f)) {
+                    if (search.isEmpty()) {
+                        Text("搜索大纲标题 / 内容", color = PickerMuted, fontSize = 14.sp)
                     }
-                    Spacer(Modifier.height(4.dp))
+                    BasicTextField(
+                        value = search,
+                        onValueChange = { search = it },
+                        singleLine = true,
+                        textStyle = MaterialTheme.typography.bodyMedium.copy(color = PickerInk),
+                        cursorBrush = SolidColor(PickerPurple),
+                        modifier = Modifier.fillMaxWidth()
+                    )
                 }
-                HorizontalDivider()
-                LazyColumn(Modifier.heightIn(max = 320.dp)) {
+            }
+            // 分类标签筛选：全部大纲 + 各分类
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 18.dp, vertical = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                GenPill("全部大纲", categoryFilter == null) { categoryFilter = null }
+                categories.forEach { c ->
+                    GenPill(outlineCategoryLabel(c), categoryFilter == c) { categoryFilter = c }
+                }
+            }
+            // 列表卡：全选大纲 + 条目
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 18.dp, vertical = 12.dp)
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(Color.White)
+                    .border(1.dp, PickerBorder, RoundedCornerShape(18.dp))
+            ) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .background(PickerSoftRow)
+                        .clickable(enabled = filteredIds.isNotEmpty()) { onToggleAll(filteredIds) }
+                        .padding(horizontal = 14.dp, vertical = 13.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    GenCheckbox(
+                        checked = filteredAllSelected,
+                        onCheckedChange = { onToggleAll(filteredIds) },
+                        boxSize = 22.dp
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Text("全选大纲", color = PickerInk, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.weight(1f))
+                    Text(
+                        "${filtered.count { it.id in selected }}/${filtered.size}",
+                        color = PickerMuted,
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                }
+                HorizontalDivider(color = PickerLine)
+                LazyColumn(Modifier.heightIn(max = 340.dp)) {
                     if (filtered.isEmpty()) {
                         item {
-                            Text(
-                                "暂无匹配大纲",
-                                Modifier.padding(vertical = 12.dp),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                            Text("暂无匹配大纲", Modifier.padding(16.dp), color = PickerMuted, fontSize = 13.sp)
                         }
                     }
                     items(filtered, key = { it.id }) { item ->
                         Row(
                             Modifier
                                 .fillMaxWidth()
-                                .clickable { onToggle(item.id) },
-                            verticalAlignment = Alignment.CenterVertically
+                                .clickable { onToggle(item.id) }
+                                .padding(horizontal = 14.dp, vertical = 11.dp),
+                            verticalAlignment = Alignment.Top
                         ) {
-                            Checkbox(checked = item.id in selected, onCheckedChange = { onToggle(item.id) })
-                            Column {
-                                Text(item.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            GenCheckbox(
+                                checked = item.id in selected,
+                                onCheckedChange = { onToggle(item.id) },
+                                boxSize = 22.dp
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    item.title,
+                                    color = PickerInk,
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Spacer(Modifier.height(3.dp))
                                 Text(
                                     outlineCategoryLabel(item.category),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    color = PickerPurple,
+                                    fontSize = 12.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
+                                if (item.content.isNotBlank()) {
+                                    Spacer(Modifier.height(3.dp))
+                                    Text(
+                                        item.content,
+                                        color = PickerMuted,
+                                        fontSize = 12.sp,
+                                        lineHeight = 18.sp,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
                             }
                         }
+                        HorizontalDivider(color = PickerLine)
                     }
                 }
             }
-        },
-        confirmButton = { TextButton(onClick = onConfirm) { Text(confirmText) } },
-        dismissButton = if (showCancel) {
-            { TextButton(onClick = onDismiss) { Text("取消") } }
-        } else null
-    )
+            // 底部：取消 / 确定
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 14.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                if (showCancel) {
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(15.dp))
+                            .border(1.dp, PickerBorder, RoundedCornerShape(15.dp))
+                            .clickable(onClick = onDismiss)
+                            .padding(vertical = 14.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("取消", color = PickerInk, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(15.dp))
+                        .background(Brush.linearGradient(listOf(PickerPurple2, PickerPurple)))
+                        .clickable(onClick = onConfirm)
+                        .padding(vertical = 14.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(confirmText, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
+        }
+    }
 }
 
 /** AI 工具多选弹窗（目前仅「写入大纲工具」，以后新增工具自动出现在列表里） */

@@ -665,12 +665,27 @@ fun ChapterEditorScreen(
                 if (content.text.isBlank()) writeAiToChapter(text) else pendingAiWrite = text
             },
             onGeneratedSummary = { applyGeneratedSummary(it) },
-            onNewChapter = {
-                // 新建章节后跳转到新章节，并保持侧边 AI 对话栏打开
-                vm.createChapter(null) { newId ->
-                    currentId = newId
+            onNextChapter = {
+                // 跳转本卷下一章节；没有下一章时先新建一章（落在本卷）再跳过去，并保持侧边 AI 对话栏打开
+                val cur = chapters.firstOrNull { it.id == currentId }
+                val ordered = chapters
+                    .filter { it.volumeId == cur?.volumeId }
+                    .sortedBy { it.sortOrder }
+                val idx = ordered.indexOfFirst { it.id == currentId }
+                val next = if (idx >= 0) ordered.getOrNull(idx + 1) else null
+                if (next != null) {
+                    currentId = next.id
                     aiOpen = true
+                } else {
+                    vm.createChapter(cur?.volumeId) { newId ->
+                        currentId = newId
+                        aiOpen = true
+                    }
                 }
+            },
+            onChapterRenamed = { id, name ->
+                // 抽屉里改了本章名：同步本地缓冲，避免退出编辑页时用旧标题覆盖回数据库
+                if (id == currentId) title = name
             }
         )
     }

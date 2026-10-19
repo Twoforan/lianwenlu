@@ -65,6 +65,27 @@ class GenerationPromptTest {
     }
 
     @Test
+    fun buildGenerationPrefixTurns_mirrorsChatBlockOrderAndHeader() {
+        val turns = buildGenerationPrefixTurns(
+            customPrefix = "前缀文本",
+            writeOutlineTool = true,
+            chapterImportTool = true,
+            reference = "书A"
+        )
+        // 与聊天发送的块顺序一致：自定义前缀 → 工具块 → 「以下是参考资料」
+        assertEquals(4, turns.size)
+        assertTrue(turns.all { it.role == ChatRole.SYSTEM })
+        assertEquals("前缀文本", turns[0].content)
+        // 参考资料抬头必须与聊天发送逐字一致，两条路径才能命中同一段供应商侧前缀缓存
+        assertEquals(REFERENCE_BLOCK_HEADER + "书A", turns[3].content)
+    }
+
+    @Test
+    fun buildGenerationPrefixTurns_skipsBlankBlocks() {
+        assertTrue(buildGenerationPrefixTurns("", false, false, "").isEmpty())
+    }
+
+    @Test
     fun buildSummaryReferenceBlock_injectedTagsOnlyShowCrossReference() {
         val block = buildSummaryReferenceBlock(
             outlineIds = listOf(1L, 2L),

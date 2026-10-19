@@ -124,6 +124,9 @@ class Prefs(private val context: Context) {
         val genContentMemoryMode = stringPreferencesKey("gen_content_memory_mode")
         val genContentWithSummary = booleanPreferencesKey("gen_content_with_summary")
 
+        // 生成工具（生成梗概 / 生成正文）的请求是否携带本会话历史对话（默认关闭）
+        val genCarryHistory = booleanPreferencesKey("gen_carry_history")
+
         // 长期记忆（书本向量化）：向量化工具（互斥）、默认开启、自动续跑、默认勾选检索
         val memoryToolMode = stringPreferencesKey("memory_tool_mode")
         val memoryEmbeddingBaseUrl = stringPreferencesKey("memory_embedding_base_url")
@@ -221,6 +224,14 @@ class Prefs(private val context: Context) {
     /** 「生成正文」是否同时生成梗概（生成后静默写入本章梗概，默认关闭） */
     val genContentWithSummary: Flow<Boolean> =
         context.dataStore.data.map { it[K.genContentWithSummary] ?: false }
+
+    /**
+     * 生成工具（生成梗概 / 生成正文）的请求是否携带本会话历史对话（默认关闭）。
+     * 关闭：只复用与聊天请求逐字一致的前置块，缓存命中长度恒定；
+     * 开启：在前置块之后追加本会话历史，随轮次累积，命中率更高（生成上下文包含历史对话）。
+     */
+    val genCarryHistory: Flow<Boolean> =
+        context.dataStore.data.map { it[K.genCarryHistory] ?: false }
 
     /** 向量化工具（互斥）：api = 厂商 Embedding API；local = 本地 GGUF 工具；off = 关闭 */
     val memoryToolMode: Flow<String> =
@@ -361,6 +372,7 @@ class Prefs(private val context: Context) {
     }
     suspend fun setGenContentMemoryMode(v: RetrievalMode) = writePrefs { it[K.genContentMemoryMode] = v.storage }
     suspend fun setGenContentWithSummary(v: Boolean) = writePrefs { it[K.genContentWithSummary] = v }
+    suspend fun setGenCarryHistory(v: Boolean) = writePrefs { it[K.genCarryHistory] = v }
     suspend fun setMemoryToolMode(v: String) = writePrefs { it[K.memoryToolMode] = v }
     suspend fun setMemoryEmbeddingBaseUrl(v: String) = writePrefs { it[K.memoryEmbeddingBaseUrl] = v }
     suspend fun setMemoryEmbeddingApiKey(v: String) = writePrefs { it[K.memoryEmbeddingApiKey] = v }

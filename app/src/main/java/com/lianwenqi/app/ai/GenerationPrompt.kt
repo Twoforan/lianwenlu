@@ -1,6 +1,8 @@
 package com.lianwenqi.app.ai
 
 import com.lianwenqi.app.data.entity.ChatRole
+import com.lianwenqi.app.util.AI_CHAPTER_TOOL_PROMPT
+import com.lianwenqi.app.util.AI_OUTLINE_TOOL_PROMPT
 import com.lianwenqi.app.util.TextTool
 
 /** 字数兜底结果：[over] 表示被截断（原输出超上限），[under] 表示原输出低于下限（不重试，仅提示） */
@@ -12,6 +14,31 @@ data class WordRangeResult(
 
 /** 句末标点 / 换行：截断时只切在这些位置，保证留下的都是完整句子 */
 private val SENTENCE_ENDINGS = "。！？…\n!?.;；"
+
+/** 用户输入留空时的兜底指令（构建请求与「本轮提示词」日志共用，保证二者逐字一致） */
+const val SUMMARY_FALLBACK_INPUT = "请根据以上资料生成本章梗概。"
+const val CONTENT_FALLBACK_INPUT = "请开始撰写本章正文。"
+
+/** 「参考资料」块的固定抬头（聊天与生成两条路径共用同一字面量，保证共享前缀逐字节一致） */
+const val REFERENCE_BLOCK_HEADER = "以下是参考资料，请在写作时参考：\n"
+
+/**
+ * 生成请求与聊天请求共用的前段块：自定义前缀 → 工具块（勾选时）→ 「以下是参考资料」。
+ * 顺序与 [com.lianwenqi.app.data.SendChatMessageUseCase] 组装聊天请求时完全一致，
+ * 用来让两边命中同一段供应商侧前缀缓存；生成专用块（[buildSummaryTurns] / [buildContentTurns]）
+ * 在本函数结果之后追加（需要携带历史对话时，历史插在两者中间）。
+ */
+fun buildGenerationPrefixTurns(
+    customPrefix: String,
+    writeOutlineTool: Boolean,
+    chapterImportTool: Boolean,
+    reference: String
+): List<ChatTurn> = buildList {
+    if (customPrefix.isNotBlank()) add(ChatTurn(ChatRole.SYSTEM, customPrefix))
+    if (writeOutlineTool) add(ChatTurn(ChatRole.SYSTEM, AI_OUTLINE_TOOL_PROMPT))
+    if (chapterImportTool) add(ChatTurn(ChatRole.SYSTEM, AI_CHAPTER_TOOL_PROMPT))
+    if (reference.isNotBlank()) add(ChatTurn(ChatRole.SYSTEM, REFERENCE_BLOCK_HEADER + reference))
+}
 
 /** 正文段落分隔的块标题（与 [buildContentTurns] 一一对应） */
 private const val HEAD_SUMMARY = "【本章梗概】"
@@ -62,7 +89,7 @@ fun buildSummaryTurns(
     return buildList {
         add(ChatTurn(ChatRole.SYSTEM, instruction))
         if (referenceBlock.isNotBlank()) add(ChatTurn(ChatRole.SYSTEM, referenceBlock))
-        add(ChatTurn(ChatRole.USER, input.trim().ifBlank { "请根据以上资料生成本章梗概。" }))
+        add(ChatTurn(ChatRole.USER, input.trim().ifBlank { SUMMARY_FALLBACK_INPUT }))
     }
 }
 
@@ -111,7 +138,7 @@ fun buildContentTurns(
     return buildList {
         add(ChatTurn(ChatRole.SYSTEM, instruction))
         if (reference.isNotBlank()) add(ChatTurn(ChatRole.SYSTEM, reference))
-        add(ChatTurn(ChatRole.USER, userInput.trim().ifBlank { "请开始撰写本章正文。" }))
+        add(ChatTurn(ChatRole.USER, userInput.trim().ifBlank { CONTENT_FALLBACK_INPUT }))
     }
 }
 

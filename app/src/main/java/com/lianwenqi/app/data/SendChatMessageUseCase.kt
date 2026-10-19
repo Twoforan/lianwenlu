@@ -4,6 +4,7 @@ import com.lianwenqi.app.ai.AiError
 import com.lianwenqi.app.ai.AiRequest
 import com.lianwenqi.app.ai.AiResult
 import com.lianwenqi.app.ai.ChatTurn
+import com.lianwenqi.app.ai.REFERENCE_BLOCK_HEADER
 import com.lianwenqi.app.data.entity.AiModel
 import com.lianwenqi.app.data.entity.ChatMessage
 import com.lianwenqi.app.data.entity.ChatRole
@@ -21,6 +22,9 @@ import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+
+/** [PromptLog.genKind] 取值：空表示普通对话，「生成梗概」为单独调用该功能产出的回答 */
+const val GEN_KIND_SUMMARY = "summary"
 
 /** 日志里的一个可展开节点（标题 + 正文） */
 @Serializable
@@ -53,7 +57,12 @@ data class PromptLog(
     /** 本轮用户输入的提示词 */
     val userPrompt: String = "",
     /** 本轮实际发送的完整提示词（按角色顺序拼接） */
-    val fullPrompt: String = ""
+    val fullPrompt: String = "",
+    /**
+     * 本轮产出的类型标记：空表示普通对话；[GEN_KIND_SUMMARY] 表示单独「生成梗概」产出的回答，
+     * 操作栏据此显示「写入梗概」图标（回答只有点该图标才写回本章，不再自动写回）。
+     */
+    val genKind: String = ""
 ) {
     fun encode(): String = promptLogJson.encodeToString(serializer(), this)
 
@@ -237,7 +246,7 @@ class SendChatMessageUseCase(
                 add(ChatTurn(ChatRole.SYSTEM, AI_CHAPTER_TOOL_PROMPT))
             }
             if (reference.isNotBlank()) {
-                add(ChatTurn(ChatRole.SYSTEM, "以下是参考资料，请在写作时参考：\n$reference"))
+                add(ChatTurn(ChatRole.SYSTEM, REFERENCE_BLOCK_HEADER + reference))
             }
             addAll(history)
             // 编辑后继续：历史以助手消息结尾时，补一个「继续」的轮次
