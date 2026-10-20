@@ -344,6 +344,18 @@ class AiChatViewModel(
         generationMessage.value = null
     }
 
+    /**
+     * 对话分组的展开状态（键为分组 key）。
+     * 默认全部收起成块；用户点开 / 收起后写入偏好，下次进入沿用上次的效果。
+     */
+    val expandedChatGroups: StateFlow<Set<String>> =
+        prefs.chatExpandedGroups.stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
+
+    /** 记录用户对某个对话分组的展开 / 收起操作 */
+    fun setChatGroupExpanded(key: String, expanded: Boolean) = viewModelScope.launch {
+        prefs.setChatGroupExpanded(key, expanded)
+    }
+
     private var generationJob: Job? = null
     private var generationCancelled = false
     private var generationOutlinePick: CompletableDeferred<List<Long>?>? = null
@@ -411,6 +423,8 @@ class AiChatViewModel(
             promptExtra = ref.extra,
             editingId = editingUserMessageId.value
         )
+        // 提示词已随本轮用户消息落库（相当于发送成功），清空输入框，避免下一轮误重复发送
+        input.value = ""
         // 选定标签的内容已随本轮消息落库，此时记入前缀去重（后续轮次只写「参见大纲『X』」）
         markGenerationOutlines(sid, ref.sessionPrefix, ref.freshOutlineIds)
         // 生成请求：聊天同构前缀块 +（开关开启时）「前情提要」参考资料块 + 生成专用块（指令 + 新增参考资料 + 用户输入）
@@ -461,6 +475,8 @@ class AiChatViewModel(
             return@launchGeneration
         }
         val chapterTitle = bookRepository.getChapter(chapterId)?.title.orEmpty()
+        // 先固定本轮提示词：后续弹窗 / 生成期间输入框的变化不再影响本轮实际发送的内容
+        val userPrompt = input.value
         val withSummary = prefs.genContentWithSummary.first()
         val limitScope = prefs.genSummaryLimitScope.first()
         val mode = if (withSummary) {
@@ -531,7 +547,7 @@ class AiChatViewModel(
             awaitSummaryWithRetry(
                 plan,
                 assembleGenerationTurns(
-                    prefix, ref, history, buildSummaryTurns(input.value, plan.summaryWordRange, ref.extra, chapterTitle)
+                    prefix, ref, history, buildSummaryTurns(userPrompt, plan.summaryWordRange, ref.extra, chapterTitle)
                 ),
                 onSummary
             )
@@ -576,11 +592,13 @@ class AiChatViewModel(
                 // 生成专用块只带本轮新增的大纲资料；已冻结的会话前缀已在前段共享块里
                 outlineSlot = listOf(ref.extra, adaptive).filter { it.isNotBlank() }.joinToString("\n\n"),
                 memoryBlock = memoryRef.text,
-                userInput = input.value,
+                userInput = userPrompt,
                 range = plan.contentWordRange,
                 chapterTitle = chapterTitle
             )
         )
+        // 提示词即将随请求发出：立刻清空输入框，避免生成期间误以为没发送出去、再次点击重复生成
+        input.value = ""
         val result = configRepository.sendToModel(
             modelId, AiRequest(turns = turns, model = "", temperature = 0f, maxTokens = 0)
         )
@@ -604,7 +622,6 @@ class AiChatViewModel(
         }
         // 先落「用户消息」：输入框提示词 + 「生成正文」标记；本轮新增的参考资料随消息落库成为历史的一部分。
         // 若用户点了某条历史提示词的「编辑」后再生成，则改写那一轮并追加新回答版本（见 [openGenerationRound]）
-        val userPrompt = input.value
         val round = openGenerationRound(
             sid = sid,
             chapterId = chapterId,
@@ -2035,6 +2052,10 @@ class AiChatViewModel(
         // 重新生成 / 编辑重发不新增用户消息，这里只读取已冻结的前缀（不做任何写入）。
         val p = prefix ?: readSessionPrefix(sid)
         // 生成态的复位交由 [launchGenerating] 的 finally 统一处理（用 generationToken 判定归属）
+        // 历史统一按「前情提要」块发送，与生成路径同构，两种请求共享同一段前缀缓存。
+        // historyEndId 指向本轮用户消息时把它排除在外；指向助手消息（「编辑回答后继续」）时纳入
+        val priorEndId = if (historyEndId == replyToUserId) historyEndId else historyEndId + 1
+        val priorContext = generationHistory(sid, priorEndId, modelId).prior
         val request = SendChatRequest(
             sessionId = sid,
             modelId = modelId,
@@ -2047,6 +2068,7 @@ class AiChatViewModel(
             chapterImportTool = chapterImportToolOn(),
             prefixText = p.custom,
             referencePrefix = p.reference,
+            priorContext = priorContext,
             // 本轮所属章节：沿用该用户消息落库时的章节，重新生成 / 编辑重发不会跳到别的章节
             chapterId = chatRepository.getMessage(replyToUserId)?.chapterId ?: 0L,
             logContext = logContext
@@ -2192,6 +2214,18 @@ class AiChatViewModel(
 
         if (session != null && sp.encode() != original) {
             chatRepository.updateSessionPrefix(sid, sp.encode())
+        }
+        // 「首轮全选大纲与章节」：首轮勾选的内容已全部冻结进会话前缀，发完这一轮就把勾选清掉，
+        // 第二轮起默认不勾选（再次勾选才会作为「新增参考资料」追加，不会重复提交前缀里的内容）。
+        // 只在对应前缀化开关开启时清空：关闭前缀化时勾选每轮都要实时注入，不能清。
+        if (firstTime && prefs.aiOutlineFirstRound.first()) {
+            if (contextOn) {
+                selectedChapterIds.value = emptySet()
+                summaryChapterIds.value = emptySet()
+                contentChapterIds.value = emptySet()
+            }
+            if (outlineOn) selectedOutlineIds.value = emptySet()
+            refreshAllFlags()
         }
         val appended = sp.renderEntries(newBooks, newOutlines, newChapters)
         return PreparedPrefix(

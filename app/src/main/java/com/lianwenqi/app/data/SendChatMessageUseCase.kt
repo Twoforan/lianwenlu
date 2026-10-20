@@ -4,13 +4,12 @@ import com.lianwenqi.app.ai.AiError
 import com.lianwenqi.app.ai.AiRequest
 import com.lianwenqi.app.ai.AiResult
 import com.lianwenqi.app.ai.ChatTurn
-import com.lianwenqi.app.ai.REFERENCE_BLOCK_HEADER
+import com.lianwenqi.app.ai.PRIOR_CONTEXT_HEADER
+import com.lianwenqi.app.ai.buildGenerationPrefixTurns
 import com.lianwenqi.app.data.entity.AiModel
 import com.lianwenqi.app.data.entity.ChatMessage
 import com.lianwenqi.app.data.entity.ChatRole
 import com.lianwenqi.app.data.entity.ContextSnapshot
-import com.lianwenqi.app.util.AI_CHAPTER_TOOL_PROMPT
-import com.lianwenqi.app.util.AI_OUTLINE_TOOL_PROMPT
 import com.lianwenqi.app.util.AiChapterBlock
 import com.lianwenqi.app.util.AiOutlineBlock
 import com.lianwenqi.app.util.parseAiChapterBlocksResult
@@ -112,6 +111,8 @@ data class SendChatRequest(
     val prefixText: String = "",
     /** 会话已冻结的「参考资料前缀」（书籍/大纲/章节字面文本），为空则不发送 */
     val referencePrefix: String = "",
+    /** 上一轮之前的全部轮次，渲染成与生成路径相同的「前情提要」块；为空则不带历史 */
+    val priorContext: String = "",
     /** 本轮对话所属章节 id（0 表示未绑定章节），随消息落库用于按章节分组收起 */
     val chapterId: Long = 0,
     /** 本轮日志素材（本章梗概 / 检索片段 / 新增大纲资料 / 预设大纲清单） */
@@ -233,24 +234,27 @@ class SendChatMessageUseCase(
                 ChatTurn(it.role, if (extra.isBlank()) it.content else extra + "\n\n" + it.content)
             }
         val turns = buildList {
-            // 「自定义前缀」：纯文本，作为最前面的系统提示词随请求发送
-            if (request.prefixText.isNotBlank()) {
-                add(ChatTurn(ChatRole.SYSTEM, request.prefixText))
+            // 「自定义前缀 / 工具提示 / 参考资料前缀」与生成路径共用同一段只读前缀
+            // （见 buildGenerationPrefixTurns），保证两种请求逐字节一致
+            addAll(
+                buildGenerationPrefixTurns(
+                    customPrefix = request.prefixText,
+                    writeOutlineTool = request.writeOutlineTool,
+                    chapterImportTool = request.chapterImportTool,
+                    reference = reference
+                )
+            )
+            // 历史统一压成一个 System「前情提要」块，与生成路径同构：
+            // 聊天与生成交替使用时，前缀之后的内容也是「只追加」的，
+            // 切换功能不会再让整段历史重新计费。
+            if (request.priorContext.isNotBlank()) {
+                add(ChatTurn(ChatRole.SYSTEM, PRIOR_CONTEXT_HEADER + request.priorContext))
             }
-            // 「写入大纲工具」：勾选后随请求附带固定格式说明（保持勾选期间前缀稳定）
-            if (request.writeOutlineTool) {
-                add(ChatTurn(ChatRole.SYSTEM, AI_OUTLINE_TOOL_PROMPT))
-            }
-            // 「章节梗概导入工具」：勾选后随请求附带固定格式说明
-            if (request.chapterImportTool) {
-                add(ChatTurn(ChatRole.SYSTEM, AI_CHAPTER_TOOL_PROMPT))
-            }
-            if (reference.isNotBlank()) {
-                add(ChatTurn(ChatRole.SYSTEM, REFERENCE_BLOCK_HEADER + reference))
-            }
-            addAll(history)
-            // 编辑后继续：历史以助手消息结尾时，补一个「继续」的轮次
-            if (history.lastOrNull()?.role != ChatRole.USER) {
+            // 最后一轮始终是真实的用户输入；历史以助手消息结尾时（编辑回答后继续）补兜底指令
+            val last = history.lastOrNull()
+            if (last != null && last.role == ChatRole.USER) {
+                add(last)
+            } else {
                 add(ChatTurn(ChatRole.USER, "请基于以上内容继续往下写。"))
             }
         }

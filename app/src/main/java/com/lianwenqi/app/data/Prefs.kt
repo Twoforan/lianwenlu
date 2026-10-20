@@ -128,6 +128,9 @@ class Prefs(private val context: Context) {
         // 生成工具（生成梗概 / 生成正文）的请求是否携带本会话历史对话（默认关闭）
         val genCarryHistory = booleanPreferencesKey("gen_carry_history")
 
+        // AI 对话分组中「用户手动展开」的分组 key 集合（默认全部收起，下次进入沿用上次的展开状态）
+        val chatExpandedGroups = stringSetPreferencesKey("chat_expanded_groups")
+
         // 长期记忆（书本向量化）：向量化工具（互斥）、默认开启、自动续跑、默认勾选检索
         val memoryToolMode = stringPreferencesKey("memory_tool_mode")
         val memoryEmbeddingBaseUrl = stringPreferencesKey("memory_embedding_base_url")
@@ -239,6 +242,13 @@ class Prefs(private val context: Context) {
      */
     val genCarryHistory: Flow<Boolean> =
         context.dataStore.data.map { it[K.genCarryHistory] ?: false }
+
+    /**
+     * AI 对话分组的展开状态：只记录用户手动展开过的分组 key。
+     * 不在集合里的分组一律按「收起成块」显示，下次进入沿用上次点击的结果。
+     */
+    val chatExpandedGroups: Flow<Set<String>> =
+        context.dataStore.data.map { it[K.chatExpandedGroups] ?: emptySet() }
 
     /** 向量化工具（互斥）：api = 厂商 Embedding API；local = 本地 GGUF 工具；off = 关闭 */
     val memoryToolMode: Flow<String> =
@@ -381,6 +391,12 @@ class Prefs(private val context: Context) {
     suspend fun setGenContentMemoryMode(v: RetrievalMode) = writePrefs { it[K.genContentMemoryMode] = v.storage }
     suspend fun setGenContentWithSummary(v: Boolean) = writePrefs { it[K.genContentWithSummary] = v }
     suspend fun setGenCarryHistory(v: Boolean) = writePrefs { it[K.genCarryHistory] = v }
+
+    /** 记录某个对话分组被用户展开 / 收起 */
+    suspend fun setChatGroupExpanded(key: String, expanded: Boolean) = writePrefs {
+        val cur = it[K.chatExpandedGroups] ?: emptySet()
+        it[K.chatExpandedGroups] = if (expanded) cur + key else cur - key
+    }
     suspend fun setMemoryToolMode(v: String) = writePrefs { it[K.memoryToolMode] = v }
     suspend fun setMemoryEmbeddingBaseUrl(v: String) = writePrefs { it[K.memoryEmbeddingBaseUrl] = v }
     suspend fun setMemoryEmbeddingApiKey(v: String) = writePrefs { it[K.memoryEmbeddingApiKey] = v }

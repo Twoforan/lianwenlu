@@ -120,7 +120,8 @@ class SendChatMessageUseCaseTest {
         writeOutlineTool: Boolean = false,
         chapterImportTool: Boolean = false,
         replyToUserId: Long = 0L,
-        historyEndId: Long = 1L
+        historyEndId: Long = 1L,
+        priorContext: String = ""
     ) = SendChatRequest(
         sessionId = 1L,
         modelId = 1L,
@@ -130,7 +131,8 @@ class SendChatMessageUseCaseTest {
         historyEndId = historyEndId,
         variantIndex = 0,
         writeOutlineTool = writeOutlineTool,
-        chapterImportTool = chapterImportTool
+        chapterImportTool = chapterImportTool,
+        priorContext = priorContext
     )
 
     // ---------------- 场景 1：正常发送 ----------------
@@ -279,38 +281,47 @@ class SendChatMessageUseCaseTest {
         assertEquals("$memory\n\n继续写", turns.single().content)
     }
 
+    // ---------------- 场景 6：历史统一压成「前情提要」块，与生成路径同构 ----------------
+
     @Test
     fun historyEndingWithAssistant_appendsContinueUserTurn() = runTest {
+        // 历史以助手消息结尾（编辑回答后继续）：前情提要块携带它，末尾补一句「继续」的指令
         val chat = FakeChatGateway(messages = listOf(assistantMessage(id = 1L, content = "上文回答")))
         val model = FakeModelGateway(result = AiResult.ok("好的"))
-        SendChatMessageUseCase(chat, model)(request(replyToUserId = 0L, historyEndId = 1L)).toList()
+        SendChatMessageUseCase(chat, model)(
+            request(replyToUserId = 0L, historyEndId = 1L, priorContext = "助手：上文回答")
+        ).toList()
 
         val turns = model.lastRequest!!.turns
-        assertEquals(listOf(ChatRole.ASSISTANT, ChatRole.USER), turns.map { it.role })
+        assertEquals(listOf(ChatRole.SYSTEM, ChatRole.USER), turns.map { it.role })
+        assertTrue(turns[0].content.contains("上文回答"))
         assertEquals("请基于以上内容继续往下写。", turns.last().content)
     }
 
-    // ---------------- 场景 6：重新生成的废弃版本不进后续上下文 ----------------
-
     @Test
-    fun history_keepsOnlyActiveAssistantVariant() = runTest {
-        // 同一轮用户消息（id=1）连续重新生成 3 次：只有最后一条 active=1，其余为废弃候选
+    fun history_isSentAsPriorContextBlock() = runTest {
+        // 历史不再逐条作为对话轮次发送：只保留一个 System「前情提要」块 + 本轮真实的用户输入，
+        // 这样与生成路径逐字节同构，两种请求可共享同一段服务端前缀缓存
         val chat = FakeChatGateway(
             messages = listOf(
                 userMessage(id = 1L, content = "写第一章"),
-                ChatMessage(id = 2L, sessionId = 1L, role = ChatRole.ASSISTANT, content = "候选甲", replyToId = 1L, variantIndex = 0, active = false),
-                ChatMessage(id = 3L, sessionId = 1L, role = ChatRole.ASSISTANT, content = "候选乙", replyToId = 1L, variantIndex = 1, active = false),
-                ChatMessage(id = 4L, sessionId = 1L, role = ChatRole.ASSISTANT, content = "最终版", replyToId = 1L, variantIndex = 2, active = true),
+                ChatMessage(id = 2L, sessionId = 1L, role = ChatRole.ASSISTANT, content = "最终版", replyToId = 1L, variantIndex = 2, active = true),
                 userMessage(id = 5L, content = "继续写第二章")
             )
         )
         val model = FakeModelGateway(result = AiResult.ok("好的"))
-        SendChatMessageUseCase(chat, model)(request(replyToUserId = 5L, historyEndId = 5L)).toList()
+        SendChatMessageUseCase(chat, model)(
+            request(
+                replyToUserId = 5L,
+                historyEndId = 5L,
+                priorContext = "用户：写第一章\n助手：最终版"
+            )
+        ).toList()
 
         val turns = model.lastRequest!!.turns
-        // 该轮只出现 1 条 assistant（最终版），废弃候选不再进入上下文
-        assertEquals(listOf(ChatRole.USER, ChatRole.ASSISTANT, ChatRole.USER), turns.map { it.role })
-        assertEquals("最终版", turns[1].content)
-        assertTrue(turns.none { it.content == "候选甲" || it.content == "候选乙" })
+        assertEquals(listOf(ChatRole.SYSTEM, ChatRole.USER), turns.map { it.role })
+        assertTrue(turns[0].content.contains("用户：写第一章"))
+        assertTrue(turns[0].content.contains("助手：最终版"))
+        assertEquals("继续写第二章", turns.last().content)
     }
 }

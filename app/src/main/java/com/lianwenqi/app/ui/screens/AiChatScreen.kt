@@ -207,6 +207,8 @@ fun AiChatScreen(initialBookId: Long?) {
     val memoryEmptyAsk by vm.pendingEmptyVectorizeAsk.collectAsState()
     val memoryToastMsg by vm.memoryToast.collectAsState()
     val memoryToolReady by vm.memoryToolConfigured.collectAsState()
+    // 对话分组的展开状态：默认全部收起，用户点开 / 收起后记住，下次进入沿用
+    val expandedGroups by vm.expandedChatGroups.collectAsState()
 
     var showBooks by remember { mutableStateOf(false) }
     var showChapters by remember { mutableStateOf(false) }
@@ -317,9 +319,7 @@ fun AiChatScreen(initialBookId: Long?) {
             // 按「消息所属章节」连续分组：每一组都整组包裹（含最后一组，这样最后一章的对话也有章节抬头、可收起）。
             // 未绑定章节的对话则按「一轮对话」各自成块（标题为「第X轮对话」，可长按改名）。
             val chapterGroups = remember(entries) { buildChapterGroups(entries) }
-            // 折叠状态（键为分组 key）：默认只展开「焦点分组」（最后一组），其余收起
-            val collapsedGroups = remember { mutableStateMapOf<String, Boolean>() }
-            val focusKey = chapterGroups.lastOrNull()?.key
+            // 折叠状态（键为分组 key）：默认全部收起成块，只展开用户上次手动展开过的分组
             // 「查看日志 / 查看本轮提示词」的目标消息（为空表示弹窗关闭）
             var logTarget by remember { mutableStateOf<ChatMessage?>(null) }
             var promptTarget by remember { mutableStateOf<ChatMessage?>(null) }
@@ -378,9 +378,9 @@ fun AiChatScreen(initialBookId: Long?) {
                 ) {
                     items(chapterGroups.size, key = { chapterGroups[it].key }) { gi ->
                         val group = chapterGroups[gi]
-                        // 每组都整组包裹：绑定章节的组显示章节名抬头（最后一组默认展开，其余默认收起），
-                        // 未绑定章节的组包成「第X轮对话」卡片（避免导航栏 AI 里最后一章的对话缺少抬头、无法收起）。
-                        val collapsed = collapsedGroups[group.key] ?: (group.key != focusKey)
+                        // 每组都整组包裹：绑定章节的组显示章节名抬头，未绑定章节的组包成「第X轮对话」卡片；
+                        // 默认全部收起，仅用户上次手动展开过的分组保持展开
+                        val collapsed = group.key !in expandedGroups
                         val bound = groupBoundToChapter(group, chapters)
                         val title = groupTitle(group, chapters)
                         ChapterGroupCard(
@@ -397,7 +397,7 @@ fun AiChatScreen(initialBookId: Long?) {
                             },
                             preview = groupPreview(group),
                             collapsed = collapsed,
-                            onToggle = { collapsedGroups[group.key] = !collapsed },
+                            onToggle = { vm.setChatGroupExpanded(group.key, collapsed) },
                             // 章节已删除时视为「解除映射」，长按改为改「本轮对话」名（只改消息，不同步书籍）
                             onLongPressTitle = if (bound) {
                                 { renamingChapterId = group.chapterId }
@@ -1084,6 +1084,8 @@ private fun AiAssistantPanel(
     val generationDialog by vm.generationDialog.collectAsState()
     val generationRunning by vm.generationRunning.collectAsState()
     val generationMessage by vm.generationMessage.collectAsState()
+    // 对话分组的展开状态：默认全部收起，用户点开 / 收起后记住，下次进入沿用
+    val expandedGroups by vm.expandedChatGroups.collectAsState()
 
     // 当前打开的章节不进入上下文
     val contextChapters = chapters.filter { it.id != chapterId }
@@ -1193,11 +1195,10 @@ private fun AiAssistantPanel(
             val entries = remember(messages) { buildChatEntries(messages) }
             // 侧边栏按「所属章节」分组收起：未绑定章节的对话同样按「一轮对话」成块。
             val chapterGroups = remember(entries) { buildChapterGroups(entries) }
-            val collapsedGroups = remember { mutableStateMapOf<String, Boolean>() }
-            // 焦点分组：优先「当前绑定章节」对应的对话（打开抽屉即滚到并展开它），否则取最后一组
+            // 焦点分组：优先「当前绑定章节」对应的对话（打开抽屉即滚到它），否则取最后一组；
+            // 展开状态不再由焦点决定 —— 默认全部收起，只沿用用户上次手动展开的分组
             val focusGroup = chapterGroups.lastOrNull { it.chapterId == chapterId }
                 ?: chapterGroups.lastOrNull()
-            val focusKey = focusGroup?.key
             val focusIndex = chapterGroups.indexOf(focusGroup)
             val focusIsBound = (focusGroup?.chapterId ?: 0L) > 0
             val listState = rememberLazyListState()
@@ -1269,7 +1270,8 @@ private fun AiAssistantPanel(
                     }
                     items(chapterGroups.size, key = { chapterGroups[it].key }) { gi ->
                         val group = chapterGroups[gi]
-                        val collapsed = collapsedGroups[group.key] ?: (group.key != focusKey)
+                        // 默认全部收起，仅用户上次手动展开过的分组保持展开
+                        val collapsed = group.key !in expandedGroups
                         val bound = groupBoundToChapter(group, chapters)
                         val title = groupTitle(group, chapters)
                         ChapterGroupCard(
@@ -1284,7 +1286,8 @@ private fun AiAssistantPanel(
                             },
                             preview = groupPreview(group),
                             collapsed = collapsed,
-                            onToggle = { collapsedGroups[group.key] = !collapsed },
+                            // 当前收起时点击 → 展开；当前展开时点击 → 收起
+                            onToggle = { vm.setChatGroupExpanded(group.key, collapsed) },
                             // 章节已删除时视为「解除映射」，长按改为改「本轮对话」名（只改消息，不同步书籍）
                             onLongPressTitle = if (bound) {
                                 { renamingChapterId = group.chapterId }
@@ -3131,6 +3134,8 @@ private fun ChatMessageItem(
         is ChatEntry.User -> {
             val msg = entry.msg
             val generating = pendingReplyToId == msg.id
+            // 单条消息的「小收起」：只折叠这一条气泡，不影响所属章节分组
+            var collapsed by remember(msg.id) { mutableStateOf(false) }
             // 「用户气泡 → 文件清单 → AI 回答」收进同一条块，块内间距收紧；
             // 外层 14dp 的分组间距只负责分隔不同轮次，避免清单与回答之间被撑出大片空白
             Column(
@@ -3153,6 +3158,14 @@ private fun ChatMessageItem(
                             onCopy(msg.content)
                         }
                         DeleteAction(msg.id, ui, onDelete)
+                        // 小收起：只折叠当前这条用户消息
+                        MessageAction(
+                            if (collapsed) Icons.Filled.KeyboardArrowDown else Icons.Filled.KeyboardArrowUp,
+                            if (collapsed) "展开" else "收起"
+                        ) {
+                            ui.pendingDeleteId = null
+                            collapsed = !collapsed
+                        }
                         Spacer(Modifier.weight(1f))
                         // 生成中把翻页器翻到“新的一页”，生成完成后即可在历史版本间回看
                         val total = entry.variants.size + if (generating) 1 else 0
@@ -3173,14 +3186,26 @@ private fun ChatMessageItem(
                         }
                     }
                 ) {
-                    // 长按可选中并复制消息内容；key 随 selectionReset 变化时重建以取消选中
-                    key(ui.selectionReset) {
-                        SelectionContainer {
-                            Text(
-                                text = msg.content,
-                                modifier = Modifier.fillMaxWidth(),
-                                style = MaterialTheme.typography.bodyMedium
-                            )
+                    if (collapsed) {
+                        // 小收起：只显示一行内容预览，点操作栏的展开图标恢复
+                        Text(
+                            text = msg.content.replace('\n', ' ').trim(),
+                            modifier = Modifier.fillMaxWidth(),
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    } else {
+                        // 长按可选中并复制消息内容；key 随 selectionReset 变化时重建以取消选中
+                        key(ui.selectionReset) {
+                            SelectionContainer {
+                                Text(
+                                    text = msg.content,
+                                    modifier = Modifier.fillMaxWidth(),
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                            }
                         }
                     }
                 }
@@ -3260,6 +3285,8 @@ private fun AssistantBlock(
     /** 侧边栏 AI 助手专属：把「生成梗概」产出的回答写入当前章节梗概；为空则不显示该操作 */
     onWriteSummary: ((ChatMessage) -> Unit)? = null
 ) {
+    // 单条回答的「小收起」：只折叠这一条回答，不影响所属章节分组
+    var collapsed by remember(msg.id) { mutableStateOf(false) }
     if (ui.editingId == msg.id) {
         MessageCard(
             ai = true,
@@ -3330,40 +3357,59 @@ private fun AssistantBlock(
                     }
                 }
                 DeleteAction(msg.id, ui, onDelete)
+                // 小收起：只折叠当前这条回答
+                MessageAction(
+                    if (collapsed) Icons.Filled.KeyboardArrowDown else Icons.Filled.KeyboardArrowUp,
+                    if (collapsed) "展开" else "收起"
+                ) {
+                    ui.pendingDeleteId = null
+                    collapsed = !collapsed
+                }
             }
         ) {
-            if (msg.reasoning.isNotBlank()) {
-                ThinkingBlock(msg.reasoning)
-                Spacer(Modifier.height(6.dp))
-            }
-            // 回答正文不再单独收起：历史章节的对话由所属章节分组统一收起（见 ChapterGroupCard）
-            AnswerBlock(
-                content = msg.content,
-                resetKey = ui.selectionReset
-            )
-            Spacer(Modifier.height(6.dp))
-            // 模型与本次消耗的 token 同行显示，位于操作按钮行上方
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            if (collapsed) {
+                // 小收起：只保留一行内容预览，点操作栏的展开图标恢复
                 Text(
-                    "model: $modelName",
-                    style = MaterialTheme.typography.labelSmall,
+                    text = msg.content.replace('\n', ' ').trim(),
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                val tokens = msg.promptTokens + msg.completionTokens
-                if (tokens > 0) {
-                    Spacer(Modifier.weight(1f))
-                    // 缓存命中率 = 命中缓存的输入 token / 总输入 token
-                    val hit = if (msg.promptTokens > 0) msg.cachedTokens * 100 / msg.promptTokens else 0
+            } else {
+                if (msg.reasoning.isNotBlank()) {
+                    ThinkingBlock(msg.reasoning)
+                    Spacer(Modifier.height(6.dp))
+                }
+                // 回答正文：整条折叠由操作栏的「小收起」负责，章节级折叠见 ChapterGroupCard
+                AnswerBlock(
+                    content = msg.content,
+                    resetKey = ui.selectionReset
+                )
+                Spacer(Modifier.height(6.dp))
+                // 模型与本次消耗的 token 同行显示，位于操作按钮行上方
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        buildString {
-                            append("消耗 $tokens tokens（输入 ${msg.promptTokens} / 输出 ${msg.completionTokens}）")
-                            // 只要记录了输入 token 就展示命中率：首轮没有缓存命中时显示 0%，
-                            // 避免「第一次生成看不到缓存命中率」的观感问题
-                            if (msg.promptTokens > 0) append(" · 缓存命中 $hit%")
-                        },
+                        "model: $modelName",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    val tokens = msg.promptTokens + msg.completionTokens
+                    if (tokens > 0) {
+                        Spacer(Modifier.weight(1f))
+                        // 缓存命中率 = 命中缓存的输入 token / 总输入 token
+                        val hit = if (msg.promptTokens > 0) msg.cachedTokens * 100 / msg.promptTokens else 0
+                        Text(
+                            buildString {
+                                append("消耗 $tokens tokens（输入 ${msg.promptTokens} / 输出 ${msg.completionTokens}）")
+                                // 只要记录了输入 token 就展示命中率：首轮没有缓存命中时显示 0%，
+                                // 避免「第一次生成看不到缓存命中率」的观感问题
+                                if (msg.promptTokens > 0) append(" · 缓存命中 $hit%")
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
         }
