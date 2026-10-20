@@ -18,6 +18,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
@@ -1117,6 +1118,8 @@ private fun AiAssistantPanel(
         color = MaterialTheme.colorScheme.surface,
         shadowElevation = 8.dp
     ) {
+        // 分屏 / 小窗下高度有限：把「对话区 + 展开面板」放进同一个占满剩余高度的容器，
+        // 面板最高 300dp 但不会把下方按钮行、输入框、底部工具行顶出屏幕。
         Column(
             Modifier
                 .fillMaxSize()
@@ -1233,6 +1236,9 @@ private fun AiAssistantPanel(
                     onWriteSummary = { target -> if (target.chapterId == chapterId) onGeneratedSummary(target.content) }
                 )
             }
+            // 对话区与展开面板共用这块剩余高度：面板再高也只会压缩对话区，
+            // 不会把下方的按钮行、输入框、文件清单与底部工具行挤出屏幕（分屏 / 小窗）。
+            Column(Modifier.weight(1f).fillMaxWidth()) {
             Box(
                 Modifier
                     .weight(1f)
@@ -1344,6 +1350,7 @@ private fun AiAssistantPanel(
                     onToggle = { vm.toggleOutline(it) },
                     onToggleCategory = { vm.toggleOutlineCategory(it) }
                 )
+            }
             }
 
             // 按钮行：按可用宽度等分容纳，不横向滚动
@@ -4175,10 +4182,15 @@ private fun OutlinePickerDialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
+        // 分屏 / 小窗下弹窗高度受限：整卡按可用高度收紧，列表吃掉剩余空间，
+        // 保证底部「取消 / 确定」始终留在屏幕内。
+        BoxWithConstraints(Modifier.fillMaxSize()) {
+        val maxCardHeight = (maxHeight - 24.dp).coerceAtLeast(200.dp)
         Column(
             Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 20.dp)
+                .heightIn(max = maxCardHeight)
                 .clip(RoundedCornerShape(24.dp))
                 .background(PickerSurface)
         ) {
@@ -4247,10 +4259,11 @@ private fun OutlinePickerDialog(
                     GenPill(outlineCategoryLabel(c), categoryFilter == c) { categoryFilter = c }
                 }
             }
-            // 列表卡：全选大纲 + 条目
+            // 列表卡：全选大纲 + 条目（占满剩余高度，矮屏时自动收缩并内部滚动）
             Column(
                 Modifier
                     .fillMaxWidth()
+                    .weight(1f, fill = false)
                     .padding(horizontal = 18.dp, vertical = 12.dp)
                     .clip(RoundedCornerShape(18.dp))
                     .background(Color.White)
@@ -4366,6 +4379,7 @@ private fun OutlinePickerDialog(
                     Text(confirmText, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                 }
             }
+        }
         }
     }
 }
