@@ -400,27 +400,31 @@ class AiChatViewModel(
         val ref = buildGenerationReference(prefix, plan.selectedOutlineIds)
         val userPrompt = input.value
         // 像普通发送一样落一条「用户消息」：输入框提示词 + 「生成梗概」标记；
-        // 本轮新增的参考资料随消息落库成为历史的一部分，故上面对选定标签的「已提交」标记语义成立
-        val userId = chatRepository.addMessage(
-            sid, ChatRole.USER,
-            generationUserContent(genLabelSummary, userPrompt),
+        // 本轮新增的参考资料随消息落库成为历史的一部分，故上面对选定标签的「已提交」标记语义成立。
+        // 若用户点了某条历史提示词的「编辑」后再生成，则改写那一轮并追加新回答版本（见 [openGenerationRound]）
+        val round = openGenerationRound(
+            sid = sid,
+            chapterId = chapterId,
+            label = genLabelSummary,
+            userPrompt = userPrompt,
             contextSnapshot = currentSnapshot().encode(),
             promptExtra = ref.extra,
-            chapterId = chapterId
+            editingId = editingUserMessageId.value
         )
         // 选定标签的内容已随本轮消息落库，此时记入前缀去重（后续轮次只写「参见大纲『X』」）
         markGenerationOutlines(sid, ref.sessionPrefix, ref.freshOutlineIds)
         // 生成请求：聊天同构前缀块 +（开关开启时）「前情提要」参考资料块 + 生成专用块（指令 + 新增参考资料 + 用户输入）
         val history =
-            if (prefs.genCarryHistory.first()) generationHistory(sid, userId, modelId) else GenerationHistory()
+            if (prefs.genCarryHistory.first()) generationHistory(sid, round.userId, modelId) else GenerationHistory()
         val turns = assembleGenerationTurns(
             prefix, ref, history, buildSummaryTurns(userPrompt, plan.summaryWordRange, ref.extra, chapterTitle)
         )
         when (val r = runSummaryCall(plan, turns)) {
             is SummaryCall.Ok -> {
-                chatRepository.addMessage(
-                    sid, ChatRole.ASSISTANT, r.text,
-                    replyToId = userId,
+                persistGenerationAnswer(
+                    sid = sid,
+                    round = round,
+                    text = r.text,
                     promptTokens = r.promptTokens,
                     completionTokens = r.completionTokens,
                     cachedTokens = r.cachedTokens,
@@ -514,9 +518,15 @@ class AiChatViewModel(
         )
         var sp = ref.sessionPrefix
 
-        // 生成请求携带的历史：本轮的用户消息在正文落库前才写入，故此处取到当前全部轮次
+        // 生成请求携带的历史：本轮的用户消息在正文落库前才写入，故此处取到当前全部轮次；
+        // 编辑历史提示词后再生成时，历史只取到被编辑的那一轮之前（该轮旧内容不进前情提要）
+        val editingId = editingUserMessageId.value
         val history =
-            if (prefs.genCarryHistory.first()) generationHistory(sid, Long.MAX_VALUE, modelId) else GenerationHistory()
+            if (prefs.genCarryHistory.first()) {
+                generationHistory(sid, editingId.takeIf { it > 0L } ?: Long.MAX_VALUE, modelId)
+            } else {
+                GenerationHistory()
+            }
         val summary = if (mode == GenerationMode.CONTENT_WITH_SUMMARY) {
             awaitSummaryWithRetry(
                 plan,
@@ -592,21 +602,25 @@ class AiChatViewModel(
         } else if (enforced.under) {
             generationMessage.value = "正文略短于设定下限，可继续让 AI 补写"
         }
-        // 先落「用户消息」：输入框提示词 + 「生成正文」标记；本轮新增的参考资料随消息落库成为历史的一部分
+        // 先落「用户消息」：输入框提示词 + 「生成正文」标记；本轮新增的参考资料随消息落库成为历史的一部分。
+        // 若用户点了某条历史提示词的「编辑」后再生成，则改写那一轮并追加新回答版本（见 [openGenerationRound]）
         val userPrompt = input.value
-        val userId = chatRepository.addMessage(
-            sid, ChatRole.USER,
-            generationUserContent(genLabelContent, userPrompt),
+        val round = openGenerationRound(
+            sid = sid,
+            chapterId = chapterId,
+            label = genLabelContent,
+            userPrompt = userPrompt,
             contextSnapshot = currentSnapshot().encode(),
             promptExtra = listOf(ref.extra, adaptive, memoryRef.text).filter { it.isNotBlank() }.joinToString("\n\n"),
-            chapterId = chapterId
+            editingId = editingId
         )
         // 选定标签的内容已随本轮消息落库，此时记入前缀去重（后续轮次只写「参见大纲『X』」）
         markGenerationOutlines(sid, sp, ref.freshOutlineIds)
         // 生成结果作为一条普通 AI 回答进入本会话：不自动写入正文，由用户在编辑器点「写入本章正文」决定
-        chatRepository.addMessage(
-            sid, ChatRole.ASSISTANT, enforced.text,
-            replyToId = userId,
+        persistGenerationAnswer(
+            sid = sid,
+            round = round,
+            text = enforced.text,
             promptTokens = result.promptTokens,
             completionTokens = result.completionTokens,
             cachedTokens = result.cachedTokens,
@@ -852,6 +866,78 @@ class AiChatViewModel(
     /** 生成路径落库的「用户消息」正文：输入框提示词 + 生成标记，用于在对话里区分生成轮次 */
     private fun generationUserContent(label: String, prompt: String): String =
         if (prompt.isBlank()) label else "$label\n$prompt"
+
+    /**
+     * 生成结果要落到哪一个「用户轮次」上。
+     * - [variantIndex] 为 0：本轮新建的用户消息（沿用原有生成逻辑）；
+     * - [variantIndex] > 0：用户在聊天里点了某条历史提示词的「编辑」后触发生成，
+     *   此时改写那一轮的用户消息，并以 [variantIndex] 追加一个新的回答版本；
+     * - [staleIds]：编辑态下该轮之后的后续对话，提示词已变故作废删除（与聊天「编辑后发送」一致）。
+     */
+    private class GenRound(
+        val userId: Long,
+        val variantIndex: Int,
+        val staleIds: List<Long>
+    )
+
+    /**
+     * 打开生成路径的用户轮次。
+     * 未处于编辑态（[editingId] <= 0）时新建一条用户消息；
+     * 处于编辑态时复用聊天页「重新生成」的版本机制：改写被编辑的那条消息并追加新版本，
+     * 不再多发一条新的生成轮次 —— 即「编辑完提示词后生成 = 按新提示词重新生成，可切分支」。
+     */
+    private suspend fun openGenerationRound(
+        sid: Long,
+        chapterId: Long,
+        label: String,
+        userPrompt: String,
+        contextSnapshot: String,
+        promptExtra: String,
+        editingId: Long
+    ): GenRound {
+        val target = editingId.takeIf { it > 0L }?.let { chatRepository.getMessage(it) }
+        if (target == null || target.sessionId != sid) {
+            val id = chatRepository.addMessage(
+                sid, ChatRole.USER, generationUserContent(label, userPrompt),
+                contextSnapshot = contextSnapshot,
+                promptExtra = promptExtra,
+                chapterId = chapterId
+            )
+            return GenRound(id, 0, emptyList())
+        }
+        // 编辑态：消费掉编辑状态，改写那条用户消息，并作废其后继对话
+        editingUserMessageId.value = 0L
+        val staleIds = chatRepository.getMessages(sid)
+            .filter { it.id > target.id && !(it.role == ChatRole.ASSISTANT && it.replyToId == target.id) }
+            .map { it.id }
+        chatRepository.updateMessageContent(target.id, userPrompt)
+        return GenRound(target.id, chatRepository.nextVariantIndex(target.id), staleIds)
+    }
+
+    /** 落库生成结果：编辑态下先清除旧版本展示标记，再追加新版本，最后丢弃作废的后续对话 */
+    private suspend fun persistGenerationAnswer(
+        sid: Long,
+        round: GenRound,
+        text: String,
+        promptTokens: Int,
+        completionTokens: Int,
+        cachedTokens: Int,
+        chapterId: Long,
+        promptLog: String
+    ) {
+        if (round.variantIndex > 0) chatRepository.deactivateVariants(round.userId)
+        chatRepository.addMessage(
+            sid, ChatRole.ASSISTANT, text,
+            replyToId = round.userId,
+            variantIndex = round.variantIndex,
+            promptTokens = promptTokens,
+            completionTokens = completionTokens,
+            cachedTokens = cachedTokens,
+            chapterId = chapterId,
+            promptLog = promptLog
+        )
+        if (round.staleIds.isNotEmpty()) chatRepository.deleteMessagesByIds(round.staleIds)
+    }
 
     /**
      * 生成路径的参考资料组装：与聊天请求逐字一致的 [GenerationRef.sharedReference]、

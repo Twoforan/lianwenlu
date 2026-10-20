@@ -1,5 +1,6 @@
 package com.lianwenqi.app.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -212,6 +213,9 @@ fun MemoryProgressScreen(onBack: () -> Unit) {
             else -> p.book.groupId == selectedGroupId
         }
     }
+
+    // 详情页打开时，系统返回键先关闭详情、回到「向量化进度」列表页
+    BackHandler(enabled = detail != null) { vm.closeDetail() }
 
     // 书籍详情页：全屏覆盖
     val opened = detail
