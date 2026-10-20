@@ -13,7 +13,9 @@ class GenerationPromptTest {
         val turns = buildSummaryTurns("写一段开场", 100..150)
         assertEquals(ChatRole.SYSTEM, turns[0].role)
         assertTrue(turns[0].content.contains("100–150"))
-        assertTrue(turns[0].content.contains("执行步骤"))
+        // 自检过程只作内部思考，且明确禁止把核心事件清单 / 字数统计等输出出来
+        assertTrue(turns[0].content.contains("只作为你的内部思考"))
+        assertTrue(turns[0].content.contains("不得输出任何其他内容"))
         assertEquals(ChatRole.USER, turns.last().role)
         assertEquals("写一段开场", turns.last().content)
     }

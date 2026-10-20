@@ -87,8 +87,8 @@ fun buildSummaryTurns(
             else -> append("字数硬约束：最终输出必须在 ").append(lower).append("–").append(max)
                 .append(" 字之间（含标点）。\n")
         }
-        append("\n执行步骤：\n")
-        append("1. 先用一句话列出本章必须覆盖的 3–5 个核心事件。\n")
+        append("\n请在草稿里完成下列自检，它们只作为你的内部思考，严禁出现在输出中：\n")
+        append("1. 列出本章必须覆盖的 3–5 个核心事件。\n")
         append("2. 按事件顺序写梗概草稿。\n")
         append("3. 数一下草稿字数：\n")
         if (lower != null) {
@@ -98,7 +98,8 @@ fun buildSummaryTurns(
             append("   - 高于 ").append(max).append("：删除修饰性描写，合并相邻事件；\n")
         }
         append("   - 在范围内：输出。\n")
-        append("4. 只输出最终梗概，不输出计数过程。")
+        append("4. 只输出最终梗概这一整段文字。\n")
+        append("\n输出禁令：除最终梗概本身外，不得输出任何其他内容 —— 包括核心事件清单、步骤说明、字数统计、字数区间、标题、章节名、列表符号、markdown 标记或任何解释。")
     }
     return buildList {
         add(ChatTurn(ChatRole.SYSTEM, instruction))

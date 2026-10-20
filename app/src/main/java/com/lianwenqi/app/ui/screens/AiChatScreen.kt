@@ -146,6 +146,7 @@ import com.lianwenqi.app.data.entity.ChatRole
 import com.lianwenqi.app.data.entity.ChatSession
 import com.lianwenqi.app.data.entity.ContextSnapshot
 import com.lianwenqi.app.data.entity.decodeContextSnapshot
+import com.lianwenqi.app.data.decodeOutlineFields
 import com.lianwenqi.app.data.entity.OutlineItem
 import com.lianwenqi.app.data.entity.outlineCategoryLabel
 import com.lianwenqi.app.data.entity.Provider
@@ -4317,10 +4318,11 @@ private fun OutlinePickerDialog(
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
-                                if (item.content.isNotBlank()) {
+                                val preview = outlinePreviewOf(item)
+                                if (preview.isNotBlank()) {
                                     Spacer(Modifier.height(3.dp))
                                     Text(
-                                        item.content,
+                                        preview,
                                         color = PickerMuted,
                                         fontSize = 12.sp,
                                         lineHeight = 18.sp,
@@ -4367,6 +4369,16 @@ private fun OutlinePickerDialog(
         }
     }
 }
+
+/**
+ * 大纲条目的预览文本：内容以结构化 JSON 存库，这里解析成「字段名：值」多行文本，
+ * 避免把 [OutlineItem.content] 的原始 JSON（形如 [{"n":…,"v":…}]）直接显示给用户。
+ * 首项即条目的「显示标签」，已由标题展示，这里只列其余字段。
+ */
+private fun outlinePreviewOf(item: OutlineItem): String =
+    decodeOutlineFields(item.content)
+        .drop(1)
+        .joinToString("\n") { (key, value) -> "$key：$value" }
 
 /** AI 工具多选弹窗（目前仅「写入大纲工具」，以后新增工具自动出现在列表里） */
 @Composable

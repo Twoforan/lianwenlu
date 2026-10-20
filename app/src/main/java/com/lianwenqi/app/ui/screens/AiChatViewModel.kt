@@ -915,7 +915,8 @@ class AiChatViewModel(
 
     /**
      * 生成请求可携带的「前情提要」块：取 [beforeId] 之前的本会话轮次
-     * （只保留生效版本、按 maxContext 截断），渲染成「用户：… / 助手：…」的扁平文本，
+     * （只保留生效版本、按 maxContext 截断），按章节分段（每段前加一行章节标题）渲染成
+     * 「用户：… / 助手：…」的文本，
      * 由 [assembleGenerationTurns] 作为 System 参考资料块发出 —— 不作为对话轮次，
      * 避免模型把上一章的成品当成自己「正在续写的回答」而反复复用。
      * [rounds] 供「提交日志」的上下文日志回显，与实际发送内容一致。
@@ -928,10 +929,25 @@ class AiChatViewModel(
             // 同一轮只保留「当前生效」的那条回答（多次重新生成的废弃候选不进上下文）
             .filter { it.role == ChatRole.USER || it.active }
             .let { if (maxContext > 0) it.takeLast(maxContext) else it }
-        // 前情提要只取可见的对话内容（隐藏的附加参考资料块不进前情提要，避免与上方参考资料重复）
-        val prior = raw.joinToString("\n") { m ->
-            (if (m.role == ChatRole.USER) "用户：" else "助手：") + m.content.trim()
-        }
+        // 前情提要只取可见的对话内容（隐藏的附加参考资料块不进前情提要，避免与上方参考资料重复）。
+        // 按章节分段：章节切换时插入一行章节标题（如「第3章」），让模型知道每段对话出自哪一章。
+        val titles = raw.map { it.chapterId }.distinct()
+            .filter { it != 0L }
+            .associateWith { id -> bookRepository.getChapter(id)?.title?.trim().orEmpty() }
+        val prior = buildString {
+            var lastChapterId = Long.MIN_VALUE
+            raw.forEach { m ->
+                if (m.chapterId != lastChapterId) {
+                    if (m.chapterId != 0L) {
+                        if (isNotEmpty()) append('\n')
+                        append(titles[m.chapterId].orEmpty().ifBlank { "（章节已删除）" }).append('\n')
+                    }
+                    lastChapterId = m.chapterId
+                }
+                append(if (m.role == ChatRole.USER) "用户：" else "助手：")
+                    .append(m.content.trim()).append('\n')
+            }
+        }.trimEnd('\n')
         val rounds = mutableListOf<PromptLogRound>()
         raw.forEach { m ->
             if (m.role == ChatRole.USER) {
