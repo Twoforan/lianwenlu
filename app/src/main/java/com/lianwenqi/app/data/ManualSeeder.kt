@@ -14,9 +14,10 @@ import kotlinx.coroutines.flow.first
  * 说明书于是像普通书籍一样出现在书架上，也能在 AI 对话里被选中作为上下文书籍，
  * 用来直接向 AI 提问本 App 的用法。
  *
- * 导入策略按 App 版本号维护：
- * - 记录上次导入的 versionCode；版本未变则不动；
- * - 版本变化时用最新内容整章替换说明书的章节（用户对说明书本身的手动编辑会被刷新）；
+ * 导入策略按 App 版本号 + 说明书内容签名维护：
+ * - 记录上次导入的 versionCode 与说明书内容签名；两者都未变则不动；
+ * - 版本变化、或同版本内说明书内容有更新（签名变化）时，用最新内容整章替换说明书的章节
+ *   （用户对说明书本身的手动编辑会被刷新）；
  * - 若说明书书已被用户删除，则重新生成一本。
  */
 object ManualSeeder {
@@ -71,23 +72,26 @@ object ManualSeeder {
     }.getOrDefault(0)
 
     /**
-     * 按版本维护内置说明书：首次导入、版本变化时更新、被删除后重建。
+     * 按版本维护内置说明书：首次导入、版本变化或说明书内容更新时刷新、被删除后重建。
      * 任何一步失败都静默跳过，不影响启动。
      */
     suspend fun ensureSeeded(context: Context, prefs: Prefs) {
         val currentVersion = appVersionCode(context)
-        val storedVersion = prefs.manualVersion.first()
-        val storedBookId = prefs.manualBookId.first()
-        val db = AppDatabase.get(context)
-
-        // 已按当前版本导入过，且说明书书仍存在：无需任何处理
-        if (storedVersion == currentVersion && storedBookId > 0L &&
-            db.bookDao().getById(storedBookId) != null
-        ) return
-
         val text = runCatching {
             context.assets.open(ASSET).bufferedReader(Charsets.UTF_8).use { it.readText() }
         }.getOrNull()?.takeIf { it.isNotBlank() } ?: return
+        val signature = signatureOf(text)
+
+        val storedVersion = prefs.manualVersion.first()
+        val storedSignature = prefs.manualSignature.first()
+        val storedBookId = prefs.manualBookId.first()
+        val db = AppDatabase.get(context)
+
+        // 版本与说明书内容都没变，且说明书书仍存在：无需任何处理
+        if (storedVersion == currentVersion && storedSignature == signature &&
+            storedBookId > 0L && db.bookDao().getById(storedBookId) != null
+        ) return
+
         val manual = parse(text)
         if (manual.sections.isEmpty()) return
 
@@ -118,7 +122,18 @@ object ManualSeeder {
                     )
                 )
             }
-            prefs.setManualMeta(bookId, currentVersion)
+            prefs.setManualMeta(bookId, currentVersion, signature)
         }
     }
+
+    /**
+     * 说明书内容的短签名（SHA-256 前 8 字节的十六进制）。
+     * 版本号不变但内容有更新时（例如同版本内补充说明章节），用它触发整章刷新，
+     * 保证用户手里的说明书始终是最新一版。
+     */
+    private fun signatureOf(text: String): String = runCatching {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(text.toByteArray(Charsets.UTF_8))
+        digest.take(8).joinToString("") { "%02x".format(it) }
+    }.getOrDefault("len-${text.length}")
 }
