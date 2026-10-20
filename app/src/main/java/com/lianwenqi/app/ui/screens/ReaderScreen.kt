@@ -9,8 +9,10 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -76,7 +78,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.AnnotatedString
@@ -124,6 +128,40 @@ private const val READER_FOOTER_SPACE = 22
 
 /** 左右翻页模式下触发切章所需的纵向滑动距离（px） */
 private const val CHAPTER_SWIPE_PX = 140f
+
+/** 左右翻页模式下在首/末页继续横滑触发切章的最小距离（dp） */
+private const val CHAPTER_SWIPE_DP = 56
+
+/** 进度面板里的一个分卷分组；[volumeId] 为 null 表示未分卷章节 */
+private data class ReaderVolumeGroup(
+    val volumeId: Long?,
+    val title: String,
+    val chapters: List<Chapter>
+)
+
+/** 按分卷把章节分组（未分卷或卷已被删除的章节归入「未分卷」） */
+private fun readerVolumeGroups(chapters: List<Chapter>, volumes: List<Volume>): List<ReaderVolumeGroup> {
+    val known = volumes.map { it.id }.toSet()
+    val byVolume = chapters.groupBy { it.volumeId }
+    val grouped = volumes.mapNotNull { v ->
+        byVolume[v.id]?.takeIf { it.isNotEmpty() }?.let { ReaderVolumeGroup(v.id, v.title, it) }
+    }
+    val orphans = chapters.filter { it.volumeId == null || it.volumeId !in known }
+    return if (orphans.isEmpty()) grouped else listOf(ReaderVolumeGroup(null, "未分卷", orphans)) + grouped
+}
+
+/**
+ * 按「段距」重组正文：正文按自然段切分（丢弃段与段之间已有的空行），
+ * 再用「段距」指定的空行数重新拼接，段落之间的距离完全由该设置控制。
+ */
+private fun applyParagraphSpacing(content: String, blankLines: Int): String {
+    val paragraphs = content.replace("\r\n", "\n")
+        .split('\n')
+        .filter { it.isNotBlank() }
+    if (paragraphs.isEmpty()) return content
+    val gap = "\n".repeat(blankLines.coerceAtLeast(0) + 1)
+    return paragraphs.joinToString(gap)
+}
 
 class ReaderViewModel(container: AppContainer, private val bookId: Long) : ViewModel() {
     private val bookRepository = container.bookRepository
@@ -302,12 +340,30 @@ fun ReaderScreen(bookId: Long, chapterId: Long, onBack: () -> Unit) {
                     ),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                val progress = if (chapters.isEmpty() || index < 0) 0f
-                else (index + chapterProgress.coerceIn(0f, 1f)) / chapters.size
+                // 常驻页脚：分卷进度与全书进度
+                val groups = remember(chapters, volumes) { readerVolumeGroups(chapters, volumes) }
+                val groupIndex = groups.indexOfFirst { g -> g.chapters.any { it.id == currentId } }
+                // 只有真正归入某个分卷时才按卷显示；未分卷的书仍显示全书进度
+                val group = groups.getOrNull(groupIndex)?.takeIf { it.volumeId != null }
+                val inGroupIndex = group?.chapters?.indexOfFirst { it.id == currentId } ?: -1
+                val volumeChapters = group?.chapters ?: chapters
+                val progress = if (group != null && inGroupIndex >= 0) {
+                    (inGroupIndex + chapterProgress.coerceIn(0f, 1f)) / volumeChapters.size
+                } else if (chapters.isEmpty() || index < 0) 0f else {
+                    (index + chapterProgress.coerceIn(0f, 1f)) / chapters.size
+                }
+                val positionText = if (group != null && inGroupIndex >= 0) {
+                    "${group.title} · 第 ${inGroupIndex + 1}/${volumeChapters.size} 章"
+                } else {
+                    "第 ${index + 1}/${chapters.size} 章"
+                }
                 Text(
-                    "第 ${index + 1}/${chapters.size} 章",
+                    positionText,
+                    modifier = Modifier.weight(1f, fill = false),
                     style = MaterialTheme.typography.labelSmall,
-                    color = Color(style.textColor).copy(alpha = 0.6f)
+                    color = Color(style.textColor).copy(alpha = 0.6f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
                 Spacer(Modifier.weight(1f))
                 Text(
@@ -353,6 +409,7 @@ fun ReaderScreen(bookId: Long, chapterId: Long, onBack: () -> Unit) {
 
                         "progress" -> ProgressPanel(
                             chapters = chapters,
+                            volumes = volumes,
                             currentId = currentId,
                             onJump = { id -> jumpTo(chapters.indexOfFirst { it.id == id }) },
                             onDismiss = { panel = null }
@@ -549,7 +606,8 @@ private fun ReaderStylePanel(
             Slider(
                 value = format.blankLines.toFloat(),
                 onValueChange = { v -> onFormat { it.copy(blankLines = v.toInt()) } },
-                valueRange = 0f..2f
+                valueRange = 0f..2f,
+                steps = 1
             )
             Text("首行缩进：${format.indent} 字符")
             Slider(
@@ -613,34 +671,82 @@ private fun RowScope.ReaderTextColorsRow(selected: Int, onPick: (Int) -> Unit) {
 @Composable
 private fun ProgressPanel(
     chapters: List<Chapter>,
+    volumes: List<Volume>,
     currentId: Long,
     onJump: (Long) -> Unit,
     onDismiss: () -> Unit
 ) {
-    var sliderValue by remember {
-        mutableStateOf(chapters.indexOfFirst { it.id == currentId }.coerceAtLeast(0).toFloat())
+    val groups = remember(chapters, volumes) { readerVolumeGroups(chapters, volumes) }
+    // 默认定位到当前章节所在的分卷
+    var volumeIndex by remember(groups) {
+        mutableStateOf(
+            groups.indexOfFirst { g -> g.chapters.any { it.id == currentId } }.coerceAtLeast(0)
+        )
     }
+    val group = groups.getOrNull(volumeIndex)
+    val scoped = group?.chapters?.takeIf { it.isNotEmpty() } ?: chapters
+    // 切换分卷后，滑块定位到该卷内当前章节（不在该卷则回到第一页）
+    var sliderValue by remember(group) {
+        val idx = scoped.indexOfFirst { it.id == currentId }
+        mutableStateOf((if (idx >= 0) idx else 0).toFloat())
+    }
+    val safeIndex = sliderValue.toInt().coerceIn(0, (scoped.size - 1).coerceAtLeast(0))
+    val bookIndex = scoped.getOrNull(safeIndex)?.let { c -> chapters.indexOfFirst { it.id == c.id } } ?: -1
+
     Surface(tonalElevation = 3.dp, modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.fillMaxWidth().padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    "第 ${sliderValue.toInt() + 1} / ${chapters.size} 章",
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.weight(1f)
-                )
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        if (group?.volumeId != null) "${group.title} · 第 ${safeIndex + 1} / ${scoped.size} 章"
+                        else "第 ${safeIndex + 1} / ${scoped.size} 章",
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    if (group?.volumeId != null && bookIndex >= 0) {
+                        Text(
+                            "全书第 ${bookIndex + 1} / ${chapters.size} 章",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
                 IconButton(onClick = onDismiss) {
                     Icon(Icons.Filled.Close, contentDescription = "收起")
                 }
             }
-            if (chapters.isNotEmpty()) {
+            // 分卷切换：多卷时可按卷查看（也用于在卷间跳转）
+            if (groups.size > 1) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    groups.forEachIndexed { i, g ->
+                        FilterChip(
+                            selected = i == volumeIndex,
+                            onClick = { volumeIndex = i },
+                            label = {
+                                Text(
+                                    g.title.ifBlank { "未分卷" },
+                                    style = MaterialTheme.typography.labelMedium,
+                                    maxLines = 1
+                                )
+                            }
+                        )
+                    }
+                }
+                Spacer(Modifier.height(4.dp))
+            }
+            if (scoped.isNotEmpty()) {
                 Slider(
                     value = sliderValue,
                     onValueChange = { sliderValue = it },
-                    valueRange = 0f..(chapters.size - 1).coerceAtLeast(1).toFloat(),
-                    steps = (chapters.size - 2).coerceAtLeast(0)
+                    valueRange = 0f..(scoped.size - 1).coerceAtLeast(1).toFloat(),
+                    steps = (scoped.size - 2).coerceAtLeast(0)
                 )
                 Text(
-                    chapters[sliderValue.toInt().coerceIn(0, chapters.size - 1)].title,
+                    scoped[safeIndex].title,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
@@ -649,8 +755,7 @@ private fun ProgressPanel(
                 Spacer(Modifier.height(8.dp))
                 Button(
                     onClick = {
-                        chapters.getOrNull(sliderValue.toInt().coerceIn(0, chapters.size - 1))
-                            ?.let { onJump(it.id) }
+                        scoped.getOrNull(safeIndex)?.let { onJump(it.id) }
                         onDismiss()
                     },
                     modifier = Modifier.fillMaxWidth()
@@ -753,7 +858,10 @@ private fun ScrollReader(
                     Spacer(Modifier.height(12.dp))
                 }
                 Text(
-                    text = ch.content.ifBlank { "（本章暂无正文）" },
+                    text = applyParagraphSpacing(
+                        ch.content.ifBlank { "（本章暂无正文）" },
+                        format.blankLines
+                    ),
                     style = textStyle
                 )
                 Spacer(Modifier.height(24.dp))
@@ -777,7 +885,9 @@ private fun PagedReader(
     val textStyle = readerTextStyle(style, format)
     val pageScope = rememberCoroutineScope()
 
-    val full: AnnotatedString = remember(chapter?.id, chapter?.title, chapter?.content, style) {
+    val full: AnnotatedString = remember(
+        chapter?.id, chapter?.title, chapter?.content, style, format.blankLines
+    ) {
         buildAnnotatedString {
             if (!chapter?.title.isNullOrBlank()) {
                 withStyle(SpanStyle(fontSize = (style.fontSizeSp + 4).sp, fontWeight = FontWeight.Bold)) {
@@ -785,7 +895,12 @@ private fun PagedReader(
                 }
                 append("\n\n")
             }
-            append(chapter?.content.orEmpty().ifBlank { "（本章暂无正文）" })
+            append(
+                applyParagraphSpacing(
+                    chapter?.content.orEmpty().ifBlank { "（本章暂无正文）" },
+                    format.blankLines
+                )
+            )
         }
     }
 
@@ -825,7 +940,39 @@ private fun PagedReader(
             )
         }
 
-        HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
+        HorizontalPager(
+            state = pagerState,
+            modifier = Modifier
+                .fillMaxSize()
+                // 左右滑动切章：在末页继续左滑进下一章、在首页继续右滑回上一章。
+                // 这里只在 Initial 阶段旁听手势、不消费事件，不影响 Pager 自身的翻页。
+                .pointerInput(Unit) {
+                    val threshold = CHAPTER_SWIPE_DP.dp.toPx()
+                    awaitPointerEventScope {
+                        while (true) {
+                            val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                            val startPage = pagerState.currentPage
+                            val lastPage = pagerState.pageCount - 1
+                            var dx = 0f
+                            var dy = 0f
+                            var pressed = true
+                            while (pressed) {
+                                val event = awaitPointerEvent(PointerEventPass.Initial)
+                                val change = event.changes.firstOrNull { it.id == down.id }
+                                if (change == null) break
+                                dx += change.positionChange().x
+                                dy += change.positionChange().y
+                                pressed = change.pressed
+                            }
+                            // 横向意图明显且已经停在边界页，才切章
+                            if (abs(dx) > threshold && abs(dx) > abs(dy) * 1.5f) {
+                                if (dx < 0f && startPage >= lastPage) nextChapter()
+                                else if (dx > 0f && startPage <= 0) prevChapter()
+                            }
+                        }
+                    }
+                }
+        ) { page ->
             Box(
                 Modifier
                     .fillMaxSize()
