@@ -11,6 +11,7 @@ import com.lianwenqi.app.ai.LocalModelStore
 import com.lianwenqi.app.ai.MemoryEmbeddingGateway
 import com.lianwenqi.app.ai.RemoteEmbeddingGateway
 import com.lianwenqi.app.data.AppDatabase
+import com.lianwenqi.app.data.BackupRepository
 import com.lianwenqi.app.data.BookRepository
 import com.lianwenqi.app.data.ChatRepository
 import com.lianwenqi.app.data.ConfigRepository
@@ -33,6 +34,7 @@ class AppContainer(val app: Application) {
     val aiClient: AiClient = AiClient()
     val prefs: Prefs = Prefs(app)
     val bookRepository: BookRepository = BookRepository(database)
+    val backupRepository: BackupRepository = BackupRepository(database, app, prefs)
     val chatRepository: ChatRepository = ChatRepository(database)
     val outlineRepository: OutlineRepository = OutlineRepository(database)
     val configRepository: ConfigRepository = ConfigRepository(database, aiClient)

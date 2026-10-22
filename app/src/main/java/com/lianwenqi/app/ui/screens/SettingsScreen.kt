@@ -1,8 +1,11 @@
 package com.lianwenqi.app.ui.screens
 
+import android.net.Uri
 import android.widget.Toast
 
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -16,6 +19,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -32,6 +36,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -76,15 +81,22 @@ import com.lianwenqi.app.data.entity.AiModel
 import com.lianwenqi.app.data.entity.ApiType
 import com.lianwenqi.app.data.entity.Prompt
 import com.lianwenqi.app.data.entity.Provider
+import com.lianwenqi.app.data.BackupPayload
+import com.lianwenqi.app.data.RestoreResult
 import com.lianwenqi.app.ui.appViewModel
+import com.lianwenqi.app.util.ExportUtil
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
 
 class SettingsViewModel(private val container: AppContainer) : ViewModel() {
     private val configRepository = container.configRepository
     private val prefs = container.prefs
+    private val backupRepository = container.backupRepository
 
     val providers: StateFlow<List<Provider>> =
         configRepository.observeProviders().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -118,6 +130,37 @@ class SettingsViewModel(private val container: AppContainer) : ViewModel() {
     fun deletePrompt(id: Long) = viewModelScope.launch { configRepository.deletePrompt(id) }
 
     fun setNight(v: Boolean) = viewModelScope.launch { prefs.setNightMode(v) }
+
+    // ---------------- 数据备份 / 数据恢复 ----------------
+
+    fun defaultBackupName(): String = backupRepository.defaultFileName()
+
+    /** 打包全部书籍到缓存 zip（供分享） */
+    fun createBackup(onDone: (Result<File>) -> Unit) = viewModelScope.launch {
+        onDone(runCatching { withContext(Dispatchers.IO) { backupRepository.createBackupZip() } })
+    }
+
+    /** 打包并写入用户选中的保存位置，回调备份的书籍数量 */
+    fun saveBackupTo(uri: Uri, onDone: (Result<Int>) -> Unit) = viewModelScope.launch {
+        onDone(runCatching { withContext(Dispatchers.IO) { backupRepository.writeBackupTo(uri) } })
+    }
+
+    /** 读取并校验备份，同时返回与现有书籍重名的书名 */
+    fun inspectBackup(uri: Uri, onDone: (Result<Pair<BackupPayload, List<String>>>) -> Unit) =
+        viewModelScope.launch {
+            onDone(
+                runCatching {
+                    val payload = withContext(Dispatchers.IO) { backupRepository.readBackup(uri) }
+                    payload to backupRepository.conflictTitles(payload)
+                }
+            )
+        }
+
+    /** 恢复备份：[overwrite] 为 true 时整本覆盖同名书籍，否则跳过同名书籍 */
+    fun restoreBackup(payload: BackupPayload, overwrite: Boolean, onDone: (Result<RestoreResult>) -> Unit) =
+        viewModelScope.launch {
+            onDone(runCatching { backupRepository.restore(payload, overwrite) })
+        }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -144,6 +187,79 @@ fun SettingsScreen(
     var editModel by remember { mutableStateOf<AiModel?>(null) }
     var editPrompt by remember { mutableStateOf<Prompt?>(null) }
     var showPromptDialog by remember { mutableStateOf(false) }
+
+    // 数据备份 / 恢复：showBackupMenu 为备份方式选择弹窗；busyText 非空时展示不可取消的进度弹窗
+    val context = LocalContext.current
+    var showBackupMenu by remember { mutableStateOf(false) }
+    var busyText by remember { mutableStateOf<String?>(null) }
+    var conflicts by remember { mutableStateOf<List<String>>(emptyList()) }
+    var pendingPayload by remember { mutableStateOf<BackupPayload?>(null) }
+
+    fun restore(payload: BackupPayload, overwrite: Boolean) {
+        busyText = if (overwrite) "正在覆盖恢复…" else "正在恢复数据…"
+        vm.restoreBackup(payload, overwrite) { result ->
+            busyText = null
+            result.onSuccess { r ->
+                Toast.makeText(
+                    context,
+                    "恢复完成：新建 ${r.created} 本，覆盖 ${r.replaced} 本，跳过 ${r.skipped} 本",
+                    Toast.LENGTH_LONG
+                ).show()
+            }.onFailure {
+                Toast.makeText(context, "恢复失败：${it.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    fun shareBackup() {
+        busyText = "正在打包备份…"
+        vm.createBackup { result ->
+            busyText = null
+            result.onSuccess { file ->
+                runCatching { ExportUtil.shareFile(context, file, "application/zip", "分享备份") }
+                    .onFailure { Toast.makeText(context, "分享失败：${it.message}", Toast.LENGTH_LONG).show() }
+            }.onFailure {
+                Toast.makeText(context, "备份失败：${it.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    val backupSaveLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/zip")
+    ) { uri ->
+        uri?.let {
+            busyText = "正在导出备份…"
+            vm.saveBackupTo(it) { result ->
+                busyText = null
+                result.onSuccess { count ->
+                    Toast.makeText(context, "备份已保存，共 $count 本书", Toast.LENGTH_LONG).show()
+                }.onFailure {
+                    Toast.makeText(context, "备份失败：${it.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    val backupOpenLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let {
+            busyText = "正在读取备份…"
+            vm.inspectBackup(it) { result ->
+                busyText = null
+                result.onSuccess { (payload, duplicated) ->
+                    if (duplicated.isEmpty()) {
+                        restore(payload, overwrite = false)
+                    } else {
+                        pendingPayload = payload
+                        conflicts = duplicated
+                    }
+                }.onFailure {
+                    Toast.makeText(context, "恢复失败：${it.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
 
     // 用 Box 承载页面与弹层：InputDialog 是组合内覆盖层，需叠在设置页之上才能拿到输入法 inset
     Box(Modifier.fillMaxSize()) {
@@ -238,6 +354,64 @@ fun SettingsScreen(
                             Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(8.dp))
+                                .clickable { showBackupMenu = true }
+                                .padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text("数据备份")
+                                Text(
+                                    "把全部书籍的大纲、正文与梗概打包成 zip，可保存到本机或分享上传",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Icon(
+                                Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Spacer(Modifier.height(12.dp))
+                        HorizontalDivider()
+                        Spacer(Modifier.height(12.dp))
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable {
+                                    backupOpenLauncher.launch(
+                                        arrayOf(
+                                            "application/zip",
+                                            "application/x-zip-compressed",
+                                            "application/octet-stream"
+                                        )
+                                    )
+                                }
+                                .padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text("数据恢复")
+                                Text(
+                                    "导入本应用生成的备份 zip；书名重合时可选择覆盖或跳过",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Icon(
+                                Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Spacer(Modifier.height(12.dp))
+                        HorizontalDivider()
+                        Spacer(Modifier.height(12.dp))
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
                                 .clickable(onClick = onOpenAiTools)
                                 .padding(vertical = 4.dp),
                             verticalAlignment = Alignment.CenterVertically
@@ -311,7 +485,7 @@ fun SettingsScreen(
                         Spacer(Modifier.height(12.dp))
                         Text(
                             "炼文器 v0.1.0 · 基础框架\n" +
-                                "数据保存在本机 Room 数据库，导出使用系统分享。",
+                                "数据保存在本机 Room 数据库，可在「数据备份」里打包迁移。",
                             style = MaterialTheme.typography.bodySmall
                         )
                     }
@@ -350,6 +524,94 @@ fun SettingsScreen(
                 initial = editPrompt,
                 onDismiss = { showPromptDialog = false },
                 onSave = { vm.savePrompt(it); showPromptDialog = false }
+            )
+        }
+
+        // 备份方式：保存到文件（SAF）或直接分享
+        if (showBackupMenu) {
+            AlertDialog(
+                onDismissRequest = { showBackupMenu = false },
+                title = { Text("数据备份") },
+                text = {
+                    Text(
+                        "把全部书籍的大纲、正文与梗概打包成 zip 文件。\n\n" +
+                            "· 保存到文件：自己选择本机或网盘的保存位置\n" +
+                            "· 分享：发送到聊天工具 / 网盘等其它应用"
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        showBackupMenu = false
+                        backupSaveLauncher.launch(vm.defaultBackupName())
+                    }) { Text("保存到文件") }
+                },
+                dismissButton = {
+                    Row {
+                        TextButton(onClick = { showBackupMenu = false; shareBackup() }) { Text("分享") }
+                        TextButton(onClick = { showBackupMenu = false }) { Text("取消") }
+                    }
+                }
+            )
+        }
+
+        // 同名书籍：询问覆盖还是跳过
+        pendingPayload?.let { payload ->
+            AlertDialog(
+                onDismissRequest = { pendingPayload = null; conflicts = emptyList() },
+                title = { Text("发现同名书籍") },
+                text = {
+                    Column(
+                        Modifier
+                            .heightIn(max = 280.dp)
+                            .verticalScroll(rememberScrollState())
+                    ) {
+                        Text("备份里以下书籍与书架上现有的书籍同名：")
+                        Spacer(Modifier.height(8.dp))
+                        conflicts.forEach { Text("· $it") }
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "「覆盖」会用备份里的内容整本替换现有书籍；" +
+                                "「跳过」则保留现有书籍，只恢复其它书。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        pendingPayload = null
+                        conflicts = emptyList()
+                        restore(payload, overwrite = true)
+                    }) { Text("覆盖") }
+                },
+                dismissButton = {
+                    Row {
+                        TextButton(onClick = {
+                            pendingPayload = null
+                            conflicts = emptyList()
+                            restore(payload, overwrite = false)
+                        }) { Text("跳过") }
+                        TextButton(onClick = {
+                            pendingPayload = null
+                            conflicts = emptyList()
+                        }) { Text("取消") }
+                    }
+                }
+            )
+        }
+
+        // 打包 / 读取 / 恢复进度：不可取消，避免中途留下半份数据
+        busyText?.let { message ->
+            AlertDialog(
+                onDismissRequest = {},
+                confirmButton = {},
+                text = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(12.dp))
+                        Text(message)
+                    }
+                }
             )
         }
     }

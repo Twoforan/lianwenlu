@@ -1033,17 +1033,36 @@ class AiChatViewModel(
             .filter { it.role == ChatRole.USER || it.active }
             .let { if (maxContext > 0) it.takeLast(maxContext) else it }
         // 前情提要只取可见的对话内容（隐藏的附加参考资料块不进前情提要，避免与上方参考资料重复）。
-        // 按章节分段：章节切换时插入一行章节标题（如「第3章」），让模型知道每段对话出自哪一章。
-        val titles = raw.map { it.chapterId }.distinct()
+        // 按章节分段：章节切换时插入一行章节标题，让模型知道每段对话出自哪一章；
+        // 各卷章节会重新从「第1章」编号，因此在卷切换处额外标注卷名（如「第二卷：第4章」），
+        // 同卷内后续章节只写章名（如「第5章」），避免不同卷的同号章节混淆。
+        val chapterInfo = raw.map { it.chapterId }.distinct()
             .filter { it != 0L }
-            .associateWith { id -> bookRepository.getChapter(id)?.title?.trim().orEmpty() }
+            .associateWith { id -> bookRepository.getChapter(id) }
+        val volumesByBook = chapterInfo.values.filterNotNull().map { it.bookId }.distinct()
+            .associateWith { bookId ->
+                bookRepository.getVolumes(bookId).associate { it.id to it.title.trim() }
+            }
         val prior = buildString {
             var lastChapterId = Long.MIN_VALUE
+            var lastVolumeId: Long? = null
+            var volumeMarked = false
             raw.forEach { m ->
                 if (m.chapterId != lastChapterId) {
-                    if (m.chapterId != 0L) {
+                    val chapter = chapterInfo[m.chapterId]
+                    if (chapter != null) {
                         if (isNotEmpty()) append('\n')
-                        append(titles[m.chapterId].orEmpty().ifBlank { "（章节已删除）" }).append('\n')
+                        val volumeId = chapter.volumeId
+                        val volumeTitle = volumeId?.let { volumesByBook[chapter.bookId]?.get(it) }.orEmpty()
+                        if ((volumeId != lastVolumeId || !volumeMarked) && volumeTitle.isNotBlank()) {
+                            append(volumeTitle).append('：')
+                        }
+                        append(chapter.title.trim().ifBlank { "（章节已删除）" }).append('\n')
+                        lastVolumeId = volumeId
+                        volumeMarked = true
+                    } else if (m.chapterId != 0L) {
+                        if (isNotEmpty()) append('\n')
+                        append("（章节已删除）").append('\n')
                     }
                     lastChapterId = m.chapterId
                 }

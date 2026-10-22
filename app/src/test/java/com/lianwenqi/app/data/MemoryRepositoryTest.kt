@@ -145,6 +145,7 @@ class MemoryRepositoryTest {
         override suspend fun update(volume: Volume) = error("未使用")
         override suspend fun setOrder(id: Long, order: Int) = error("未使用")
         override suspend fun deleteById(id: Long) = error("未使用")
+        override suspend fun deleteByBook(bookId: Long) = error("未使用")
     }
 
     private fun chapter(id: Long, bookId: Long, volumeId: Long, content: String, updatedAt: Long) =

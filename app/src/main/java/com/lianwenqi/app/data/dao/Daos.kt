@@ -24,6 +24,9 @@ interface BookGroupDao {
     @Query("SELECT * FROM book_group ORDER BY sortOrder ASC, id ASC")
     fun observeAll(): Flow<List<BookGroup>>
 
+    @Query("SELECT * FROM book_group ORDER BY sortOrder ASC, id ASC")
+    suspend fun getAll(): List<BookGroup>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(group: BookGroup): Long
 
@@ -100,6 +103,10 @@ interface VolumeDao {
 
     @Query("DELETE FROM volume WHERE id = :id")
     suspend fun deleteById(id: Long)
+
+    /** 清空某本书的全部分卷（数据恢复时整本覆盖用） */
+    @Query("DELETE FROM volume WHERE bookId = :bookId")
+    suspend fun deleteByBook(bookId: Long)
 }
 
 @Dao
@@ -181,6 +188,10 @@ interface OutlineDao {
 
     @Query("DELETE FROM outline_item WHERE id = :id")
     suspend fun deleteById(id: Long)
+
+    /** 清空某本书的全部大纲条目（数据恢复时整本覆盖用） */
+    @Query("DELETE FROM outline_item WHERE bookId = :bookId")
+    suspend fun deleteByBook(bookId: Long)
 }
 
 /** 某章已向量化块的哈希与生成时的章节更新时间，用于增量判定 */
