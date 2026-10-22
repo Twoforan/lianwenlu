@@ -1214,12 +1214,18 @@ private fun AiAssistantPanel(
             val focusIndex = chapterGroups.indexOf(focusGroup)
             val focusIsBound = (focusGroup?.chapterId ?: 0L) > 0
             val listState = rememberLazyListState()
-            // 打开抽屉 / 切换章节 / 新增消息后：绑定章节则滚到该章节对话处，否则滚到最后一条对话的末端
+            // 打开抽屉 / 切换章节 / 新增消息后：绑定章节则滚到该章节对话处，否则滚到最后一条对话的末端。
+            // 生成中优先滚到底部，让流式输出始终可见（注意 pendingReplyTo 不作为 key：
+            // 生成结束它归零时不应再重跑本效果，否则会把视图又拉回分组顶部）
             LaunchedEffect(chapterId, entries.size) {
                 if (entries.isEmpty()) return@LaunchedEffect
                 snapshotFlow { listState.layoutInfo.totalItemsCount }.first { it > 0 }
-                if (focusIsBound && focusIndex >= 0) listState.scrollToItem(focusIndex)
-                else listState.scrollToBottom()
+                if (pendingReplyTo > 0L || !focusIsBound || focusIndex < 0) listState.scrollToBottom()
+                else listState.scrollToItem(focusIndex)
+            }
+            // 流式增量到达时跟随到底部，保证「逐步输出」实时可见
+            LaunchedEffect(pendingReplyTo, streamingContent.length) {
+                if (pendingReplyTo > 0L) listState.scrollToBottom()
             }
             // 一条对话的渲染（侧边栏专属：回答可一键写入当前章节）
             val renderEntry: @Composable (ChatEntry) -> Unit = { entry ->
@@ -1243,11 +1249,19 @@ private fun AiAssistantPanel(
                     onSwitchVariant = { uid, mid -> vm.switchVariant(uid, mid) },
                     onViewLog = { logTarget = it },
                     onViewPrompt = { promptTarget = it },
-                    onStop = { vm.stopGenerating() },
+                    onStop = { if (generationRunning) vm.cancelGeneration() else vm.stopGenerating() },
                     onWriteToChapter = onWriteToChapter,
                     // 「写入梗概」只对本章的回答生效，避免在别的章节的抽屉里误写到当前章节
                     onWriteSummary = { target -> if (target.chapterId == chapterId) onGeneratedSummary(target.content) }
                 )
+            }
+            // 生成中：自动展开本轮回答所在的对话分组，流式输出才能在对话区被看到
+            LaunchedEffect(pendingReplyTo, chapterGroups) {
+                if (pendingReplyTo <= 0L) return@LaunchedEffect
+                val group = chapterGroups.firstOrNull { g ->
+                    g.entries.any { it is ChatEntry.User && it.msg.id == pendingReplyTo }
+                }
+                if (group != null && group.key !in expandedGroups) vm.setChatGroupExpanded(group.key, true)
             }
             // 对话区与展开面板共用这块剩余高度：面板再高也只会压缩对话区，
             // 不会把下方的按钮行、输入框、文件清单与底部工具行挤出屏幕（分屏 / 小窗）。
@@ -2668,7 +2682,8 @@ private suspend fun LazyListState.scrollToBottom() {
     val last = layoutInfo.totalItemsCount - 1
     if (last < 0) return
     scrollToItem(last)
-    scrollBy(Float.MAX_VALUE)
+    // 用足够大但有限的像素值：Float.MAX_VALUE 参与内部累加会溢出成 Infinity/NaN，反而滚不到底部
+    scrollBy(100_000f)
 }
 
 /** 把扁平的消息列表折叠成「用户消息 + 其回答版本」的展示列表 */

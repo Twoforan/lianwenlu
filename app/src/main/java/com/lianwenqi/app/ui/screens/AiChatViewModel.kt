@@ -422,6 +422,12 @@ class AiChatViewModel(
     private var generationMemoryScopeAsk: CompletableDeferred<Set<Long>?>? = null
     private var generationSummaryFailed: CompletableDeferred<SummaryFailureChoice>? = null
 
+    /** 生成任务令牌：任务收尾时据此判断是否仍需复位状态，避免旧任务清掉新任务的状态 */
+    private var generationSeq = 0
+
+    /** 正在流式回显的生成轮次（用户消息 id）；0 表示当前没有回显中的生成 */
+    private var generationStreamUserId = 0L
+
     /** 梗概子调用结果 */
     private sealed interface SummaryCall {
         /** 成功产出：[promptTokens] 等随回答落库，供界面展示 token 消耗与缓存命中率 */
@@ -493,7 +499,9 @@ class AiChatViewModel(
         val turns = assembleGenerationTurns(
             prefix, ref, history, buildSummaryTurns(userPrompt, plan.summaryWordRange, ref.extra, chapterTitle)
         )
-        when (val r = runSummaryCall(plan, turns)) {
+        // 生成过程中的逐步输出实时回显在本轮对话的回答位置（显示「正在生成」）
+        beginGenerationStreaming(round.userId)
+        when (val r = runSummaryCall(plan, turns, stream = true)) {
             is SummaryCall.Ok -> {
                 persistGenerationAnswer(
                     sid = sid,
@@ -671,10 +679,28 @@ class AiChatViewModel(
                 chapterTitle = chapterTitle
             )
         )
+        // 先落「用户消息」：输入框提示词 + 「生成正文」标记；本轮新增的参考资料随消息落库成为历史的一部分。
+        // 放在模型请求之前，回答位置才能就地显示流式输出（「正在生成」）。
+        // 若用户点了某条历史提示词的「编辑」后再生成，则改写那一轮并追加新回答版本（见 [openGenerationRound]）
+        val round = openGenerationRound(
+            sid = sid,
+            chapterId = chapterId,
+            label = genLabelContent,
+            userPrompt = userPrompt,
+            contextSnapshot = currentSnapshot().encode(),
+            promptExtra = listOf(ref.extra, adaptive, memoryRef.text).filter { it.isNotBlank() }.joinToString("\n\n"),
+            editingId = editingId
+        )
+        // 选定标签的内容已随本轮消息落库，此时记入前缀去重（后续轮次只写「参见大纲『X』」）
+        markGenerationOutlines(sid, sp, ref.freshOutlineIds)
         // 提示词即将随请求发出：立刻清空输入框，避免生成期间误以为没发送出去、再次点击重复生成
         input.value = ""
+        // 「同时生成梗概」时梗概子调用保持静默，只把正文输出实时回显到对话中
+        beginGenerationStreaming(round.userId)
         val result = configRepository.sendToModel(
-            modelId, AiRequest(turns = turns, model = "", temperature = 0f, maxTokens = 0)
+            modelId,
+            AiRequest(turns = turns, model = "", temperature = 0f, maxTokens = 0),
+            onDelta = generationDeltaHandler()
         )
         if (generationCancelled) return@launchGeneration
         if (!result.success) {
@@ -689,24 +715,13 @@ class AiChatViewModel(
             return@launchGeneration
         }
         val enforced = enforceWordRange(raw, plan.contentWordRange)
+        // 落库的是截断 / 校正后的正文：把回显内容同步成最终文本，避免完成后内容突变
+        if (streamingContent.value.isNotEmpty()) streamingContent.value = enforced.text
         if (enforced.over) {
             generationMessage.value = "正文超出设定上限，已截断到最后一个完整句子"
         } else if (enforced.under) {
             generationMessage.value = "正文略短于设定下限，可继续让 AI 补写"
         }
-        // 先落「用户消息」：输入框提示词 + 「生成正文」标记；本轮新增的参考资料随消息落库成为历史的一部分。
-        // 若用户点了某条历史提示词的「编辑」后再生成，则改写那一轮并追加新回答版本（见 [openGenerationRound]）
-        val round = openGenerationRound(
-            sid = sid,
-            chapterId = chapterId,
-            label = genLabelContent,
-            userPrompt = userPrompt,
-            contextSnapshot = currentSnapshot().encode(),
-            promptExtra = listOf(ref.extra, adaptive, memoryRef.text).filter { it.isNotBlank() }.joinToString("\n\n"),
-            editingId = editingId
-        )
-        // 选定标签的内容已随本轮消息落库，此时记入前缀去重（后续轮次只写「参见大纲『X』」）
-        markGenerationOutlines(sid, sp, ref.freshOutlineIds)
         // 生成结果作为一条普通 AI 回答进入本会话：不自动写入正文，由用户在编辑器点「写入本章正文」决定
         persistGenerationAnswer(
             sid = sid,
@@ -773,31 +788,89 @@ class AiChatViewModel(
         generationSummaryFailed = null
         _generationDialog.value = null
         _generationState.value = FlowState.Cancelled
+        // 立即清掉「正在生成」的流式回显，避免被取消的请求稍后才收尾时界面仍停在生成中
+        endGenerationStreaming()
         generationJob?.cancel()
         generationJob = null
     }
 
+    /**
+     * 启动一次生成任务。
+     * 复位统一放在 launch 的 finally 里，并用 [generationSeq] 判断归属：
+     * 被停止 / 被新任务接管的旧任务不会覆盖新任务的生成态，从根本上避免「一直正在生成中」。
+     */
     private fun launchGeneration(block: suspend (Long) -> Unit) {
+        // 执行阶段或已有任务在途（含弹窗收集阶段）时忽略新请求：
+        // 若在收集阶段强行取消旧任务，旧任务 finally 里的弹窗清理会误清新任务的弹窗，
+        // 导致新任务永远等不到弹窗结果，状态卡死。
         if (_generationState.value == FlowState.Executing) return
-        generationJob?.cancel()
+        if (generationJob?.isActive == true) return
+        val token = ++generationSeq
         generationCancelled = false
         generationMessage.value = null
+        endGenerationStreaming()
         _generationState.value = FlowState.CollectingConfig
         generationJob = viewModelScope.launch {
             val sid = _sessionId.value
-            if (sid == null) {
-                _generationDialog.value = null
-                _generationState.value = FlowState.Failed
-                generationMessage.value = "请先在本章侧边对话中建立会话后再生成"
-                return@launch
-            }
             try {
+                if (sid == null) {
+                    _generationDialog.value = null
+                    _generationState.value = FlowState.Failed
+                    generationMessage.value = "请先在本章侧边对话中建立会话后再生成"
+                    return@launch
+                }
                 block(sid)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
                 _generationState.value = FlowState.Failed
                 generationMessage.value = e.message ?: "生成失败"
+            } finally {
+                if (token == generationSeq) {
+                    // 任务异常结束（含被取消）却仍停在 Executing 时，补一个终态，界面不会永久显示「生成中」
+                    if (_generationState.value == FlowState.Executing) {
+                        _generationState.value = FlowState.Cancelled
+                    }
+                    endGenerationStreaming()
+                    generationJob = null
+                }
+            }
+        }
+    }
+
+    /** 把生成请求的流式增量回显到本轮对话的回答位置 */
+    private fun beginGenerationStreaming(userId: Long) {
+        if (userId <= 0L) return
+        generationStreamUserId = userId
+        pendingReplyToId.value = userId
+        streamingContent.value = ""
+        streamingReasoning.value = ""
+    }
+
+    /** 结束流式回显：把临时「正在生成」卡片让位给已落库的回答 */
+    private fun endGenerationStreaming() {
+        val id = generationStreamUserId
+        if (id <= 0L) return
+        generationStreamUserId = 0L
+        if (pendingReplyToId.value == id) {
+            pendingReplyToId.value = 0L
+            streamingContent.value = ""
+            streamingReasoning.value = ""
+        }
+    }
+
+    /** 生成请求的流式回调：正文 / 思考增量累积到「正在生成」状态，用于实时回显 */
+    private fun generationDeltaHandler(): (String, String) -> Unit {
+        val contentBuf = StringBuilder()
+        val reasoningBuf = StringBuilder()
+        return { content, reasoning ->
+            if (content.isNotEmpty()) {
+                contentBuf.append(content)
+                streamingContent.value = contentBuf.toString()
+            }
+            if (reasoning.isNotEmpty()) {
+                reasoningBuf.append(reasoning)
+                streamingReasoning.value = reasoningBuf.toString()
             }
         }
     }
@@ -821,8 +894,11 @@ class AiChatViewModel(
         return try {
             deferred.await()
         } finally {
-            generationOutlinePick = null
-            if (_generationDialog.value === GenerationDialog.PickSummaryOutlines) _generationDialog.value = null
+            // 只清理「自己」登记的弹窗，避免被取消的旧任务收尾时误清新任务正在等待的弹窗
+            if (generationOutlinePick === deferred) {
+                generationOutlinePick = null
+                if (_generationDialog.value === GenerationDialog.PickSummaryOutlines) _generationDialog.value = null
+            }
         }
     }
 
@@ -834,8 +910,10 @@ class AiChatViewModel(
         return try {
             deferred.await()
         } finally {
-            generationMemoryAsk = null
-            if (_generationDialog.value is GenerationDialog.AskMemoryRetrieval) _generationDialog.value = null
+            if (generationMemoryAsk === deferred) {
+                generationMemoryAsk = null
+                if (_generationDialog.value is GenerationDialog.AskMemoryRetrieval) _generationDialog.value = null
+            }
         }
     }
 
@@ -848,8 +926,10 @@ class AiChatViewModel(
         return try {
             deferred.await()?.takeIf { it.isNotEmpty() }
         } finally {
-            generationMemoryScopeAsk = null
-            if (_generationDialog.value is GenerationDialog.PickMemoryScope) _generationDialog.value = null
+            if (generationMemoryScopeAsk === deferred) {
+                generationMemoryScopeAsk = null
+                if (_generationDialog.value is GenerationDialog.PickMemoryScope) _generationDialog.value = null
+            }
         }
     }
 
@@ -861,8 +941,10 @@ class AiChatViewModel(
         return try {
             deferred.await()
         } finally {
-            generationSummaryFailed = null
-            if (_generationDialog.value is GenerationDialog.SummaryFailed) _generationDialog.value = null
+            if (generationSummaryFailed === deferred) {
+                generationSummaryFailed = null
+                if (_generationDialog.value is GenerationDialog.SummaryFailed) _generationDialog.value = null
+            }
         }
     }
 
@@ -870,16 +952,25 @@ class AiChatViewModel(
      * 执行一次梗概生成（独立 messages，不进入正文请求的历史）。
      * messages 由调用方组装（见 [assembleGenerationTurns]）：聊天同构前缀块 +（可选）历史 + 生成专用块。
      */
-    private suspend fun runSummaryCall(plan: GenerationPlan, turns: List<ChatTurn>): SummaryCall {
+    private suspend fun runSummaryCall(
+        plan: GenerationPlan,
+        turns: List<ChatTurn>,
+        /** true：单独「生成梗概」时流式回显到对话；false：「同时生成梗概」的子调用保持静默 */
+        stream: Boolean = false
+    ): SummaryCall {
         val modelId = activeModelId.value
         if (modelId <= 0L) return SummaryCall.Failed("请先在设置中配置并选择一个模型")
         val result = configRepository.sendToModel(
-            modelId, AiRequest(turns = turns, model = "", temperature = 0f, maxTokens = 0)
+            modelId,
+            AiRequest(turns = turns, model = "", temperature = 0f, maxTokens = 0),
+            onDelta = if (stream) generationDeltaHandler() else null
         )
         if (!result.success) return SummaryCall.Failed(result.error?.userMessage ?: "生成梗概失败")
         val raw = result.content.trim()
         if (raw.isBlank()) return SummaryCall.Failed("梗概生成失败：模型返回空内容")
         val enforced = enforceWordRange(raw, plan.summaryWordRange)
+        // 落库的是截断 / 校正后的梗概：把回显内容同步成最终文本，避免完成后内容突变
+        if (stream && streamingContent.value.isNotEmpty()) streamingContent.value = enforced.text
         if (enforced.over) {
             generationMessage.value = "梗概超出设定上限，已截断到最后一个完整句子"
         } else if (enforced.under) {
