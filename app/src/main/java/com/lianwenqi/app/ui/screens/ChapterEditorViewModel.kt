@@ -91,7 +91,6 @@ class ChapterEditorViewModel(
         saveJob?.cancel()
         commit(currentChapterId, title, summary, content, cursor)
         bookRepository.touchBook(bookId, currentChapterId, title)
-        autoVectorizeIfEnabled()
     }
 
     /**
@@ -103,20 +102,7 @@ class ChapterEditorViewModel(
         viewModelScope.launch {
             saveJob?.cancel()
             bookRepository.saveChapterContent(chapterId, title, summary, content, cursor)
-            autoVectorizeIfEnabled()
         }
-
-    /**
-     * A2（默认勾选记忆检索）开启时：正文保存后由应用级协程域后台静默向量化本书。
-     * 走增量逻辑，未变更的章节直接命中哈希跳过，因此代价只与「本次改动的章节」相关。
-     */
-    private fun autoVectorizeIfEnabled() {
-        container.appScope.launch {
-            if (prefs.memoryDefaultEnabled.first()) {
-                container.memoryRepository.vectorize(bookId)
-            }
-        }
-    }
 
     private suspend fun commit(chapterId: Long, title: String, summary: String, content: String, cursor: Int) {
         bookRepository.saveChapterContent(chapterId, title, summary, content, cursor)

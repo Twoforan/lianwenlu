@@ -101,13 +101,13 @@ class MemorySettingsViewModel(private val container: AppContainer) : ViewModel()
     val model: StateFlow<String> =
         prefs.memoryEmbeddingModel.stateIn(viewModelScope, SharingStarted.Eagerly, "")
 
-    /** 默认勾选记忆检索（开启后对话持续勾选，并在正文更新时自动向量化本书） */
-    val defaultEnabled: StateFlow<Boolean> =
-        prefs.memoryDefaultEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    /** 记忆检索是否限定范围（开启后每次勾选都会先选章节范围） */
+    val scopeLimitEnabled: StateFlow<Boolean> =
+        prefs.memoryScopeLimitEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
     /**
      * 向量化工具是否已配置可用（API 模式需填齐 baseUrl / apiKey / 向量模型名；本地模式需已启用）。
-     * 未配置时「默认勾选记忆检索」不可操作，记忆检索按钮也不可用。
+     * 未配置时「记忆检索」按钮不可用。
      */
     val vectorizationReady: StateFlow<Boolean> =
         prefs.memoryVectorizationReady.stateIn(viewModelScope, SharingStarted.Eagerly, false)
@@ -199,7 +199,7 @@ class MemorySettingsViewModel(private val container: AppContainer) : ViewModel()
     fun setBaseUrl(v: String) = viewModelScope.launch { prefs.setMemoryEmbeddingBaseUrl(v) }
     fun setApiKey(v: String) = viewModelScope.launch { prefs.setMemoryEmbeddingApiKey(v) }
     fun setModel(v: String) = viewModelScope.launch { prefs.setMemoryEmbeddingModel(v) }
-    fun setDefaultEnabled(v: Boolean) = viewModelScope.launch { prefs.setMemoryDefaultEnabled(v) }
+    fun setScopeLimitEnabled(v: Boolean) = viewModelScope.launch { prefs.setMemoryScopeLimitEnabled(v) }
     fun setAutoVectorize(v: Boolean) = viewModelScope.launch { prefs.setMemoryAutoVectorize(v) }
     fun setBlockQuota(v: Int) = viewModelScope.launch { prefs.setMemoryBlockQuota(v) }
     fun setSearchScope(v: String) = viewModelScope.launch { prefs.setMemorySearchScope(v) }
@@ -207,7 +207,7 @@ class MemorySettingsViewModel(private val container: AppContainer) : ViewModel()
 
 /**
  * 长期记忆（书本向量化）设置：
- * 向量化工具（厂商 Embedding API / 本地工具，互斥）、记忆检索默认开关、自动向量化开关与进度入口。
+ * 向量化工具（厂商 Embedding API / 本地工具，互斥）、记忆检索范围限定、自动向量化开关与进度入口。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -223,7 +223,7 @@ fun MemorySettingsScreen(
     val savedBaseUrl by vm.baseUrl.collectAsState()
     val savedApiKey by vm.apiKey.collectAsState()
     val savedModel by vm.model.collectAsState()
-    val defaultEnabled by vm.defaultEnabled.collectAsState()
+    val scopeLimitEnabled by vm.scopeLimitEnabled.collectAsState()
     val vectorizationReady by vm.vectorizationReady.collectAsState()
     val autoVectorize by vm.autoVectorize.collectAsState()
     val modelOptions by vm.modelOptions.collectAsState()
@@ -404,23 +404,20 @@ fun MemorySettingsScreen(
 
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("默认勾选记忆检索")
+                    Text("记忆检索是否限定范围")
                     Text(
-                        if (!vectorizationReady) {
-                            "需先在上方配置向量化工具（填齐 baseUrl / apiKey / 向量模型，或启用本地工具）后才能开启。"
+                        if (scopeLimitEnabled) {
+                            "已开启：每次勾选记忆检索会先弹窗选择检索范围（可全选全部章节，或按分卷整卷勾选、单选章节）。"
                         } else {
-                            "开启后对已向量化的书籍持续勾选记忆检索，并在本书正文有更新时自动向量化本书；" +
-                                "未选择书籍或本书尚未向量化时不勾选。关闭则取消勾选，改为每次手动勾选。"
+                            "关闭时每次检索都覆盖全书章节。开启后每次勾选记忆检索都会先选择章节范围（默认全部章节）。"
                         },
                         style = MaterialTheme.typography.bodySmall,
-                        color = if (!vectorizationReady) MaterialTheme.colorScheme.error
-                        else MaterialTheme.colorScheme.onSurfaceVariant
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
                 Switch(
-                    checked = defaultEnabled,
-                    enabled = vectorizationReady,
-                    onCheckedChange = { vm.setDefaultEnabled(it) }
+                    checked = scopeLimitEnabled,
+                    onCheckedChange = { vm.setScopeLimitEnabled(it) }
                 )
             }
 
@@ -428,27 +425,19 @@ fun MemorySettingsScreen(
             HorizontalDivider()
             Spacer(Modifier.height(12.dp))
 
-            // 「默认勾选记忆检索」开启时强制开启该项，开关置灰不可操作
-            val autoVectorizeToggle: ((Boolean) -> Unit)? =
-                if (defaultEnabled) null else { v -> vm.setAutoVectorize(v) }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("勾选记忆检索时自动向量化")
                     Text(
-                        if (defaultEnabled) {
-                            "已由「默认勾选记忆检索」强制开启，暂不可关闭；关闭上一项后可自行控制。"
-                        } else {
-                            "开启后，勾选记忆检索时按数据库中本书的最新进度自动续跑向量化；" +
-                                "关闭则本书正文有更新时每次弹窗询问是否向量化到最新章节。"
-                        },
+                        "开启后，勾选记忆检索时按数据库中本书的最新进度自动续跑向量化；" +
+                            "关闭则本书正文有更新时每次弹窗询问是否向量化到最新章节。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
                 Switch(
-                    checked = defaultEnabled || autoVectorize,
-                    enabled = !defaultEnabled,
-                    onCheckedChange = autoVectorizeToggle
+                    checked = autoVectorize,
+                    onCheckedChange = { vm.setAutoVectorize(it) }
                 )
             }
 

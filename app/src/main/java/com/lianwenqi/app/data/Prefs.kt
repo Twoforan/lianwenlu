@@ -136,9 +136,9 @@ class Prefs(private val context: Context) {
         val memoryEmbeddingBaseUrl = stringPreferencesKey("memory_embedding_base_url")
         val memoryEmbeddingApiKey = stringPreferencesKey("memory_embedding_api_key")
         val memoryEmbeddingModel = stringPreferencesKey("memory_embedding_model")
-        val memoryDefaultEnabled = booleanPreferencesKey("memory_default_enabled")
         val memoryAutoVectorize = booleanPreferencesKey("memory_auto_vectorize")
         val memoryRetrievalEnabled = booleanPreferencesKey("memory_retrieval_enabled")
+        val memoryScopeLimitEnabled = booleanPreferencesKey("memory_scope_limit_enabled")
         val memoryBlockQuota = intPreferencesKey("memory_block_quota")
         val memorySearchScope = stringPreferencesKey("memory_search_scope")
 
@@ -262,9 +262,9 @@ class Prefs(private val context: Context) {
     val memoryEmbeddingModel: Flow<String> =
         context.dataStore.data.map { it[K.memoryEmbeddingModel] ?: "" }
 
-    /** 默认勾选记忆检索：开启后对话持续勾选，并在正文更新时后台自动向量化本书 */
-    val memoryDefaultEnabled: Flow<Boolean> =
-        context.dataStore.data.map { it[K.memoryDefaultEnabled] ?: false }
+    /** 记忆检索是否限定范围：开启后每次勾选记忆检索都先选择章节范围（默认关闭） */
+    val memoryScopeLimitEnabled: Flow<Boolean> =
+        context.dataStore.data.map { it[K.memoryScopeLimitEnabled] ?: false }
 
     /** 勾选记忆检索时自动续跑向量化（关闭则正文有更新时每次弹窗询问） */
     val memoryAutoVectorize: Flow<Boolean> =
@@ -402,24 +402,13 @@ class Prefs(private val context: Context) {
     suspend fun setMemoryEmbeddingApiKey(v: String) = writePrefs { it[K.memoryEmbeddingApiKey] = v }
     suspend fun setMemoryEmbeddingModel(v: String) = writePrefs { it[K.memoryEmbeddingModel] = v }
 
-    /**
-     * 切换「默认勾选记忆检索」：
-     * 开启时强制打开「自动向量化」（此时用户不可关闭）；勾选状态不在此写入，
-     * 由运行期按「当前书籍是否已向量化」推导（未选择书籍 / 尚未向量化的书籍不勾选）；
-     * 关闭时把用户手动勾选的记忆检索一并取消。
-     */
-    suspend fun setMemoryDefaultEnabled(v: Boolean) = writePrefs {
-        it[K.memoryDefaultEnabled] = v
-        if (v) {
-            it[K.memoryAutoVectorize] = true
-        } else {
-            it[K.memoryRetrievalEnabled] = false
-        }
+    suspend fun setMemoryScopeLimitEnabled(v: Boolean) = writePrefs {
+        it[K.memoryScopeLimitEnabled] = v
+        // 关闭限定范围时取消勾选，避免仍按上一次选中的章节范围悄悄检索
+        if (!v) it[K.memoryRetrievalEnabled] = false
     }
 
     suspend fun setMemoryAutoVectorize(v: Boolean) = writePrefs {
-        // 「默认勾选记忆检索」开启时该项被强制开启，用户不可关闭
-        if (!v && (it[K.memoryDefaultEnabled] ?: false)) return@writePrefs
         it[K.memoryAutoVectorize] = v
     }
     suspend fun setMemoryRetrievalEnabled(v: Boolean) = writePrefs { it[K.memoryRetrievalEnabled] = v }

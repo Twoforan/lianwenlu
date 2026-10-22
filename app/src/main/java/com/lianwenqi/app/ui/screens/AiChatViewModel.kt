@@ -10,6 +10,9 @@ import com.lianwenqi.app.ai.GenerationDialog
 import com.lianwenqi.app.ai.GenerationDialogKind
 import com.lianwenqi.app.ai.GenerationMode
 import com.lianwenqi.app.ai.GenerationPlan
+import com.lianwenqi.app.ai.MemoryScopeChapter
+import com.lianwenqi.app.ai.MemoryScopePick
+import com.lianwenqi.app.ai.MemoryScopeVolume
 import com.lianwenqi.app.ai.RetrievalMode
 import com.lianwenqi.app.ai.SUMMARY_FALLBACK_INPUT
 import com.lianwenqi.app.ai.CONTENT_FALLBACK_INPUT
@@ -177,11 +180,8 @@ class AiChatViewModel(
      * 勾选后发送时用「本章梗概」检索本书已向量化的正文块，
      * 命中片段作为附带提示词随本轮用户消息一起落库，成为历史对话的一部分（不写会话前缀）。
      *
-     * 勾选状态：开启「默认勾选记忆检索」时，仅当当前有书**且该书已向量化**才勾选
-     * （未选择书籍 / 尚未向量化的书籍一律不勾选）；否则取用户手动勾选的持久值。
-     *
-     * 默认勾选开启期间用户仍可取消（[memoryRoundCancelled]）：取消只作用于当前这一轮，
-     * 下一轮 / 新一轮对话开始时自动恢复勾选。
+     * 勾选状态取用户手动勾选的持久值；开启「记忆检索是否限定范围」后，
+     * 每次勾选都会先弹出章节范围选择（默认全部章节）。
      */
     private val memoryBookIdFlow: Flow<Long?> = combine(selectedBookIds, _sessionId) { ids, sid ->
         ids.singleOrNull()
@@ -194,12 +194,9 @@ class AiChatViewModel(
         else container.memoryRepository.observeVectorizedChapterIds(id).map { it.isNotEmpty() }
     }
 
-    /** 默认勾选开启期间，「本轮被用户手动取消」的标记（一轮结束或换会话时复位） */
-    private val memoryRoundCancelled = MutableStateFlow(false)
-
     /**
-     * 向量化工具是否已配置可用（API 模式需填齐 baseUrl / apiKey / 向量模型名；本地模式需已勾选）。
-     * 未配置时「记忆检索」不可勾选，「默认勾选记忆检索」也不生效。
+     * 向量化工具是否已配置可用（API 模式需填齐 baseUrl / apiKey / 向量模型名，本地模式需已勾选）。
+     * 未配置时「记忆检索」不可勾选。
      */
     val memoryToolConfigured: StateFlow<Boolean> = prefs.memoryVectorizationReady
         .stateIn(viewModelScope, SharingStarted.Eagerly, false)
@@ -226,15 +223,10 @@ class AiChatViewModel(
         }
 
     val memoryRetrievalEnabled: StateFlow<Boolean> = combine(
-        prefs.memoryRetrievalEnabled, prefs.memoryDefaultEnabled,
-        memoryRoundCancelled, memoryToolConfigured, memoryAvailability
-    ) { manual, defaultOn, cancelledThisRound, toolReady, avail ->
-        when {
-            // 未配置向量化工具，或本章没有梗概（无从匹配）时，一律不生效
-            !toolReady || !avail.summaryReady -> false
-            defaultOn -> avail.bookId != null && avail.vectorized && !cancelledThisRound
-            else -> manual
-        }
+        prefs.memoryRetrievalEnabled, memoryToolConfigured, memoryAvailability
+    ) { manual, toolReady, avail ->
+        // 未配置向量化工具、或本章没有梗概（无从匹配）时一律不生效；否则取用户手动勾选的持久值
+        toolReady && avail.summaryReady && manual
     }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
     /** 勾选记忆检索时的提示（Toast 用，展示后由 UI 清空） */
@@ -254,26 +246,27 @@ class AiChatViewModel(
     /** 未选择书籍 / 未向量化时的确认弹窗 */
     val pendingEmptyVectorizeAsk = MutableStateFlow(false)
 
+    /** 用户为某本书选定的记忆检索范围（章节 id） */
+    private data class MemoryScopeSelection(val bookId: Long, val chapterIds: Set<Long>)
+
+    private val memoryScopeSelection = MutableStateFlow<MemoryScopeSelection?>(null)
+
+    /** 勾选记忆检索后待确认的检索范围；非空时界面弹窗（开启「限定范围」时才出现） */
+    val pendingMemoryScopePick = MutableStateFlow<MemoryScopePick?>(null)
+
     /**
      * 切换记忆检索：
-     * - 取消勾选：「默认勾选记忆检索」开启时也允许取消，但只作用于当前这一轮
-     *   （下一轮 / 新一轮对话自动恢复勾选）；未开启该设置时直接关闭持久勾选；
-     * - 勾选：必须先有书籍（未选书时提示，不勾选）；本书从未向量化时弹窗询问是否向量化全书，
-     *   选「可以」则开始向量化全书并勾选，选「不可以」则不勾选。
+     * - 取消勾选：直接关闭持久勾选；
+     * - 勾选：必须先有书籍（未选书时提示，不勾选）；本书从未向量化时先弹窗询问是否向量化全书，
+     *   向量化完成后再继续；开启「限定范围」时接着让用户从**已向量化的章节**中选择检索范围。
      */
     fun toggleMemoryRetrieval() = viewModelScope.launch {
         if (memoryRetrievalEnabled.value) {
             // 取消勾选后不再检索，旧的「检索完成」标记同步清掉，避免误导
             memorySearchState.value = MemorySearchState.IDLE
-            if (prefs.memoryDefaultEnabled.first()) {
-                memoryRoundCancelled.value = true
-                memoryToast.value = "已取消本轮记忆检索，下一轮将自动恢复勾选"
-                return@launch
-            }
             prefs.setMemoryRetrievalEnabled(false)
             return@launch
         }
-        memoryRoundCancelled.value = false
         if (!memoryToolConfigured.value) {
             memoryToast.value = "请先在设置中配置向量化工具（选择向量模型或启用本地工具）"
             return@launch
@@ -290,22 +283,88 @@ class AiChatViewModel(
             memoryToast.value = "请先选择书籍，再进行记忆检索"
             return@launch
         }
+        // 本书还没有任何向量化结果：先询问是否向量化，等向量化完成后再选范围 / 勾选
         if (container.memoryRepository.latestVectorizedUpdatedAt(bookId) == null) {
-            // 本书还没有任何向量化结果：先问用户是否开启向量化
             pendingEmptyVectorizeAsk.value = true
-        } else {
-            prefs.setMemoryRetrievalEnabled(true)
+            return@launch
         }
+        requestMemoryScopeOrEnable(bookId)
     }
 
-    /** 「当前书本没有向量化」弹窗应答：可以 → 勾选并向量化全书；不可以 → 保持不勾选 */
+    /** 范围弹窗确认：记住本书的检索范围并真正勾选记忆检索 */
+    fun confirmMemoryScope(ids: Set<Long>) = viewModelScope.launch {
+        if (pendingMemoryScopePick.value == null) return@launch
+        pendingMemoryScopePick.value = null
+        if (ids.isEmpty()) {
+            memoryToast.value = "请至少选择一个章节"
+            return@launch
+        }
+        val bookId = currentMemoryBookId() ?: return@launch
+        memoryScopeSelection.value = MemoryScopeSelection(bookId, ids)
+        prefs.setMemoryRetrievalEnabled(true)
+    }
+
+    fun cancelMemoryScope() {
+        pendingMemoryScopePick.value = null
+    }
+
+    /**
+     * 已有向量化结果时继续勾选流程：开启「限定范围」先弹范围选择（只列已向量化章节），
+     * 否则直接勾选、检索覆盖全书。
+     */
+    private suspend fun requestMemoryScopeOrEnable(bookId: Long) {
+        if (prefs.memoryScopeLimitEnabled.first()) {
+            val pick = buildMemoryScopePick(bookId, onlyVectorized = true)
+            if (pick != null) {
+                pendingMemoryScopePick.value = pick
+                return
+            }
+            // 没有任何已向量化章节可限定：退回全书检索，不阻断勾选
+            memoryScopeSelection.value = null
+        } else {
+            memoryScopeSelection.value = null
+        }
+        prefs.setMemoryRetrievalEnabled(true)
+    }
+
+    /** 组装范围弹窗数据：章节按分卷组织（只含已向量化章节），默认沿用本书上次的选择（否则全选） */
+    private suspend fun buildMemoryScopePick(
+        bookId: Long,
+        onlyVectorized: Boolean
+    ): MemoryScopePick? {
+        val allChapters = bookRepository.getChapters(bookId)
+        val chapters = if (onlyVectorized) {
+            val vectorized = container.memoryRepository.vectorizedChapterIds(bookId).toSet()
+            allChapters.filter { it.id in vectorized }
+        } else {
+            allChapters
+        }
+        if (chapters.isEmpty()) return null
+        // 只展示含有已向量化章节的分卷
+        val volumeIds = chapters.mapNotNull { it.volumeId }.toSet()
+        val volumes = bookRepository.getVolumes(bookId).filter { it.id in volumeIds }
+        val remembered = memoryScopeSelection.value?.takeIf { it.bookId == bookId }?.chapterIds
+        val selected = remembered?.filter { id -> chapters.any { it.id == id } }?.toSet()
+            ?: chapters.map { it.id }.toSet()
+        return MemoryScopePick(
+            chapters = chapters.map { MemoryScopeChapter(it.id, it.title, it.volumeId) },
+            volumes = volumes.map { MemoryScopeVolume(it.id, it.title) },
+            selected = selected
+        )
+    }
+
+    /** 「当前书本没有向量化」弹窗应答：可以 → 先向量化全书，完成后（如需）再选检索范围；不可以 → 保持不勾选 */
     fun resolveEmptyVectorizeAsk(confirm: Boolean) = viewModelScope.launch {
         pendingEmptyVectorizeAsk.value = false
         if (!confirm) return@launch
         val bookId = currentMemoryBookId() ?: return@launch
-        prefs.setMemoryRetrievalEnabled(true)
         container.memoryRepository.vectorize(bookId) { memoryVectorizing.value = it }
         memoryVectorizing.value = null
+        if (container.memoryRepository.latestVectorizedUpdatedAt(bookId) == null) {
+            memoryToast.value = "向量化未完成，请稍后重试"
+            return@launch
+        }
+        requestMemoryScopeOrEnable(bookId)
     }
 
     /**
@@ -360,6 +419,7 @@ class AiChatViewModel(
     private var generationCancelled = false
     private var generationOutlinePick: CompletableDeferred<List<Long>?>? = null
     private var generationMemoryAsk: CompletableDeferred<Boolean?>? = null
+    private var generationMemoryScopeAsk: CompletableDeferred<Set<Long>?>? = null
     private var generationSummaryFailed: CompletableDeferred<SummaryFailureChoice>? = null
 
     /** 梗概子调用结果 */
@@ -489,6 +549,7 @@ class AiChatViewModel(
             GenerationMode.CONTENT_ONLY
         }
         val memoryCfg = prefs.genContentMemoryMode.first()
+        val memoryScopeLimit = prefs.memoryScopeLimitEnabled.first()
         var picked = emptyList<Long>()
         var memory = if (memoryCfg == RetrievalMode.ON) RetrievalMode.ON else RetrievalMode.OFF
         // ① 选梗概参考标签 ② 询问记忆检索：顺序固定，前一个确定后才弹下一个；任一取消即整体终止
@@ -504,13 +565,26 @@ class AiChatViewModel(
                     }
             }
         }
+        // ③ 开启「记忆检索是否限定范围」时，确认启用检索后再选择检索章节（只列已向量化章节）
+        var memoryChapterIds: Set<Long>? = null
+        if (memory == RetrievalMode.ON && memoryScopeLimit) {
+            val memoryBookId = currentMemoryBookId()
+            if (memoryBookId != null) {
+                val pick = buildMemoryScopePick(memoryBookId, onlyVectorized = true)
+                // 没有任何已向量化章节时不弹范围选择，按全书检索继续生成（结果自然为空）
+                if (pick != null) {
+                    memoryChapterIds = askMemoryScope(pick) ?: return@launchGeneration
+                }
+            }
+        }
         if (generationCancelled) return@launchGeneration
         val plan = GenerationPlan(
             mode = mode,
             summaryWordRange = prefs.genSummaryWordRange.first(),
             contentWordRange = prefs.genContentWordRange.first(),
             selectedOutlineIds = picked,
-            memoryRetrieval = memory
+            memoryRetrieval = memory,
+            memoryChapterIds = memoryChapterIds
         )
         _generationPlan.value = plan
         startExecuting()
@@ -669,6 +743,12 @@ class AiChatViewModel(
         generationMemoryAsk = null
     }
 
+    /** 生成路径的记忆检索范围弹窗：确定后返回选中的章节 */
+    fun confirmGenerationMemoryScope(ids: Set<Long>) {
+        generationMemoryScopeAsk?.complete(ids)
+        generationMemoryScopeAsk = null
+    }
+
     /** 梗概失败三选项 */
     fun resolveSummaryFailed(choice: SummaryFailureChoice) {
         generationSummaryFailed?.complete(choice)
@@ -687,6 +767,8 @@ class AiChatViewModel(
         generationOutlinePick = null
         generationMemoryAsk?.complete(null)
         generationMemoryAsk = null
+        generationMemoryScopeAsk?.complete(null)
+        generationMemoryScopeAsk = null
         generationSummaryFailed?.complete(SummaryFailureChoice.CANCEL)
         generationSummaryFailed = null
         _generationDialog.value = null
@@ -754,6 +836,20 @@ class AiChatViewModel(
         } finally {
             generationMemoryAsk = null
             if (_generationDialog.value is GenerationDialog.AskMemoryRetrieval) _generationDialog.value = null
+        }
+    }
+
+    /** 开启「记忆检索是否限定范围」时，确认启用检索后选择检索章节（返回 null 表示取消） */
+    private suspend fun askMemoryScope(pick: MemoryScopePick): Set<Long>? {
+        val deferred = CompletableDeferred<Set<Long>?>()
+        generationMemoryScopeAsk = deferred
+        _generationState.value = FlowState.CollectingConfig
+        _generationDialog.value = GenerationDialog.PickMemoryScope(pick)
+        return try {
+            deferred.await()?.takeIf { it.isNotEmpty() }
+        } finally {
+            generationMemoryScopeAsk = null
+            if (_generationDialog.value is GenerationDialog.PickMemoryScope) _generationDialog.value = null
         }
     }
 
@@ -863,7 +959,8 @@ class AiChatViewModel(
                 query = query,
                 topK = topK.coerceAtLeast(1),
                 excludeChapterId = chapterId,
-                scope = scope
+                scope = scope,
+                chapterIds = plan.memoryChapterIds
             )
         } catch (e: Throwable) {
             emptyList()
@@ -1671,8 +1768,6 @@ class AiChatViewModel(
 
     fun openSession(id: Long) {
         _sessionId.value = id
-        // 进入（新一轮）对话：本轮取消标记复位，默认勾选重新生效
-        memoryRoundCancelled.value = false
         viewModelScope.launch {
             chatRepository.getSession(id)?.bookId?.let { loadBookContext(it) }
         }
@@ -1770,8 +1865,6 @@ class AiChatViewModel(
         pendingReplyToId.value = 0L
         streamingContent.value = ""
         streamingReasoning.value = ""
-        // 一轮结束：手动的「本轮取消」失效，下一轮按「默认勾选记忆检索」重新勾上
-        memoryRoundCancelled.value = false
     }
 
     /** 停止在途生成：取消协程，进而中断正在等待的 HTTP 请求 */
@@ -2435,9 +2528,18 @@ class AiChatViewModel(
             // 区块数（5-20）与范围偏好（随机匹配 / 最新章节优先 / 最早章节优先）来自「记忆检索区块设置」
             val quota = prefs.memoryBlockQuota.first()
             val scope = prefs.memorySearchScope.first()
-            // 侧边助手写的是当前这一章，把本章自己的块排除掉，检索才会真的去翻本书其它章节
+            // 侧边助手写的是当前这一章，把本章自己的块排除掉，检索才会真的去翻本书其它章节；
+            // 开启「记忆检索是否限定范围」时只检索用户勾选的章节
+            val scopeIds = if (prefs.memoryScopeLimitEnabled.first()) {
+                memoryScopeSelection.value?.takeIf { it.bookId == bookId }?.chapterIds
+            } else {
+                null
+            }
             container.memoryRepository.retrieve(
-                bookId, query, quota, excludeChapterId = fixedChapterId, scope = scope
+                bookId, query, quota,
+                excludeChapterId = fixedChapterId,
+                scope = scope,
+                chapterIds = scopeIds
             )
         } finally {
             memorySearchState.value = MemorySearchState.DONE

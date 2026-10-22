@@ -64,13 +64,15 @@ interface MemoryGateway {
      * 留在候选池里会凭「和自己梗概最像」霸占结果。
      * [scope] 为范围偏好：落进 [MemorySearchScope.NEWEST] / [OLDEST] 时按章节位置给余弦分数加权，
      * 全书仍然参与检索，只是越符合偏好的章节越容易进入精排候选。
+     * [chapterIds] 为用户选定的检索范围（章节 id 集合）；null 表示全书章节。
      */
     suspend fun retrieve(
         bookId: Long,
         query: String,
         topK: Int = DEFAULT_TOP_K,
         excludeChapterId: Long? = null,
-        scope: String = MemorySearchScope.RANDOM
+        scope: String = MemorySearchScope.RANDOM,
+        chapterIds: Set<Long>? = null
     ): List<String>
 
     /** 增量向量化本书正文（命中哈希的块跳过），逐章回调进度 */
@@ -132,8 +134,9 @@ class MemoryRepository(
         query: String,
         topK: Int,
         excludeChapterId: Long?,
-        scope: String
-    ): List<String> = retrieveTop(bookId, query, topK, excludeChapterId, scope, minScore = 0f)
+        scope: String,
+        chapterIds: Set<Long>?
+    ): List<String> = retrieveTop(bookId, query, topK, excludeChapterId, scope, chapterIds, minScore = 0f)
 
     /**
      * 带相似度阈值的检索：生成正文前做记忆检索时使用（低于 [minScore] 的召回片段直接丢弃，
@@ -145,8 +148,9 @@ class MemoryRepository(
         topK: Int = MemoryGateway.DEFAULT_TOP_K,
         excludeChapterId: Long? = null,
         scope: String = MemorySearchScope.RANDOM,
+        chapterIds: Set<Long>? = null,
         minScore: Float = DEFAULT_MEMORY_MIN_SCORE
-    ): List<String> = retrieveTop(bookId, query, topK, excludeChapterId, scope, minScore)
+    ): List<String> = retrieveTop(bookId, query, topK, excludeChapterId, scope, chapterIds, minScore)
 
     private suspend fun retrieveTop(
         bookId: Long,
@@ -154,16 +158,21 @@ class MemoryRepository(
         topK: Int,
         excludeChapterId: Long?,
         scope: String,
+        chapterIds: Set<Long>?,
         minScore: Float
     ): List<String> {
         if (query.isBlank()) return emptyList()
+        // 用户限定了检索范围时，只在这些章节的向量块里检索
+        if (chapterIds != null && chapterIds.isEmpty()) return emptyList()
         // 只召回「现存章节」的向量块：章节被删除后其向量即使因异常尚未物理清理，
         // 也不能再作为参考资料进入提示词，避免污染新文参考与多花无谓的 token。
         val existingChapterIds = chapterDao.getByBook(bookId).map { it.id }.toSet()
         // 当前正在写的章节不进候选池：它已经在本章梗概 / 正文里了，
         // 留着只会凭「和自己梗概最像」把其它章节挤出去
         val rows = chunkDao.getByBook(bookId).filter {
-            it.chapterId in existingChapterIds && (excludeChapterId == null || it.chapterId != excludeChapterId)
+            it.chapterId in existingChapterIds &&
+                (chapterIds == null || it.chapterId in chapterIds) &&
+                (excludeChapterId == null || it.chapterId != excludeChapterId)
         }
         if (rows.isEmpty()) return emptyList()
         // 检索失败（工具关闭 / 模型未就绪 / 网络异常）时静默返回空：只影响本次参考资料，不阻断发送

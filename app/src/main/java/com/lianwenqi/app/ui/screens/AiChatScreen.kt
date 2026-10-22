@@ -63,6 +63,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.EditNote
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.FilterAlt
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MenuBook
@@ -135,6 +136,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.lianwenqi.app.ai.GenerationDialog
+import com.lianwenqi.app.ai.MemoryScopePick
 import com.lianwenqi.app.ai.SummaryFailureChoice
 import com.lianwenqi.app.data.GEN_KIND_SUMMARY
 import com.lianwenqi.app.data.PromptLog
@@ -205,6 +207,7 @@ fun AiChatScreen(initialBookId: Long?) {
     val memoryAsk by vm.pendingMemoryAsk.collectAsState()
     val memoryVectorizing by vm.memoryVectorizing.collectAsState()
     val memoryEmptyAsk by vm.pendingEmptyVectorizeAsk.collectAsState()
+    val memoryScopePick by vm.pendingMemoryScopePick.collectAsState()
     val memoryToastMsg by vm.memoryToast.collectAsState()
     val memoryToolReady by vm.memoryToolConfigured.collectAsState()
     // 对话分组的展开状态：默认全部收起，用户点开 / 收起后记住，下次进入沿用
@@ -725,6 +728,14 @@ fun AiChatScreen(initialBookId: Long?) {
             ).show()
         }
     }
+    // 开启「记忆检索是否限定范围」时，勾选记忆检索后先选择检索章节
+    memoryScopePick?.let { pick ->
+        MemoryScopePickerDialog(
+            pick = pick,
+            onDismiss = { vm.cancelMemoryScope() },
+            onConfirm = { ids -> vm.confirmMemoryScope(ids) }
+        )
+    }
     // 本书从未向量化时勾选记忆检索：先问是否向量化全书，再决定是否勾选
     if (memoryEmptyAsk) {
         AlertDialog(
@@ -733,7 +744,7 @@ fun AiChatScreen(initialBookId: Long?) {
             text = {
                 Text(
                     "当前书本还没有向量化，是否开启向量化？\n\n" +
-                        "选「可以」：开始向量化全书，并勾选记忆检索；\n" +
+                        "选「可以」：开始向量化全书，完成后（如开启限定范围）再选择检索章节并勾选记忆检索；\n" +
                         "选「不可以」：取消记忆检索勾选。"
                 )
             },
@@ -1077,6 +1088,7 @@ private fun AiAssistantPanel(
     val streamingReasoning by vm.streamingReasoning.collectAsState()
     val memoryRetrieval by vm.memoryRetrievalEnabled.collectAsState()
     val memoryEmptyAsk by vm.pendingEmptyVectorizeAsk.collectAsState()
+    val memoryScopePick by vm.pendingMemoryScopePick.collectAsState()
     val memoryToastMsg by vm.memoryToast.collectAsState()
     val memoryVectorizing by vm.memoryVectorizing.collectAsState()
     val memorySearch by vm.memorySearchState.collectAsState()
@@ -1561,6 +1573,14 @@ private fun AiAssistantPanel(
 
     // 本书从未向量化时勾选记忆检索：先问是否向量化全书，再决定是否勾选
     val panelContext = LocalContext.current
+    // 开启「记忆检索是否限定范围」时，勾选记忆检索后先选择检索章节
+    memoryScopePick?.let { pick ->
+        MemoryScopePickerDialog(
+            pick = pick,
+            onDismiss = { vm.cancelMemoryScope() },
+            onConfirm = { ids -> vm.confirmMemoryScope(ids) }
+        )
+    }
     if (memoryEmptyAsk) {
         AlertDialog(
             onDismissRequest = { vm.resolveEmptyVectorizeAsk(false) },
@@ -1568,7 +1588,7 @@ private fun AiAssistantPanel(
             text = {
                 Text(
                     "当前书本还没有向量化，是否开启向量化？\n\n" +
-                        "选「可以」：开始向量化全书，并勾选记忆检索；\n" +
+                        "选「可以」：开始向量化全书，完成后（如开启限定范围）再选择检索章节并勾选记忆检索；\n" +
                         "选「不可以」：取消记忆检索勾选。"
                 )
             },
@@ -1707,6 +1727,12 @@ private fun AiAssistantPanel(
                 }
             }
         }
+
+        is GenerationDialog.PickMemoryScope -> MemoryScopePickerDialog(
+            pick = dialog.pick,
+            onDismiss = { vm.cancelGeneration() },
+            onConfirm = { ids -> vm.confirmGenerationMemoryScope(ids) }
+        )
 
         is GenerationDialog.SummaryFailed -> AlertDialog(
             onDismissRequest = { vm.resolveSummaryFailed(SummaryFailureChoice.CANCEL) },
@@ -4426,6 +4452,280 @@ private fun OutlinePickerDialog(
                 }
             }
         }
+        }
+    }
+}
+
+/**
+ * 记忆检索范围选择弹窗：默认全部章节，章节按分卷折叠。
+ * 与大纲选择弹窗一致 —— 整卡按可用高度收紧，列表内部滚动，底部「取消 / 确定」始终留在屏幕内。
+ */
+@Composable
+private fun MemoryScopePickerDialog(
+    pick: MemoryScopePick,
+    onDismiss: () -> Unit,
+    onConfirm: (Set<Long>) -> Unit
+) {
+    var selected by remember(pick) { mutableStateOf(pick.selected) }
+    // 分卷默认全部折叠，用户展开后保持展开
+    var expandedVolumes by remember(pick) { mutableStateOf(emptySet<Long>()) }
+    val allIds = pick.chapters.map { it.id }.toSet()
+    val allSelected = allIds.isNotEmpty() && allIds.all { it in selected }
+    val volumeIds = pick.volumes.map { it.id }.toSet()
+    val chapterByVolume = pick.chapters.filter { it.volumeId in volumeIds }.groupBy { it.volumeId!! }
+    val looseChapters = pick.chapters.filter { it.volumeId == null || it.volumeId !in volumeIds }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        BoxWithConstraints(Modifier.fillMaxSize()) {
+            val maxCardHeight = (maxHeight - 24.dp).coerceAtLeast(200.dp)
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp)
+                    .heightIn(max = maxCardHeight)
+                    .clip(RoundedCornerShape(24.dp))
+                    .background(PickerSurface)
+            ) {
+                // 头部：圆形图标 + 标题 + 已选数量 + 关闭
+                Row(
+                    Modifier.fillMaxWidth().padding(start = 18.dp, end = 8.dp, top = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        Modifier.size(44.dp).clip(CircleShape).background(PickerSoft),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.Filled.FilterAlt,
+                            contentDescription = null,
+                            tint = PickerPurple,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Text("选择检索范围", color = PickerInk, fontSize = 21.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        "（已选 ${selected.size}）",
+                        color = PickerMuted,
+                        fontSize = 14.sp,
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                    Spacer(Modifier.weight(1f))
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Filled.Close, contentDescription = "关闭", tint = PickerMuted)
+                    }
+                }
+                Text(
+                    "仅显示已向量化的章节；默认全部勾选，分卷已折叠，可整卷勾选，也可单独选择章节。",
+                    color = PickerMuted,
+                    fontSize = 13.sp,
+                    lineHeight = 19.sp,
+                    modifier = Modifier.padding(horizontal = 18.dp, vertical = 8.dp)
+                )
+                // 列表卡：全选全部章节 + 分卷 / 章节（占满剩余高度，矮屏时自动收缩并内部滚动）
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .weight(1f, fill = false)
+                        .padding(horizontal = 18.dp, vertical = 4.dp)
+                        .clip(RoundedCornerShape(18.dp))
+                        .background(Color.White)
+                        .border(1.dp, PickerBorder, RoundedCornerShape(18.dp))
+                ) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .background(PickerSoftRow)
+                            .clickable {
+                                selected = if (allSelected) emptySet() else allIds
+                            }
+                            .padding(horizontal = 14.dp, vertical = 13.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        GenCheckbox(
+                            checked = allSelected,
+                            onCheckedChange = { selected = if (allSelected) emptySet() else allIds },
+                            boxSize = 22.dp
+                        )
+                        Spacer(Modifier.width(12.dp))
+                        Text("全部章节", color = PickerInk, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.weight(1f))
+                        Text(
+                            "${selected.size}/${allIds.size}",
+                            color = PickerMuted,
+                            fontSize = 12.sp,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
+                    HorizontalDivider(color = PickerLine)
+                    LazyColumn(Modifier.heightIn(max = 360.dp)) {
+                        pick.volumes.forEach { volume ->
+                            val ids = chapterByVolume[volume.id].orEmpty()
+                            if (ids.isEmpty()) return@forEach
+                            item(key = "v-${volume.id}") {
+                                val volumeAll = ids.all { it.id in selected }
+                                Row(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            expandedVolumes = if (volume.id in expandedVolumes) {
+                                                expandedVolumes - volume.id
+                                            } else {
+                                                expandedVolumes + volume.id
+                                            }
+                                        }
+                                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    GenCheckbox(
+                                        checked = volumeAll,
+                                        onCheckedChange = {
+                                            selected = if (volumeAll) {
+                                                selected - ids.map { it.id }.toSet()
+                                            } else {
+                                                selected + ids.map { it.id }
+                                            }
+                                        },
+                                        boxSize = 22.dp
+                                    )
+                                    Spacer(Modifier.width(12.dp))
+                                    Text(
+                                        volume.title.ifBlank { "未命名分卷" },
+                                        color = PickerInk,
+                                        fontSize = 15.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        modifier = Modifier.weight(1f),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        "${ids.count { it.id in selected }}/${ids.size}",
+                                        color = PickerMuted,
+                                        fontSize = 12.sp
+                                    )
+                                    Spacer(Modifier.width(6.dp))
+                                    Icon(
+                                        if (volume.id in expandedVolumes) Icons.Filled.KeyboardArrowUp
+                                        else Icons.Filled.KeyboardArrowDown,
+                                        contentDescription = if (volume.id in expandedVolumes) "收起" else "展开",
+                                        tint = PickerMuted,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                                HorizontalDivider(color = PickerLine)
+                            }
+                            if (volume.id in expandedVolumes) {
+                                items(ids, key = { "c-${it.id}" }) { chapter ->
+                                    Row(
+                                        Modifier
+                                            .fillMaxWidth()
+                                            .clickable {
+                                                selected = if (chapter.id in selected) {
+                                                    selected - chapter.id
+                                                } else {
+                                                    selected + chapter.id
+                                                }
+                                            }
+                                            .padding(start = 50.dp, end = 14.dp, top = 11.dp, bottom = 11.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        GenCheckbox(
+                                            checked = chapter.id in selected,
+                                            onCheckedChange = { checked ->
+                                                selected = if (checked) selected + chapter.id
+                                                else selected - chapter.id
+                                            },
+                                            boxSize = 20.dp
+                                        )
+                                        Spacer(Modifier.width(12.dp))
+                                        Text(
+                                            chapter.title.ifBlank { "未命名章节" },
+                                            color = PickerInk,
+                                            fontSize = 14.sp,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                    HorizontalDivider(color = PickerLine)
+                                }
+                            }
+                        }
+                        looseChapters.forEach { chapter ->
+                            item(key = "c-${chapter.id}") {
+                                Row(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            selected = if (chapter.id in selected) {
+                                                selected - chapter.id
+                                            } else {
+                                                selected + chapter.id
+                                            }
+                                        }
+                                        .padding(horizontal = 14.dp, vertical = 11.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    GenCheckbox(
+                                        checked = chapter.id in selected,
+                                        onCheckedChange = { checked ->
+                                            selected = if (checked) selected + chapter.id
+                                            else selected - chapter.id
+                                        },
+                                        boxSize = 22.dp
+                                    )
+                                    Spacer(Modifier.width(12.dp))
+                                    Text(
+                                        chapter.title.ifBlank { "未命名章节" },
+                                        color = PickerInk,
+                                        fontSize = 14.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                HorizontalDivider(color = PickerLine)
+                            }
+                        }
+                    }
+                }
+                // 底部：取消 / 确定（未选任何章节时确定置灰）
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 14.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(15.dp))
+                            .border(1.dp, PickerBorder, RoundedCornerShape(15.dp))
+                            .clickable(onClick = onDismiss)
+                            .padding(vertical = 14.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("取消", color = PickerInk, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(15.dp))
+                            .background(
+                                if (selected.isEmpty()) Brush.linearGradient(
+                                    listOf(Color(0xFFC9C3E4), Color(0xFFBDB6DC))
+                                ) else Brush.linearGradient(listOf(PickerPurple2, PickerPurple))
+                            )
+                            .clickable(enabled = selected.isNotEmpty()) { onConfirm(selected) }
+                            .padding(vertical = 14.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("确定", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            }
         }
     }
 }

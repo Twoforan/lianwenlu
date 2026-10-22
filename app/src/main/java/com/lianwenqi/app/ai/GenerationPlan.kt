@@ -86,7 +86,22 @@ data class GenerationPlan(
     /** 限定梗概范围时用户选中的大纲条目 id；非限定模式为空 */
     val selectedOutlineIds: List<Long> = emptyList(),
     /** 已从 ASK 解析为 ON/OFF 的最终决策 */
-    val memoryRetrieval: RetrievalMode = RetrievalMode.OFF
+    val memoryRetrieval: RetrievalMode = RetrievalMode.OFF,
+    /** 用户选定的记忆检索章节范围；null 表示全书章节 */
+    val memoryChapterIds: Set<Long>? = null
+)
+
+/** 记忆检索范围弹窗里的单个章节 */
+data class MemoryScopeChapter(val id: Long, val title: String, val volumeId: Long?)
+
+/** 记忆检索范围弹窗里的分卷 */
+data class MemoryScopeVolume(val id: Long, val title: String)
+
+/** 记忆检索范围弹窗的数据：章节按分卷折叠，默认全部章节 */
+data class MemoryScopePick(
+    val chapters: List<MemoryScopeChapter>,
+    val volumes: List<MemoryScopeVolume>,
+    val selected: Set<Long>
 )
 
 /** 收集阶段需要弹出的选择型弹窗（UI 按此渲染，onDismiss 一律映射为「取消 → 终止」） */
@@ -96,6 +111,9 @@ sealed interface GenerationDialog {
 
     /** 询问是否启用记忆检索；[queryDigest] 展示将以本章梗概构造的检索 query 摘要 */
     data class AskMemoryRetrieval(val queryDigest: String) : GenerationDialog
+
+    /** 开启「记忆检索是否限定范围」时，确认启用检索后选择检索章节 */
+    data class PickMemoryScope(val pick: MemoryScopePick) : GenerationDialog
 
     /** 梗概子调用失败：显式三选项（重试梗概 / 使用已有梗概 / 取消） */
     data class SummaryFailed(val hasExisting: Boolean) : GenerationDialog
