@@ -68,6 +68,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -143,7 +144,8 @@ fun ChapterEditorScreen(
     var summaryExpanded by remember(currentId) { mutableStateOf(false) }
     var editingTitle by remember { mutableStateOf(false) }
     val summaryFocus = remember { FocusRequester() }
-    var aiOpen by remember { mutableStateOf(false) }
+    // 记住侧边 AI 的展开状态：进入预览/阅读页再返回时，原来展开的仍展开、原来关闭的仍关闭
+    var aiOpen by rememberSaveable { mutableStateOf(false) }
     // 正文是否拿到了焦点：梗概输入框聚焦时不能按正文光标去「顶起」，否则会把视野拽到正文
     var bodyFocused by remember { mutableStateOf(false) }
 
