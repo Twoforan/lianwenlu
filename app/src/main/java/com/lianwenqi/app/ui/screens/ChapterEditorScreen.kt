@@ -683,6 +683,7 @@ fun ChapterEditorScreen(
                     }
                 }
             },
+            onPreview = { onPreview(bookId, currentId) },
             onChapterRenamed = { id, name ->
                 // 抽屉里改了本章名：同步本地缓冲，避免退出编辑页时用旧标题覆盖回数据库
                 if (id == currentId) title = name

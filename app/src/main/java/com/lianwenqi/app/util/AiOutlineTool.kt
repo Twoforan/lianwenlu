@@ -1,5 +1,6 @@
 package com.lianwenqi.app.util
 
+import com.lianwenqi.app.ai.AiToolCall
 import com.lianwenqi.app.ai.AiToolSpec
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -329,3 +330,200 @@ fun parseAiOutlineBlocksResult(text: String): AiBlocksResult<AiOutlineBlock> {
  * 解析失败的标记块会被跳过；一个都没有时返回空列表。
  */
 fun parseAiOutlineBlocks(text: String): List<AiOutlineBlock> = parseAiOutlineBlocksResult(text).blocks
+
+// ---------- 工具调用被写成正文（文本泄漏）时的还原 ----------
+
+/** [extractLeakedToolCalls] 的结果 */
+data class LeakedToolCalls(
+    /** 从正文还原出来的工具调用 */
+    val calls: List<AiToolCall> = emptyList(),
+    /** 剔除泄漏片段后的正文 */
+    val cleanedContent: String = "",
+    /** 正文里是否出现了工具调用语法（即使没能还原也要让用户知情） */
+    val syntaxDetected: Boolean = false
+)
+
+private val LEAKED_FUNCTION_TAG =
+    Regex("""<\s*function\s*[=:]\s*([A-Za-z0-9_.\-]+)\s*>""", RegexOption.IGNORE_CASE)
+private val LEAKED_FUNCTION_END = Regex("""</\s*function\s*>""", RegexOption.IGNORE_CASE)
+private val LEAKED_NAME_FIELD = Regex("""["']?(?:name|tool)["']?\s*:\s*["']([A-Za-z0-9_.\-]+)["']""")
+private val LEAKED_ARGUMENTS_FIELD = Regex("""["']?arguments["']?\s*:\s*""")
+
+/**
+ * 部分供应商（含部分 DeepSeek 兼容实现）会把工具调用写进正文而不是返回 `tool_calls`，
+ * 常见形式：
+ *  - `<function=import_chapters>{"chapters":[...]}</function>`
+ *  - `[{"name":"import_chapters","arguments":{...}}]`
+ * 这里把能识别的调用还原成 [AiToolCall]，并把泄漏片段从正文中剔除，避免用户看到 `</function>` 之类的残渣。
+ * [allowedNames] 只接受本轮真正提供给模型的工具名，避免误匹配正文里的普通 JSON。
+ */
+fun extractLeakedToolCalls(content: String, allowedNames: Set<String>): LeakedToolCalls {
+    if (content.isBlank() || allowedNames.isEmpty()) {
+        return LeakedToolCalls(cleanedContent = content)
+    }
+    val spans = mutableListOf<IntRange>()
+    val calls = mutableListOf<AiToolCall>()
+
+    // 1) <function=name>{...}</function>
+    var from = 0
+    while (true) {
+        val tag = LEAKED_FUNCTION_TAG.find(content, from) ?: break
+        val name = tag.groupValues[1]
+        val bodyStart = tag.range.last + 1
+        val endTag = LEAKED_FUNCTION_END.find(content, bodyStart)
+        val bodyEnd = endTag?.range?.first ?: content.length
+        val spanEnd = endTag?.range?.last ?: (content.length - 1)
+        from = spanEnd + 1
+        if (name !in allowedNames) continue
+        val range = firstJsonRange(content, bodyStart, bodyEnd)
+        if (range != null) {
+            calls += AiToolCall(
+                id = "leaked_${calls.size + 1}",
+                name = name,
+                arguments = content.substring(range)
+            )
+            // 有结束标签时删到结束标签；没有时只删到参数末尾，避免误删后面的正文
+            spans += tag.range.first..(if (endTag != null) spanEnd else range.last)
+        }
+    }
+
+    // 2) 纯 JSON 形式：{"name":"import_chapters","arguments":{...}}
+    val masked = content.toCharArray()
+    spans.forEach { range -> for (i in range) { if (i in masked.indices) masked[i] = ' ' } }
+    val scan = String(masked)
+    var scanFrom = 0
+    while (true) {
+        val nameMatch = LEAKED_NAME_FIELD.find(scan, scanFrom) ?: break
+        scanFrom = nameMatch.range.last + 1
+        val name = nameMatch.groupValues[1]
+        if (name !in allowedNames) continue
+        val argsStart = LEAKED_ARGUMENTS_FIELD.find(scan, nameMatch.range.last + 1) ?: continue
+        if (argsStart.range.first - nameMatch.range.last > 200) continue
+        val valueRange = firstJsonRange(scan, argsStart.range.last + 1) ?: continue
+        val rawValue = scan.substring(valueRange)
+        val arguments = if (rawValue.startsWith("\"")) {
+            runCatching { aiOutlineJson.parseToJsonElement(rawValue).jsonPrimitive.content }
+                .getOrElse { rawValue }
+        } else rawValue
+        val wrapperStart = scan.lastIndexOf('{', nameMatch.range.first).takeIf { it >= 0 } ?: nameMatch.range.first
+        calls += AiToolCall(
+            id = "leaked_${calls.size + 1}",
+            name = name,
+            arguments = arguments
+        )
+        spans += wrapperStart..valueRange.last
+        scanFrom = valueRange.last + 1
+    }
+
+    val cleaned = removeSpans(content, spans)
+    val syntaxDetected = content.contains("<function", ignoreCase = true) ||
+        content.contains("</function>", ignoreCase = true) ||
+        (content.contains("\"arguments\"", ignoreCase = true) &&
+            content.contains("\"name\"", ignoreCase = true))
+    return LeakedToolCalls(calls, cleaned, syntaxDetected)
+}
+
+/** 从 [start] 起找第一个完整的 JSON 对象 / 数组 / 字符串，返回其闭区间下标 */
+private fun firstJsonRange(text: String, start: Int, limit: Int = text.length): IntRange? {
+    var i = start
+    while (i < limit && text[i].isWhitespace()) i++
+    if (i >= limit) return null
+    val begin = i
+    when (text[i]) {
+        '{', '[' -> {
+            var depth = 0
+            var inString = false
+            var escaped = false
+            while (i < limit) {
+                val c = text[i]
+                if (inString) {
+                    when {
+                        escaped -> escaped = false
+                        c == '\\' -> escaped = true
+                        c == '"' -> inString = false
+                    }
+                } else when (c) {
+                    '"' -> inString = true
+                    '{', '[' -> depth++
+                    '}', ']' -> {
+                        depth--
+                        if (depth == 0) return begin..i
+                    }
+                }
+                i++
+            }
+            return null
+        }
+
+        '"' -> {
+            var escaped = false
+            i++
+            while (i < limit) {
+                val c = text[i]
+                when {
+                    escaped -> escaped = false
+                    c == '\\' -> escaped = true
+                    c == '"' -> return begin..i
+                }
+                i++
+            }
+            return null
+        }
+
+        else -> return null
+    }
+}
+
+/** 删除命中区间，并清掉删除后残留的孤行标点（如 `</function>` 被删后剩下的 `}]`） */
+private fun removeSpans(text: String, spans: List<IntRange>): String {
+    if (spans.isEmpty()) return text
+    val merged = spans.sortedBy { it.first }.fold(mutableListOf<IntRange>()) { acc, range ->
+        val last = acc.lastOrNull()
+        if (last != null && range.first <= last.last + 1) {
+            acc[acc.lastIndex] = last.first..maxOf(last.last, range.last)
+        } else {
+            acc += range
+        }
+        acc
+    }
+    val sb = StringBuilder(text)
+    merged.asReversed().forEach { range ->
+        if (range.first in 0..sb.lastIndex) {
+            sb.delete(range.first, minOf(range.last, sb.lastIndex) + 1)
+        }
+    }
+    val lines = sb.toString().replace("\r\n", "\n").split("\n")
+        .filterNot { line -> line.trim().let { it.isNotEmpty() && it.all { c -> c in "[]{}<>/\"',:" } } }
+    var out = lines.joinToString("\n").replace(Regex("\n{3,}"), "\n\n").trim()
+    // 正文末尾遗留的 `}]` / `}` 之类残渣一并去掉
+    out = out.trimEnd(' ', '\t', '\n', ']', '}', ',', ':')
+    return if (out.all { it in "[]{}<>/\"',: \n\t" }) "" else out
+}
+
+// ---------- 手动导入的类型倾向判断 ----------
+
+/** 回答内容的导入类型倾向 */
+data class ImportKindHint(val chapterLike: Boolean, val outlineLike: Boolean) {
+    /** 只像章节梗概（没检测到人设 / 设定内容）：手动导入时只应提供「章节梗概」 */
+    val chapterOnly: Boolean get() = chapterLike && !outlineLike
+}
+
+private val CHAPTER_TITLE_PATTERN =
+    Regex("""第\s*[0-9０-９一二三四五六七八九十百千零两]+\s*[章节回]""")
+private val OUTLINE_WORDS = listOf(
+    "人设", "设定", "世界观", "人物", "角色", "主角", "姓名", "性别", "身份", "性格", "背景", "大纲", "势力", "能力"
+)
+
+/** 判断一条回答更像「章节梗概」还是「大纲设定」，供手动导入时决定展示哪些入口 */
+fun detectImportKindHint(content: String): ImportKindHint {
+    val chapterHits = CHAPTER_TITLE_PATTERN.findAll(content).count()
+    val chapterLike = content.contains(AI_CHAPTER_BEGIN) || chapterHits >= 2 ||
+        (chapterHits >= 1 && (content.contains("梗概") || content.contains("摘要")))
+    val outlineLike = content.contains(AI_OUTLINE_BEGIN) || OUTLINE_WORDS.any { content.contains(it) }
+    return ImportKindHint(chapterLike = chapterLike, outlineLike = outlineLike)
+}
+
+/** 这条「大纲」条目其实是不是章节梗概（手动导入时禁止把章节梗概写成大纲） */
+fun isChapterLikeOutlineBlock(block: AiOutlineBlock): Boolean =
+    CHAPTER_TITLE_PATTERN.containsMatchIn(block.name) || block.type.contains("章节")
+

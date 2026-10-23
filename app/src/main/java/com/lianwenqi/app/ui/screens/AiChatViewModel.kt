@@ -61,6 +61,8 @@ import com.lianwenqi.app.util.AI_TOOL_IMPORT_CHAPTER
 import com.lianwenqi.app.util.AI_TOOL_WRITE_OUTLINE
 import com.lianwenqi.app.util.AiChapterBlock
 import com.lianwenqi.app.util.AiOutlineBlock
+import com.lianwenqi.app.util.detectImportKindHint
+import com.lianwenqi.app.util.isChapterLikeOutlineBlock
 import com.lianwenqi.app.util.parseAiChapterBlocks
 import com.lianwenqi.app.util.parseAiOutlineBlocks
 import com.lianwenqi.app.util.shortHash
@@ -1489,33 +1491,60 @@ class AiChatViewModel(
         }
         manualImportLoading.value = true
         try {
-            val outline = toolId == AI_TOOL_WRITE_OUTLINE
-            val prompt = if (outline) AI_OUTLINE_TOOL_PROMPT else AI_CHAPTER_TOOL_PROMPT
-            val turns = listOf(
-                ChatTurn(ChatRole.SYSTEM, prompt),
-                ChatTurn(ChatRole.USER, "请把下面的内容转换成规定格式，只输出标记块：\n\n" + message.content)
-            )
-            val result = configRepository.sendToModel(
-                modelId,
-                AiRequest(turns = turns, model = "", temperature = 0f, maxTokens = 0)
-            )
-            if (!result.success) {
-                importToast.value = result.error?.userMessage ?: "解析失败，请重试"
-                return@launch
+            // 按回答内容判定类型：只像章节梗概的内容绝不能送进大纲提示词，
+            // 否则模型会把「第N章」的梗概当成大纲 blocks 转出来，写进大纲库。
+            val kindHint = detectImportKindHint(message.content)
+            val outline = toolId == AI_TOOL_WRITE_OUTLINE && !kindHint.chapterOnly
+            if (toolId == AI_TOOL_WRITE_OUTLINE && kindHint.chapterOnly) {
+                importToast.value = "检测到章节梗概，已按「批量写入章节梗概」解析"
             }
-            if (outline) {
-                val blocks = parseAiOutlineBlocks(result.content)
-                if (blocks.isEmpty()) {
-                    importToast.value = "没有解析到可导入的大纲内容"
-                } else {
-                    pendingImports.value = pendingImports.value + PendingImport.Outline(blocks)
+
+            suspend fun convert(prompt: String): String? {
+                val turns = listOf(
+                    ChatTurn(ChatRole.SYSTEM, prompt),
+                    ChatTurn(ChatRole.USER, "请把下面的内容转换成规定格式，只输出标记块：\n\n" + message.content)
+                )
+                val result = configRepository.sendToModel(
+                    modelId,
+                    AiRequest(turns = turns, model = "", temperature = 0f, maxTokens = 0)
+                )
+                if (!result.success) {
+                    importToast.value = result.error?.userMessage ?: "解析失败，请重试"
+                    return null
                 }
-            } else {
-                val blocks = parseAiChapterBlocks(result.content)
+                return result.content
+            }
+
+            if (!outline) {
+                val text = convert(AI_CHAPTER_TOOL_PROMPT) ?: return@launch
+                val blocks = parseAiChapterBlocks(text)
                 if (blocks.isEmpty()) {
                     importToast.value = "没有解析到可导入的章节梗概"
                 } else {
                     pendingImports.value = pendingImports.value + PendingImport.Chapters(blocks)
+                }
+                return@launch
+            }
+
+            val parsed = parseAiOutlineBlocks(convert(AI_OUTLINE_TOOL_PROMPT) ?: return@launch)
+            // 二次解析仍可能把章节梗概塞进大纲：这类条目一律丢弃，绝不写入大纲库
+            val blocks = parsed.filterNot { isChapterLikeOutlineBlock(it) }
+            val dropped = parsed.size - blocks.size
+            if (blocks.isNotEmpty()) pendingImports.value = pendingImports.value + PendingImport.Outline(blocks)
+            if (dropped == 0) {
+                if (blocks.isEmpty()) importToast.value = "没有解析到可导入的大纲内容"
+                return@launch
+            }
+            // 混合内容（如人设 + 1-10 章梗概）：章节部分再按章节提示词解析一次，单独入队
+            val chapters = parseAiChapterBlocks(convert(AI_CHAPTER_TOOL_PROMPT) ?: return@launch)
+            if (chapters.isNotEmpty()) {
+                pendingImports.value = pendingImports.value + PendingImport.Chapters(chapters)
+                importToast.value = "已分别解析：大纲 ${blocks.size} 条、章节梗概 ${chapters.size} 条"
+            } else {
+                importToast.value = if (blocks.isNotEmpty()) {
+                    "已忽略 $dropped 条章节梗概，请用「批量写入章节梗概」导入"
+                } else {
+                    "这条回答是章节梗概，请选择「批量写入章节梗概」导入"
                 }
             }
         } finally {

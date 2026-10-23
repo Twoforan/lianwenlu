@@ -47,7 +47,9 @@ data class AiResult(
     /** 模型本轮发起的工具调用（参数已按流式分片累积完整） */
     val toolCalls: List<AiToolCall> = emptyList(),
     /** 本次带 tools 的请求被供应商拒绝后，已自动重试一次无 tools 请求（用于提示用户手动手动导入） */
-    val toolsUnsupported: Boolean = false
+    val toolsUnsupported: Boolean = false,
+    /** 正文里出现了工具调用语法，但没能还原成可用的工具调用（用于明确提示而不是静默失败） */
+    val leakedToolSyntax: Boolean = false
 ) {
     companion object {
         fun ok(
@@ -56,14 +58,16 @@ data class AiResult(
             promptTokens: Int = 0,
             completionTokens: Int = 0,
             cachedTokens: Int = 0,
-            toolCalls: List<AiToolCall> = emptyList()
+            toolCalls: List<AiToolCall> = emptyList(),
+            leakedToolSyntax: Boolean = false
         ) = AiResult(
             true, text,
             reasoning = reasoning,
             promptTokens = promptTokens,
             completionTokens = completionTokens,
             cachedTokens = cachedTokens,
-            toolCalls = toolCalls
+            toolCalls = toolCalls,
+            leakedToolSyntax = leakedToolSyntax
         )
 
         fun fail(error: AiError) = AiResult(false, error = error)

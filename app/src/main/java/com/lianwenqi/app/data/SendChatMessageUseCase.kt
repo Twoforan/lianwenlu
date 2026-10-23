@@ -63,6 +63,10 @@ data class PromptLog(
     val userPrompt: String = "",
     /** 本轮实际发送的完整提示词（按角色顺序拼接） */
     val fullPrompt: String = "",
+    /** 本轮请求实际携带的工具名（空表示普通对话，不带 tools） */
+    val tools: List<String> = emptyList(),
+    /** 模型原始响应的摘要（前 500 字），用于排查「工具调用写成正文」一类问题 */
+    val rawResponse: String = "",
     /**
      * 本轮产出的类型标记：空表示普通对话；[GEN_KIND_SUMMARY] 表示单独「生成梗概」产出的回答，
      * 操作栏据此显示「写入梗概」图标（回答只有点该图标才写回本章，不再自动写回）。
@@ -300,6 +304,14 @@ class SendChatMessageUseCase(
             val storedContent = result.content.ifBlank {
                 if (result.toolCalls.isNotEmpty()) "（本轮已生成可导入内容，请在导入确认框中选择要写入的条目）" else ""
             }
+            val responseDigest = buildString {
+                append(result.content.take(500))
+                if (result.toolCalls.isNotEmpty()) {
+                    if (isNotEmpty()) append("\n")
+                    append("[工具调用] ")
+                    append(result.toolCalls.joinToString("；") { "${it.name}：${it.arguments.take(120)}" })
+                }
+            }
             chatRepository.addMessage(
                 request.sessionId, ChatRole.ASSISTANT, storedContent,
                 replyToId = request.replyToUserId,
@@ -309,10 +321,17 @@ class SendChatMessageUseCase(
                 completionTokens = result.completionTokens,
                 cachedTokens = result.cachedTokens,
                 chapterId = request.chapterId,
-                promptLog = buildPromptLog(request, turns, history, allMessages, effectiveSystemPrompt).encode()
+                promptLog = buildPromptLog(
+                    request, turns, history, allMessages, effectiveSystemPrompt,
+                    toolNames = tools.map { it.name },
+                    rawResponse = responseDigest
+                ).encode()
             )
             if (result.toolsUnsupported) {
                 trySend(ChatEvent.ToolFallback("当前模型不支持工具调用，可在回答上点「导入」手动导入"))
+            } else if (result.leakedToolSyntax && result.toolCalls.isEmpty()) {
+                // 正文里有工具调用语法却没能还原：明确告知，避免再次静默失败
+                trySend(ChatEvent.ToolFallback("模型把工具调用写成了正文且没能解析，可在回答上点「导入」手动导入"))
             }
             // AI 工具：优先解析模型发起的工具调用；没有工具调用时再兼容旧标记块。
             // 若工具参数存在却无法解析（畸形 JSON），上报 Error，让用户知道工具没生效。
@@ -372,7 +391,9 @@ class SendChatMessageUseCase(
         turns: List<ChatTurn>,
         history: List<ChatTurn>,
         allMessages: List<ChatMessage>,
-        systemPrompt: String
+        systemPrompt: String,
+        toolNames: List<String> = emptyList(),
+        rawResponse: String = ""
     ): PromptLog {
         // 历史轮次：一条用户发言 + 紧随其后的助手回答算作一轮
         val rounds = mutableListOf<PromptLogRound>()
@@ -404,7 +425,9 @@ class SendChatMessageUseCase(
             userPrompt = allMessages.firstOrNull { it.id == request.replyToUserId }?.content.orEmpty(),
             // 「本轮提示词」只回显本轮真正发给 AI 的那部分（含本章梗概 / 检索片段 / 新增大纲资料），
             // 即请求里最后一条用户发言；预设提示词、自定义前缀与历史轮次属于命中缓存的前缀，不在此重复展示
-            fullPrompt = turns.lastOrNull { it.role == ChatRole.USER }?.content.orEmpty()
+            fullPrompt = turns.lastOrNull { it.role == ChatRole.USER }?.content.orEmpty(),
+            tools = toolNames,
+            rawResponse = rawResponse
         )
     }
 }

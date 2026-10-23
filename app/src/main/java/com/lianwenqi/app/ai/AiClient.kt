@@ -2,6 +2,7 @@ package com.lianwenqi.app.ai
 
 import com.lianwenqi.app.data.entity.ApiType
 import com.lianwenqi.app.data.entity.ChatRole
+import com.lianwenqi.app.util.extractLeakedToolCalls
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
@@ -265,6 +266,21 @@ class AiClient(
             )
         }
 
+    /**
+     * 部分供应商（含部分 DeepSeek 兼容实现）会把工具调用写进正文而不是 `tool_calls`。
+     * 这里在正文里还原，并把泄漏片段从正文剔除；顺带标记「检测到语法但没能还原」供上层提示。
+     */
+    private fun recoverLeakedToolCalls(
+        content: String?,
+        calls: List<AiToolCall>,
+        tools: List<AiToolSpec>
+    ): Triple<String, List<AiToolCall>, Boolean> {
+        val text = content.orEmpty()
+        if (tools.isEmpty() || calls.isNotEmpty() || text.isBlank()) return Triple(text, calls, false)
+        val leak = extractLeakedToolCalls(text, tools.map { it.name }.toSet())
+        return Triple(leak.cleanedContent, leak.calls, leak.syntaxDetected)
+    }
+
     private suspend fun chatCompletions(
         endpoint: ModelEndpoint,
         turns: List<ChatTurn>,
@@ -295,14 +311,18 @@ class AiClient(
             val parsed = json.decodeFromString<ChatCompletionResponse>(text)
             parsed.error?.message?.let { return AiResult.fail(it) }
             val choice = parsed.choices.firstOrNull()
-            val content = choice?.message?.content ?: choice?.text
             val reasoning = choice?.message?.reasoningContent.orEmpty()
-            val calls = toolCallsOf(choice?.message)
-            return if (content.isNullOrBlank()) {
+            val (content, calls, leaked) = recoverLeakedToolCalls(
+                choice?.message?.content ?: choice?.text,
+                toolCallsOf(choice?.message),
+                tools
+            )
+            val promptTokens = parsed.usage?.promptTokens ?: estimateTokens(turns.joinToString("") { it.content })
+            return if (content.isBlank()) {
                 if (calls.isNotEmpty()) AiResult.ok(
                     "",
                     reasoning,
-                    parsed.usage?.promptTokens ?: estimateTokens(turns.joinToString("") { it.content }),
+                    promptTokens,
                     parsed.usage?.completionTokens ?: 0,
                     parsed.usage?.promptTokensDetails?.cachedTokens ?: 0,
                     calls
@@ -311,10 +331,11 @@ class AiClient(
             } else AiResult.ok(
                 content,
                 reasoning,
-                parsed.usage?.promptTokens ?: estimateTokens(turns.joinToString("") { it.content }),
+                promptTokens,
                 parsed.usage?.completionTokens ?: estimateTokens(content + reasoning),
                 parsed.usage?.promptTokensDetails?.cachedTokens ?: 0,
-                calls
+                calls,
+                leakedToolSyntax = leaked
             )
         }
     }
@@ -404,17 +425,18 @@ class AiClient(
                 return AiResult.fail(AiError.Network(IOException("响应中断：连接在完整结束前被关闭")))
             }
             val text = content.toString()
-            val calls = toolAcc.build()
-            if (text.isBlank() && calls.isEmpty()) {
+            val (finalText, finalCalls, leaked) = recoverLeakedToolCalls(text, toolAcc.build(), tools)
+            if (finalText.isBlank() && finalCalls.isEmpty()) {
                 return if (truncated) AiResult.fail(TRUNCATED_HINT) else AiResult.fail("模型返回为空")
             }
             return AiResult.ok(
-                text,
+                finalText,
                 reasoning.toString(),
                 usage?.promptTokens ?: estimateTokens(turns.joinToString("") { it.content }),
-                usage?.completionTokens ?: estimateTokens(text + reasoning),
+                usage?.completionTokens ?: estimateTokens(finalText + reasoning),
                 usage?.promptTokensDetails?.cachedTokens ?: 0,
-                calls
+                finalCalls,
+                leakedToolSyntax = leaked
             )
         }
     }
@@ -447,17 +469,21 @@ class AiClient(
             if (!resp.isSuccessful) return AiResult.fail(errorForStatus(resp.code, text.take(300)))
             val parsed = json.decodeFromString<ResponsesResponse>(text)
             parsed.error?.message?.let { return AiResult.fail(it) }
-            val content = extractResponsesText(parsed)
             val reasoning = extractResponsesReasoning(parsed)
-            val calls = toolCallsOf(parsed)
-            return if (content.isNullOrBlank() && calls.isEmpty()) AiResult.fail("模型返回为空")
+            val (content, calls, leaked) = recoverLeakedToolCalls(
+                extractResponsesText(parsed),
+                toolCallsOf(parsed),
+                tools
+            )
+            return if (content.isBlank() && calls.isEmpty()) AiResult.fail("模型返回为空")
             else AiResult.ok(
-                content.orEmpty(),
+                content,
                 reasoning,
                 parsed.usage?.inputTokens ?: estimateTokens(turns.joinToString("") { it.content }),
-                parsed.usage?.outputTokens ?: estimateTokens(content.orEmpty() + reasoning),
+                parsed.usage?.outputTokens ?: estimateTokens(content + reasoning),
                 parsed.usage?.inputTokensDetails?.cachedTokens ?: 0,
-                calls
+                calls,
+                leakedToolSyntax = leaked
             )
         }
     }
@@ -545,17 +571,18 @@ class AiClient(
                 return AiResult.fail(AiError.Network(IOException("响应中断：连接在完整结束前被关闭")))
             }
             val text = content.toString()
-            val calls = toolAcc.build()
-            if (text.isBlank() && calls.isEmpty()) {
+            val (finalText, finalCalls, leaked) = recoverLeakedToolCalls(text, toolAcc.build(), tools)
+            if (finalText.isBlank() && finalCalls.isEmpty()) {
                 return AiResult.fail("模型返回为空")
             }
             return AiResult.ok(
-                text,
+                finalText,
                 reasoning.toString(),
                 usage?.inputTokens ?: estimateTokens(turns.joinToString("") { it.content }),
-                usage?.outputTokens ?: estimateTokens(text + reasoning),
+                usage?.outputTokens ?: estimateTokens(finalText + reasoning),
                 usage?.inputTokensDetails?.cachedTokens ?: 0,
-                calls
+                finalCalls,
+                leakedToolSyntax = leaked
             )
         }
     }
@@ -655,7 +682,6 @@ class AiClient(
             if (!resp.isSuccessful) return AiResult.fail(errorForStatus(resp.code, text.take(300)))
             val parsed = json.decodeFromString<AnthropicResponse>(text)
             parsed.error?.message?.let { return AiResult.fail(it) }
-            val content = parsed.content.filter { it.type == "text" }.mapNotNull { it.text }.joinToString("")
             val reasoning = parsed.content.filter { it.type == "thinking" }.mapNotNull { it.thinking }.joinToString("")
             val calls = parsed.content.filter { it.type == "tool_use" }.mapNotNull { block ->
                 val name = block.name?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
@@ -665,7 +691,9 @@ class AiClient(
                     arguments = block.input?.toString()?.takeIf { it.isNotBlank() } ?: "{}"
                 )
             }
-            if (content.isBlank() && calls.isEmpty()) {
+            val rawContent = parsed.content.filter { it.type == "text" }.mapNotNull { it.text }.joinToString("")
+            val (content, finalCalls, leaked) = recoverLeakedToolCalls(rawContent, calls, tools)
+            if (content.isBlank() && finalCalls.isEmpty()) {
                 return if (parsed.stopReason == "max_tokens") AiResult.fail(TRUNCATED_HINT)
                 else AiResult.fail("模型返回为空")
             }
@@ -677,7 +705,8 @@ class AiClient(
                 if (totalInput > 0) totalInput else estimateTokens(turns.joinToString("") { it.content }),
                 u?.outputTokens ?: estimateTokens(content + reasoning),
                 u?.cacheReadInputTokens ?: 0,
-                calls
+                finalCalls,
+                leakedToolSyntax = leaked
             )
         }
     }
@@ -760,18 +789,19 @@ class AiClient(
                 return AiResult.fail(AiError.Network(IOException("响应中断：连接在完整结束前被关闭")))
             }
             val text = content.toString()
-            val calls = toolAcc.build()
-            if (text.isBlank() && calls.isEmpty()) {
+            val (finalText, finalCalls, leaked) = recoverLeakedToolCalls(text, toolAcc.build(), tools)
+            if (finalText.isBlank() && finalCalls.isEmpty()) {
                 return if (truncated) AiResult.fail(TRUNCATED_HINT) else AiResult.fail("模型返回为空")
             }
             val totalInput = inputTokens + cacheRead + cacheCreation
             return AiResult.ok(
-                text,
+                finalText,
                 reasoning.toString(),
                 if (totalInput > 0) totalInput else estimateTokens(turns.joinToString("") { it.content }),
-                outputTokens.takeIf { it > 0 } ?: estimateTokens(text + reasoning),
+                outputTokens.takeIf { it > 0 } ?: estimateTokens(finalText + reasoning),
                 cacheRead,
-                calls
+                finalCalls,
+                leakedToolSyntax = leaked
             )
         }
     }

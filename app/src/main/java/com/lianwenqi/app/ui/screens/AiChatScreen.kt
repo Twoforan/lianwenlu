@@ -72,6 +72,7 @@ import androidx.compose.material.icons.filled.ReceiptLong
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.UploadFile
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.Send
@@ -163,6 +164,7 @@ import com.lianwenqi.app.util.AI_TOOL_IMPORT_CHAPTER
 import com.lianwenqi.app.util.AI_TOOL_WRITE_OUTLINE
 import com.lianwenqi.app.util.AiToolInfo
 import com.lianwenqi.app.util.TextTool
+import com.lianwenqi.app.util.detectImportKindHint
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -721,11 +723,13 @@ fun AiChatScreen(initialBookId: Long?) {
     }
     // 手动导入（模型不支持工具调用时）：选择类型 → 二次解析 → 弹预览确认
     manualImportTarget?.let { msg ->
+        val kindHint = remember(msg.id, msg.content) { detectImportKindHint(msg.content) }
         LaunchedEffect(pendingImports, manualImportLoading) {
             if (!manualImportLoading && pendingImports.isNotEmpty()) manualImportTarget = null
         }
         ManualImportDialog(
-            outlineAvailable = importOutlineOn,
+            // 只像章节梗概的回答不再提供「写入大纲」，避免章节梗概被转成大纲条目
+            outlineAvailable = importOutlineOn && !kindHint.chapterOnly,
             chapterAvailable = importChapterOn,
             loading = manualImportLoading,
             onPick = { toolId -> vm.manualImport(msg.id, toolId) },
@@ -1055,6 +1059,8 @@ fun AiAssistantDrawer(
     onGeneratedSummary: (String) -> Unit,
     /** 跳转到本卷下一章节；没有下一章时新建章节再跳转 */
     onNextChapter: () -> Unit,
+    /** 进入当前章节的阅读预览 */
+    onPreview: () -> Unit,
     /** 抽屉里改章节名后通知编辑器同步本地标题缓冲，避免退出编辑页时用旧标题覆盖回去 */
     onChapterRenamed: (Long, String) -> Unit
 ) {
@@ -1074,7 +1080,8 @@ fun AiAssistantDrawer(
             modifier = Modifier.align(Alignment.CenterEnd)
         ) {
             AiAssistantPanel(
-                bookId, chapterId, onDismiss, onWriteToChapter, onGeneratedSummary, onNextChapter, onChapterRenamed
+                bookId, chapterId, onDismiss, onWriteToChapter, onGeneratedSummary, onNextChapter,
+                onPreview, onChapterRenamed
             )
         }
     }
@@ -1089,6 +1096,7 @@ private fun AiAssistantPanel(
     onWriteToChapter: (String) -> Unit,
     onGeneratedSummary: (String) -> Unit,
     onNextChapter: () -> Unit,
+    onPreview: () -> Unit,
     onChapterRenamed: (Long, String) -> Unit
 ) {
     val vm = appViewModel(key = "ai-quick-$bookId-$chapterId") {
@@ -1189,6 +1197,14 @@ private fun AiAssistantPanel(
                         onSelect = { vm.setModel(it) }
                     )
                     Spacer(Modifier.weight(1f))
+                    // 预览当前章节（与编辑器顶栏的预览入口一致）
+                    IconButton(onClick = {
+                        focusManager.clearFocus()
+                        keyboard?.hide()
+                        onPreview()
+                    }) {
+                        Icon(Icons.Filled.Visibility, contentDescription = "预览")
+                    }
                     // 新建对话移到关闭按钮左侧
                     IconButton(
                         onClick = {
@@ -3090,6 +3106,15 @@ private fun PromptLogDialog(log: PromptLog?, onClose: () -> Unit) {
                     if (log.memory.isNotBlank()) LogTextNode("记忆检索参考资料", log.memory)
                     if (log.autoOutline.isNotBlank()) LogTextNode("新增大纲参考资料", log.autoOutline)
                     LogTextNode("用户提示词部分", log.userPrompt)
+
+                    // 四、工具与响应日志：排查「工具没触发 / 工具写成正文」一类问题
+                    if (log.tools.isNotEmpty()) {
+                        LogSectionTitle("工具日志")
+                        LogTextNode("本轮工具", log.tools.joinToString("、"))
+                    }
+                    if (log.rawResponse.isNotBlank()) {
+                        LogTextNode("原始响应摘要", log.rawResponse)
+                    }
                 }
             }
         },
