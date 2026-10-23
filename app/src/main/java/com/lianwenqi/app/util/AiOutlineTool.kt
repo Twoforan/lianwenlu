@@ -1,5 +1,6 @@
 package com.lianwenqi.app.util
 
+import com.lianwenqi.app.ai.AiToolSpec
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -9,8 +10,14 @@ import kotlinx.serialization.json.jsonPrimitive
 /** 「写入大纲工具」的固定 id（AI 聊天页多选、工具页开关共用） */
 const val AI_TOOL_WRITE_OUTLINE = "write_outline"
 
-/** 「章节梗概导入工具」的固定 id */
+/** 「批量写入章节梗概」的固定 id */
 const val AI_TOOL_IMPORT_CHAPTER = "import_chapter"
+
+/** 工具调用名称：大纲导入 */
+const val AI_TOOL_IMPORT_OUTLINE_NAME = "import_outline"
+
+/** 工具调用名称：章节梗概批量导入 */
+const val AI_TOOL_IMPORT_CHAPTER_NAME = "import_chapters"
 
 /** AI 工具展示信息 */
 data class AiToolInfo(val id: String, val name: String, val description: String)
@@ -20,12 +27,12 @@ val AI_TOOLS: List<AiToolInfo> = listOf(
     AiToolInfo(
         id = AI_TOOL_WRITE_OUTLINE,
         name = "写入大纲工具",
-        description = "AI 生成的人设 / 世界观等可按固定格式解析并写入作品大纲"
+        description = "AI 可在回答时调用工具，把人设 / 世界观等结构化写入作品大纲"
     ),
     AiToolInfo(
         id = AI_TOOL_IMPORT_CHAPTER,
-        name = "章节梗概导入",
-        description = "AI 生成的章节名与章节梗概可按固定格式解析并写入分卷章节"
+        name = "批量写入章节梗概",
+        description = "AI 可在回答时调用工具，把章节名与梗概批量写入书籍分卷与章节"
     )
 )
 
@@ -79,6 +86,26 @@ private data class AiChapterPayload(val chapters: List<AiChapterDto> = emptyList
 
 private val aiChapterJson = Json { ignoreUnknownKeys = true }
 
+private fun AiChapterDto.toBlock(): AiChapterBlock? =
+    if (chapterName.isBlank()) null
+    else AiChapterBlock(
+        volume = volume.trim(),
+        chapterName = chapterName.trim(),
+        summary = summary,
+        order = order?.let { el ->
+            runCatching { el.jsonPrimitive.intOrNull }.getOrNull()
+                ?: runCatching { el.jsonPrimitive.content.trim().toIntOrNull() }.getOrNull()
+        } ?: 0
+    )
+
+/** 解析工具调用参数（import_chapters 的 arguments JSON）；格式非法时返回 null */
+fun parseAiChapterBlocksJson(text: String): List<AiChapterBlock>? {
+    val chapters = runCatching {
+        aiChapterJson.decodeFromString(AiChapterPayload.serializer(), text).chapters
+    }.getOrNull() ?: return null
+    return chapters.mapNotNull { it.toBlock() }
+}
+
 /**
  * 从文本中解析全部章节梗概区块，并额外报告是否存在畸形区块。
  * 与 [parseAiChapterBlocks] 的区别：不静默吞掉解析失败，而是通过 [AiBlocksResult.malformed] 暴露。
@@ -97,29 +124,12 @@ fun parseAiChapterBlocksResult(text: String): AiBlocksResult<AiChapterBlock> {
             malformed = true
             break
         }
-        val json = text.substring(jsonStart, end).trim()
-        val chapters = runCatching {
-            aiChapterJson.decodeFromString(AiChapterPayload.serializer(), json).chapters
-        }.getOrNull()
-        if (chapters == null) {
+        val parsed = parseAiChapterBlocksJson(text.substring(jsonStart, end).trim())
+        if (parsed == null) {
             // 标记存在但 JSON 解析失败 → 畸形
             malformed = true
         } else {
-            chapters.forEach { c ->
-                if (c.chapterName.isNotBlank()) {
-                    out.add(
-                        AiChapterBlock(
-                            volume = c.volume.trim(),
-                            chapterName = c.chapterName.trim(),
-                            summary = c.summary,
-                            order = c.order?.let { el ->
-                                runCatching { el.jsonPrimitive.intOrNull }.getOrNull()
-                                    ?: runCatching { el.jsonPrimitive.content.trim().toIntOrNull() }.getOrNull()
-                            } ?: 0
-                        )
-                    )
-                }
-            }
+            out.addAll(parsed)
         }
         from = end + AI_CHAPTER_END.length
     }
@@ -161,6 +171,91 @@ const val AI_OUTLINE_TOOL_PROMPT: String = """当你需要生成可导入的人�
 是表具体内容
 字段名不要包含特殊符号。字段值中如果包含引号或换行，必须按 JSON 规则转义。"""
 
+// ---------- 工具调用定义（function calling） ----------
+
+val AI_IMPORT_OUTLINE_TOOL_SPEC: AiToolSpec = AiToolSpec(
+    name = AI_TOOL_IMPORT_OUTLINE_NAME,
+    description = "把本轮内容中的人设 / 世界观等结构化数据写入作品大纲。回答请照常输出自然语言，" +
+        "不要因为本工具把回答改写成 JSON；仅当本轮内容确实包含可写入的人设 / 世界观时调用。",
+    parametersJson = """
+        {
+          "type": "object",
+          "properties": {
+            "blocks": {
+              "type": "array",
+              "description": "要写入作品大纲的区块列表",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "type": {"type": "string", "description": "所属大类，如 人设、主角人设、世界观、故事线"},
+                  "name": {"type": "string", "description": "条目显示名称，如 姓名、主线"},
+                  "fields": {
+                    "type": "array",
+                    "description": "条目字段",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "key": {"type": "string", "description": "字段名，不要包含特殊符号"},
+                        "value": {"type": "string", "description": "字段值，引号与换行按 JSON 规则转义"}
+                      },
+                      "required": ["key", "value"]
+                    }
+                  }
+                },
+                "required": ["type", "name", "fields"]
+              }
+            }
+          },
+          "required": ["blocks"]
+        }
+    """.trimIndent()
+)
+
+val AI_IMPORT_CHAPTER_TOOL_SPEC: AiToolSpec = AiToolSpec(
+    name = AI_TOOL_IMPORT_CHAPTER_NAME,
+    description = "把本轮内容中的章节名与章节梗概批量写入书籍分卷与章节。回答请照常输出自然语言，" +
+        "不要因为本工具把回答改写成 JSON；仅当本轮内容确实包含章节名 + 梗概时调用。",
+    parametersJson = """
+        {
+          "type": "object",
+          "properties": {
+            "chapters": {
+              "type": "array",
+              "description": "要写入的章节列表",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "volume": {"type": "string", "description": "分卷名，没有可写空字符串"},
+                  "chapterName": {"type": "string", "description": "章节名"},
+                  "summary": {"type": "string", "description": "章节梗概"},
+                  "order": {"type": "integer", "description": "章节在本卷的序号"}
+                },
+                "required": ["chapterName", "summary"]
+              }
+            }
+          },
+          "required": ["chapters"]
+        }
+    """.trimIndent()
+)
+
+/** 「复制工具定义」内容：工具名 + 用途 + 参数 Schema，文末附旧标记格式作为兼容提示 */
+fun toolDefinitionText(spec: AiToolSpec, legacyPrompt: String): String = buildString {
+    appendLine("工具名：${spec.name}")
+    appendLine("用途：${spec.description}")
+    appendLine("参数（JSON Schema）：")
+    appendLine(spec.parametersJson)
+    appendLine()
+    appendLine("如果你的客户端不支持工具调用，也可按下面的旧标记格式输出：")
+    appendLine(legacyPrompt)
+}
+
+val AI_OUTLINE_TOOL_DEFINITION_TEXT: String =
+    toolDefinitionText(AI_IMPORT_OUTLINE_TOOL_SPEC, AI_OUTLINE_TOOL_PROMPT)
+
+val AI_CHAPTER_TOOL_DEFINITION_TEXT: String =
+    toolDefinitionText(AI_IMPORT_CHAPTER_TOOL_SPEC, AI_CHAPTER_TOOL_PROMPT)
+
 /** 一个可导入的大纲区块：标签 + 显示名称 + 字段列表 */
 data class AiOutlineBlock(
     val type: String,
@@ -183,6 +278,22 @@ private data class AiOutlinePayload(val blocks: List<AiOutlineBlockDto> = emptyL
 
 private val aiOutlineJson = Json { ignoreUnknownKeys = true }
 
+private fun AiOutlineBlockDto.toBlock(): AiOutlineBlock? =
+    if (type.isBlank() || name.isBlank()) null
+    else AiOutlineBlock(
+        type = type.trim(),
+        name = name.trim(),
+        fields = fields.map { it.key.trim() to it.value }.filter { it.first.isNotBlank() }
+    )
+
+/** 解析工具调用参数（import_outline 的 arguments JSON）；格式非法时返回 null */
+fun parseAiOutlineBlocksJson(text: String): List<AiOutlineBlock>? {
+    val blocks = runCatching {
+        aiOutlineJson.decodeFromString(AiOutlinePayload.serializer(), text).blocks
+    }.getOrNull() ?: return null
+    return blocks.mapNotNull { it.toBlock() }
+}
+
 /**
  * 从文本中解析全部大纲区块，并额外报告是否存在畸形区块。
  * 与 [parseAiOutlineBlocks] 的区别：不静默吞掉解析失败，而是通过 [AiBlocksResult.malformed] 暴露。
@@ -201,27 +312,12 @@ fun parseAiOutlineBlocksResult(text: String): AiBlocksResult<AiOutlineBlock> {
             malformed = true
             break
         }
-        val json = text.substring(jsonStart, end).trim()
-        val blocks = runCatching {
-            aiOutlineJson.decodeFromString(AiOutlinePayload.serializer(), json).blocks
-        }.getOrNull()
-        if (blocks == null) {
+        val parsed = parseAiOutlineBlocksJson(text.substring(jsonStart, end).trim())
+        if (parsed == null) {
             // 标记存在但 JSON 解析失败 → 畸形
             malformed = true
         } else {
-            blocks.forEach { b ->
-                if (b.type.isNotBlank() && b.name.isNotBlank()) {
-                    out.add(
-                        AiOutlineBlock(
-                            type = b.type.trim(),
-                            name = b.name.trim(),
-                            fields = b.fields
-                                .map { it.key.trim() to it.value }
-                                .filter { it.first.isNotBlank() }
-                        )
-                    )
-                }
-            }
+            out.addAll(parsed)
         }
         from = end + AI_OUTLINE_END.length
     }

@@ -71,6 +71,7 @@ import androidx.compose.material.icons.filled.NoteAdd
 import androidx.compose.material.icons.filled.ReceiptLong
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.Send
@@ -201,6 +202,7 @@ fun AiChatScreen(initialBookId: Long?) {
     val outlineToolEnabled by vm.outlineToolEnabled.collectAsState()
     val chapterToolEnabled by vm.chapterToolEnabled.collectAsState()
     val pendingImports by vm.pendingImports.collectAsState()
+    val manualImportLoading by vm.manualImportLoading.collectAsState()
     val importToast by vm.importToast.collectAsState()
     val memoryRetrieval by vm.memoryRetrievalEnabled.collectAsState()
     val memorySearch by vm.memorySearchState.collectAsState()
@@ -217,6 +219,8 @@ fun AiChatScreen(initialBookId: Long?) {
     var showChapters by remember { mutableStateOf(false) }
     var showOutline by remember { mutableStateOf(false) }
     var showAiTools by remember { mutableStateOf(false) }
+    // 手动导入的降级入口：选中的回答 + 弹窗里的导入类型选择
+    var manualImportTarget by remember { mutableStateOf<ChatMessage?>(null) }
     var showSessions by remember { mutableStateOf(false) }
     var renamingSession by remember { mutableStateOf<ChatSession?>(null) }
     // 长按会话弹出的操作菜单（改名 / 换绑书籍）
@@ -235,6 +239,9 @@ fun AiChatScreen(initialBookId: Long?) {
     val scope = rememberCoroutineScope()
     val ui = remember { MessageUiState() }
     val modelName = models.firstOrNull { it.id == activeModelId }?.displayName ?: "未选择模型"
+    // 「导入」按钮：仅当至少一个导入工具在导航栏 AI 中真正生效时显示
+    val importOutlineOn = AI_TOOL_WRITE_OUTLINE in chatTools && outlineToolEnabled
+    val importChapterOn = AI_TOOL_IMPORT_CHAPTER in chatTools && chapterToolEnabled
     BackHandler(enabled = ui.editingId != null) { ui.editingId = null }
 
     Scaffold(
@@ -348,7 +355,10 @@ fun AiChatScreen(initialBookId: Long?) {
                     onSwitchVariant = { uid, mid -> vm.switchVariant(uid, mid) },
                     onViewLog = { logTarget = it },
                     onViewPrompt = { promptTarget = it },
-                    onStop = { vm.stopGenerating() }
+                    onStop = { vm.stopGenerating() },
+                    onManualImport = if (importOutlineOn || importChapterOn) {
+                        { manualImportTarget = it }
+                    } else null
                 )
             }
             val listState = rememberLazyListState()
@@ -656,9 +666,7 @@ fun AiChatScreen(initialBookId: Long?) {
             when (head) {
                 is PendingImport.Outline -> ImportConfirmDialog(
                     title = "写入大纲",
-                    message = "AI 生成了 ${head.blocks.size} 个大纲区块（${
-                        head.blocks.map { it.name }.joinToString("、")
-                    }），是否写入作品大纲？",
+                    message = "AI 生成了 ${head.blocks.size} 个大纲区块，勾选要写入的条目后可切换目标书籍。",
                     confirmText = "写入大纲",
                     books = books,
                     groups = groups,
@@ -668,14 +676,19 @@ fun AiChatScreen(initialBookId: Long?) {
                     },
                     onPickCover = { uri, cb -> scope.launch { cb(vm.pickCover(uri)) } },
                     onCreateGroup = { vm.createGroupAndGet(it) },
-                    onConfirm = { vm.confirmOutlineImport(it) },
+                    items = head.blocks.map {
+                        ImportPreviewItem(
+                            label = "${it.type} · ${it.name}（${it.fields.size} 个字段）",
+                            key = "${it.type.trim()}\u0000${it.name.trim()}"
+                        )
+                    },
+                    resolveExisting = { vm.existingImportKeys(it, outline = true) },
+                    onConfirm = { bookId, selected -> vm.confirmOutlineImport(bookId, selected) },
                     onDismiss = { vm.dismissPendingImport() }
                 )
                 is PendingImport.Chapters -> ImportConfirmDialog(
                     title = "导入章节梗概",
-                    message = "AI 生成了 ${head.blocks.size} 条章节梗概（${
-                        head.blocks.map { it.chapterName }.joinToString("、")
-                    }），是否写入章节？同名章节将覆盖梗概。",
+                    message = "AI 生成了 ${head.blocks.size} 条章节梗概，勾选要写入的条目后可切换目标书籍。同名章节将覆盖梗概。",
                     confirmText = "导入",
                     books = books,
                     groups = groups,
@@ -685,7 +698,14 @@ fun AiChatScreen(initialBookId: Long?) {
                     },
                     onPickCover = { uri, cb -> scope.launch { cb(vm.pickCover(uri)) } },
                     onCreateGroup = { vm.createGroupAndGet(it) },
-                    onConfirm = { vm.confirmChapterImport(it) },
+                    items = head.blocks.map {
+                        ImportPreviewItem(
+                            label = "${it.volume.ifBlank { "默认分卷" }} · ${it.chapterName}",
+                            key = "${it.volume.trim()}\u0000${it.chapterName.trim()}"
+                        )
+                    },
+                    resolveExisting = { vm.existingImportKeys(it, outline = false) },
+                    onConfirm = { bookId, selected -> vm.confirmChapterImport(bookId, selected) },
                     onDismiss = { vm.dismissPendingImport() }
                 )
             }
@@ -698,6 +718,19 @@ fun AiChatScreen(initialBookId: Long?) {
             Toast.makeText(toastContext, it, Toast.LENGTH_LONG).show()
             vm.clearImportToast()
         }
+    }
+    // 手动导入（模型不支持工具调用时）：选择类型 → 二次解析 → 弹预览确认
+    manualImportTarget?.let { msg ->
+        LaunchedEffect(pendingImports, manualImportLoading) {
+            if (!manualImportLoading && pendingImports.isNotEmpty()) manualImportTarget = null
+        }
+        ManualImportDialog(
+            outlineAvailable = importOutlineOn,
+            chapterAvailable = importChapterOn,
+            loading = manualImportLoading,
+            onPick = { toolId -> vm.manualImport(msg.id, toolId) },
+            onDismiss = { if (!manualImportLoading) manualImportTarget = null }
+        )
     }
     // A3 关闭时：正文有更新，发送前询问是否向量化到最新章节
     memoryAsk?.let {
@@ -3169,7 +3202,9 @@ private fun ChatMessageItem(
     /** 侧边栏 AI 助手专属：把这条回答的正文写入当前章节；为空则不显示该操作（如导航栏 AI 对话页） */
     onWriteToChapter: ((String) -> Unit)? = null,
     /** 侧边栏 AI 助手专属：把「生成梗概」产出的回答写入当前章节梗概；为空则不显示该操作 */
-    onWriteSummary: ((ChatMessage) -> Unit)? = null
+    onWriteSummary: ((ChatMessage) -> Unit)? = null,
+    /** 导航栏 AI 专属：模型不支持工具调用时的降级入口（回答操作栏「导入」）；为空则不显示 */
+    onManualImport: ((ChatMessage) -> Unit)? = null
 ) {
     when (entry) {
         is ChatEntry.User -> {
@@ -3281,7 +3316,8 @@ private fun ChatMessageItem(
                             onViewLog = onViewLog,
                             onViewPrompt = onViewPrompt,
                             onWriteToChapter = onWriteToChapter,
-                            onWriteSummary = onWriteSummary
+                            onWriteSummary = onWriteSummary,
+                            onManualImport = onManualImport
                         )
                     }
                 }
@@ -3302,7 +3338,8 @@ private fun ChatMessageItem(
             onViewLog = onViewLog,
             onViewPrompt = onViewPrompt,
             onWriteToChapter = onWriteToChapter,
-            onWriteSummary = onWriteSummary
+            onWriteSummary = onWriteSummary,
+            onManualImport = onManualImport
         )
     }
 }
@@ -3324,7 +3361,9 @@ private fun AssistantBlock(
     onViewPrompt: (ChatMessage) -> Unit,
     onWriteToChapter: ((String) -> Unit)? = null,
     /** 侧边栏 AI 助手专属：把「生成梗概」产出的回答写入当前章节梗概；为空则不显示该操作 */
-    onWriteSummary: ((ChatMessage) -> Unit)? = null
+    onWriteSummary: ((ChatMessage) -> Unit)? = null,
+    /** 导航栏 AI 专属：模型不支持工具调用时的降级入口（回答操作栏「导入」）；为空则不显示 */
+    onManualImport: ((ChatMessage) -> Unit)? = null
 ) {
     // 单条回答的「小收起」：只折叠这一条回答，不影响所属章节分组
     var collapsed by remember(msg.id) { mutableStateOf(false) }
@@ -3380,6 +3419,13 @@ private fun AssistantBlock(
                 MessageAction(Icons.Filled.Article, "查看本轮提示词") {
                     ui.pendingDeleteId = null
                     onViewPrompt(msg)
+                }
+                // 手动导入（模型不支持工具调用时的降级入口）
+                onManualImport?.let { import ->
+                    MessageAction(Icons.Filled.UploadFile, "导入") {
+                        ui.pendingDeleteId = null
+                        import(msg)
+                    }
                 }
                 // 侧边栏专属：把本条回答正文写入当前章节（覆盖 + 一键排版）
                 onWriteToChapter?.let { write ->
@@ -4794,6 +4840,55 @@ private fun AiToolsPickerDialog(
     )
 }
 
+/** 导入预览里的一条：[label] 为展示文本，[key] 用于与目标书籍已有条目比对（相同则标注将覆盖） */
+private data class ImportPreviewItem(val label: String, val key: String)
+
+/**
+ * 手动导入的类型选择弹窗：把当前回答做一次二次解析（旧标记提示词），成功后进入预览确认。
+ * 用于模型不支持工具调用、或工具调用失败时的降级。
+ */
+@Composable
+private fun ManualImportDialog(
+    outlineAvailable: Boolean,
+    chapterAvailable: Boolean,
+    loading: Boolean,
+    onPick: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("导入") },
+        text = {
+            Column {
+                Text("把这条回答转换成结构化数据，预览确认后再写入。")
+                Spacer(Modifier.height(10.dp))
+                if (loading) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(8.dp))
+                        Text("正在解析…")
+                    }
+                } else {
+                    if (outlineAvailable) {
+                        OutlinedButton(
+                            onClick = { onPick(AI_TOOL_WRITE_OUTLINE) },
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text("写入大纲") }
+                        Spacer(Modifier.height(8.dp))
+                    }
+                    if (chapterAvailable) {
+                        OutlinedButton(
+                            onClick = { onPick(AI_TOOL_IMPORT_CHAPTER) },
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text("批量写入章节梗概") }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(enabled = !loading, onClick = onDismiss) { Text("取消") } }
+    )
+}
+
 /** 通用导入确认弹窗（写入大纲 / 导入章节梗概共用）：默认写入唯一勾选 / 会话绑定的书；可换书，也可现场新建书籍 */
 @Composable
 private fun ImportConfirmDialog(
@@ -4806,12 +4901,19 @@ private fun ImportConfirmDialog(
     onCreateBook: suspend (BookFormResult) -> Long,
     onPickCover: (android.net.Uri, (String?) -> Unit) -> Unit,
     onCreateGroup: suspend (String) -> Long,
-    onConfirm: (Long) -> Unit,
+    items: List<ImportPreviewItem>,
+    resolveExisting: suspend (Long) -> Set<String>,
+    onConfirm: (Long, Set<Int>) -> Unit,
     onDismiss: () -> Unit
 ) {
     var targetBookId by remember { mutableStateOf<Long?>(null) }
     var showBookPicker by remember { mutableStateOf(false) }
+    var selected by remember(items) { mutableStateOf(items.indices.toSet()) }
+    var existingKeys by remember { mutableStateOf<Set<String>>(emptySet()) }
     LaunchedEffect(Unit) { targetBookId = resolveTarget() }
+    LaunchedEffect(targetBookId, items) {
+        existingKeys = targetBookId?.let { resolveExisting(it) } ?: emptySet()
+    }
     val targetBook = books.firstOrNull { it.id == targetBookId }
 
     AlertDialog(
@@ -4821,7 +4923,7 @@ private fun ImportConfirmDialog(
             Column {
                 Text(
                     message,
-                    maxLines = 4,
+                    maxLines = 3,
                     overflow = TextOverflow.Ellipsis
                 )
                 Spacer(Modifier.height(8.dp))
@@ -4832,12 +4934,64 @@ private fun ImportConfirmDialog(
                         overflow = TextOverflow.Ellipsis
                     )
                 }
+                if (items.isNotEmpty()) {
+                    Spacer(Modifier.height(8.dp))
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "共 ${items.size} 条，已选 ${selected.size} 条",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextButton(onClick = {
+                            selected = if (selected.size == items.size) emptySet() else items.indices.toSet()
+                        }) { Text(if (selected.size == items.size) "全不选" else "全选") }
+                    }
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 200.dp)
+                            .verticalScroll(rememberScrollState())
+                    ) {
+                        items.forEachIndexed { i, item ->
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Checkbox(
+                                    checked = i in selected,
+                                    onCheckedChange = { on ->
+                                        selected = if (on) selected + i else selected - i
+                                    }
+                                )
+                                Column(Modifier.weight(1f)) {
+                                    Text(
+                                        item.label,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    if (item.key in existingKeys) {
+                                        Text(
+                                            "将覆盖同名条目",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.error
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         },
         confirmButton = {
             Button(
-                enabled = targetBookId != null,
-                onClick = { targetBookId?.let(onConfirm) }
+                enabled = targetBookId != null && selected.isNotEmpty(),
+                onClick = { targetBookId?.let { onConfirm(it, selected) } }
             ) { Text(confirmText) }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }

@@ -1,8 +1,6 @@
 package com.lianwenqi.app.ai
 
 import com.lianwenqi.app.data.entity.ChatRole
-import com.lianwenqi.app.util.AI_CHAPTER_TOOL_PROMPT
-import com.lianwenqi.app.util.AI_OUTLINE_TOOL_PROMPT
 import com.lianwenqi.app.util.TextTool
 
 /** 字数兜底结果：[over] 表示被截断（原输出超上限），[under] 表示原输出低于下限（不重试，仅提示） */
@@ -36,20 +34,18 @@ private fun taskHead(chapterTitle: String, action: String): String =
     else "你的任务：现在撰写的是「${chapterTitle.trim()}」，请$action。\n"
 
 /**
- * 生成请求与聊天请求共用的前段块：自定义前缀 → 工具块（勾选时）→ 「以下是参考资料」。
+ * 生成请求与聊天请求共用的前段块：自定义前缀 → 「以下是参考资料」。
  * 顺序与 [com.lianwenqi.app.data.SendChatMessageUseCase] 组装聊天请求时完全一致，
  * 用来让两边命中同一段供应商侧前缀缓存；生成专用块（[buildSummaryTurns] / [buildContentTurns]）
  * 在本函数结果之后追加（需要携带历史对话时，历史插在两者中间）。
+ *
+ * 注：AI 工具已改为原生工具调用（tools 参数），不再把格式提示词塞进前缀。
  */
 fun buildGenerationPrefixTurns(
     customPrefix: String,
-    writeOutlineTool: Boolean,
-    chapterImportTool: Boolean,
     reference: String
 ): List<ChatTurn> = buildList {
     if (customPrefix.isNotBlank()) add(ChatTurn(ChatRole.SYSTEM, customPrefix))
-    if (writeOutlineTool) add(ChatTurn(ChatRole.SYSTEM, AI_OUTLINE_TOOL_PROMPT))
-    if (chapterImportTool) add(ChatTurn(ChatRole.SYSTEM, AI_CHAPTER_TOOL_PROMPT))
     if (reference.isNotBlank()) add(ChatTurn(ChatRole.SYSTEM, REFERENCE_BLOCK_HEADER + reference))
 }
 

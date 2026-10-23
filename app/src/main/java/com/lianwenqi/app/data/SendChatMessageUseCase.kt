@@ -10,9 +10,15 @@ import com.lianwenqi.app.data.entity.AiModel
 import com.lianwenqi.app.data.entity.ChatMessage
 import com.lianwenqi.app.data.entity.ChatRole
 import com.lianwenqi.app.data.entity.ContextSnapshot
+import com.lianwenqi.app.util.AI_IMPORT_CHAPTER_TOOL_SPEC
+import com.lianwenqi.app.util.AI_IMPORT_OUTLINE_TOOL_SPEC
+import com.lianwenqi.app.util.AI_TOOL_IMPORT_CHAPTER_NAME
+import com.lianwenqi.app.util.AI_TOOL_IMPORT_OUTLINE_NAME
 import com.lianwenqi.app.util.AiChapterBlock
 import com.lianwenqi.app.util.AiOutlineBlock
+import com.lianwenqi.app.util.parseAiChapterBlocksJson
 import com.lianwenqi.app.util.parseAiChapterBlocksResult
+import com.lianwenqi.app.util.parseAiOutlineBlocksJson
 import com.lianwenqi.app.util.parseAiOutlineBlocksResult
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.Channel
@@ -136,6 +142,9 @@ sealed class ChatEvent {
     /** 生成完成（助手消息已写库） */
     object Done : ChatEvent()
 
+    /** 当前模型不支持工具调用（已自动重试无 tools 请求），提示用户改用回答上的「导入」 */
+    data class ToolFallback(val message: String) : ChatEvent()
+
     /** 生成出错 */
     data class Error(val message: String) : ChatEvent()
 }
@@ -239,8 +248,6 @@ class SendChatMessageUseCase(
             addAll(
                 buildGenerationPrefixTurns(
                     customPrefix = request.prefixText,
-                    writeOutlineTool = request.writeOutlineTool,
-                    chapterImportTool = request.chapterImportTool,
                     reference = reference
                 )
             )
@@ -258,12 +265,24 @@ class SendChatMessageUseCase(
                 add(ChatTurn(ChatRole.USER, "请基于以上内容继续往下写。"))
             }
         }
+        // 工具定义只随聊天请求提供；生成正文 / 梗概路径不携带 tools
+        val tools = buildList {
+            if (request.writeOutlineTool) add(AI_IMPORT_OUTLINE_TOOL_SPEC)
+            if (request.chapterImportTool) add(AI_IMPORT_CHAPTER_TOOL_SPEC)
+        }
         // 模型请求可能抛出异常（如连接/解析异常）：统一兜底成失败结果，
         // 保证任何情况下都只会向 UI 吐 ChatEvent.Error，而不是让异常冲出 Flow 导致崩溃。
         val result = try {
             configRepository.sendToModel(
                 request.modelId,
-                AiRequest(turns = turns, model = "", temperature = 0f, maxTokens = 0, systemPrompt = request.systemPrompt)
+                AiRequest(
+                    turns = turns,
+                    model = "",
+                    temperature = 0f,
+                    maxTokens = 0,
+                    systemPrompt = request.systemPrompt,
+                    tools = tools
+                )
             ) { dc, dr ->
                 if (dc.isNotEmpty()) trySend(ChatEvent.Chunk(dc))
                 if (dr.isNotEmpty()) trySend(ChatEvent.ReasoningChunk(dr))
@@ -277,8 +296,12 @@ class SendChatMessageUseCase(
         if (result.success) {
             // 新版本插入前先清除旧版本的展示标记
             if (request.replyToUserId != 0L) chatRepository.deactivateVariants(request.replyToUserId)
+            // 模型只发起工具调用、没输出正文时补一句占位说明，避免对话里出现空白气泡
+            val storedContent = result.content.ifBlank {
+                if (result.toolCalls.isNotEmpty()) "（本轮已生成可导入内容，请在导入确认框中选择要写入的条目）" else ""
+            }
             chatRepository.addMessage(
-                request.sessionId, ChatRole.ASSISTANT, result.content,
+                request.sessionId, ChatRole.ASSISTANT, storedContent,
                 replyToId = request.replyToUserId,
                 variantIndex = request.variantIndex,
                 reasoning = result.reasoning,
@@ -288,22 +311,49 @@ class SendChatMessageUseCase(
                 chapterId = request.chapterId,
                 promptLog = buildPromptLog(request, turns, history, allMessages, effectiveSystemPrompt).encode()
             )
-            // AI 工具：回答里带可导入标记块时，按勾选的工具挨个上报，由 UI 逐个询问是否导入。
-            // 若标记存在却无法解析（畸形 JSON），上报 Error，让用户知道工具没生效。
+            if (result.toolsUnsupported) {
+                trySend(ChatEvent.ToolFallback("当前模型不支持工具调用，可在回答上点「导入」手动导入"))
+            }
+            // AI 工具：优先解析模型发起的工具调用；没有工具调用时再兼容旧标记块。
+            // 若工具参数存在却无法解析（畸形 JSON），上报 Error，让用户知道工具没生效。
             var toolError: String? = null
             if (request.writeOutlineTool) {
-                val parsed = parseAiOutlineBlocksResult(result.content)
-                when {
-                    parsed.blocks.isNotEmpty() -> send(ChatEvent.OutlineBlocksReady(parsed.blocks))
-                    parsed.malformed -> toolError = "AI 返回的大纲内容格式有误，无法解析，请重试"
+                val calls = result.toolCalls.filter { it.name == AI_TOOL_IMPORT_OUTLINE_NAME }
+                if (calls.isNotEmpty()) {
+                    val blocks = mutableListOf<AiOutlineBlock>()
+                    var bad = false
+                    calls.forEach { call ->
+                        val parsed = parseAiOutlineBlocksJson(call.arguments)
+                        if (parsed == null) bad = true else blocks += parsed
+                    }
+                    if (blocks.isNotEmpty()) send(ChatEvent.OutlineBlocksReady(blocks))
+                    if (bad) toolError = "AI 返回的导入数据格式有误，可在回答上点「导入」重试"
+                } else {
+                    val parsed = parseAiOutlineBlocksResult(result.content)
+                    when {
+                        parsed.blocks.isNotEmpty() -> send(ChatEvent.OutlineBlocksReady(parsed.blocks))
+                        parsed.malformed -> toolError = "AI 返回的大纲内容格式有误，无法解析，请重试"
+                    }
                 }
             }
             if (request.chapterImportTool) {
-                val parsed = parseAiChapterBlocksResult(result.content)
-                when {
-                    parsed.blocks.isNotEmpty() -> send(ChatEvent.ChapterBlocksReady(parsed.blocks))
-                    parsed.malformed && toolError == null ->
-                        toolError = "AI 返回的章节梗概内容格式有误，无法解析，请重试"
+                val calls = result.toolCalls.filter { it.name == AI_TOOL_IMPORT_CHAPTER_NAME }
+                if (calls.isNotEmpty()) {
+                    val blocks = mutableListOf<AiChapterBlock>()
+                    var bad = false
+                    calls.forEach { call ->
+                        val parsed = parseAiChapterBlocksJson(call.arguments)
+                        if (parsed == null) bad = true else blocks += parsed
+                    }
+                    if (blocks.isNotEmpty()) send(ChatEvent.ChapterBlocksReady(blocks))
+                    if (bad) toolError = toolError ?: "AI 返回的导入数据格式有误，可在回答上点「导入」重试"
+                } else {
+                    val parsed = parseAiChapterBlocksResult(result.content)
+                    when {
+                        parsed.blocks.isNotEmpty() -> send(ChatEvent.ChapterBlocksReady(parsed.blocks))
+                        parsed.malformed && toolError == null ->
+                            toolError = "AI 返回的章节梗概内容格式有误，无法解析，请重试"
+                    }
                 }
             }
             if (toolError != null) send(ChatEvent.Error(toolError)) else send(ChatEvent.Done)

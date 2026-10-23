@@ -95,6 +95,6 @@ class ConfigRepository(
         } else {
             endpoint
         }
-        return ai.chat(merged, request.turns, onDelta)
+        return ai.chat(merged, request.turns, request.tools, onDelta)
     }
 }

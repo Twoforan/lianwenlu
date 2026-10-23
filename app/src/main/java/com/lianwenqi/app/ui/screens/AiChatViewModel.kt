@@ -51,13 +51,18 @@ import com.lianwenqi.app.data.entity.PrefixEntry
 import com.lianwenqi.app.data.entity.SessionPrefix
 import com.lianwenqi.app.data.entity.decodeContextSnapshot
 import com.lianwenqi.app.data.entity.outlineCategoryLabel
+import com.lianwenqi.app.data.entity.defaultOutlineKeys
 import com.lianwenqi.app.data.entity.Prompt
 import com.lianwenqi.app.data.entity.Provider
 import com.lianwenqi.app.data.entity.Volume
+import com.lianwenqi.app.util.AI_CHAPTER_TOOL_PROMPT
+import com.lianwenqi.app.util.AI_OUTLINE_TOOL_PROMPT
 import com.lianwenqi.app.util.AI_TOOL_IMPORT_CHAPTER
 import com.lianwenqi.app.util.AI_TOOL_WRITE_OUTLINE
 import com.lianwenqi.app.util.AiChapterBlock
 import com.lianwenqi.app.util.AiOutlineBlock
+import com.lianwenqi.app.util.parseAiChapterBlocks
+import com.lianwenqi.app.util.parseAiOutlineBlocks
 import com.lianwenqi.app.util.shortHash
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -1286,9 +1291,6 @@ class AiChatViewModel(
         addAll(
             buildGenerationPrefixTurns(
                 customPrefix = prefix.custom,
-                // 生成路径由编辑器侧边 AI 触发（不携带 AI 工具），此处与聊天页保持同一判定
-                writeOutlineTool = writeOutlineToolOn(),
-                chapterImportTool = chapterImportToolOn(),
                 reference = ref.sharedReference
             )
         )
@@ -1381,6 +1383,16 @@ class AiChatViewModel(
     private fun chapterImportToolOn(): Boolean =
         enableAiTools && chapterToolEnabled.value && AI_TOOL_IMPORT_CHAPTER in chatTools.value
 
+    /** 某个 AI 工具当前是否真正生效（供 UI 判断是否显示回答上的「导入」按钮） */
+    fun isImportToolOn(id: String): Boolean = when (id) {
+        AI_TOOL_WRITE_OUTLINE -> writeOutlineToolOn()
+        AI_TOOL_IMPORT_CHAPTER -> chapterImportToolOn()
+        else -> false
+    }
+
+    /** 手动导入的二次解析进行中（UI 显示 loading） */
+    val manualImportLoading = MutableStateFlow(false)
+
     /** 取消当前这一项导入（队列后移，继续询问下一项） */
     fun dismissPendingImport() {
         pendingImports.value = pendingImports.value.drop(1)
@@ -1395,11 +1407,36 @@ class AiChatViewModel(
         selectedBookIds.value.singleOrNull()
             ?: _sessionId.value?.let { chatRepository.getSession(it)?.bookId }
 
-    /** 把待导入的大纲区块写入指定书籍，然后继续队列中的下一项 */
-    fun confirmOutlineImport(bookId: Long) = viewModelScope.launch {
+    /**
+     * 目标书籍里已存在的条目键（供导入预览标注「将覆盖」）：大纲按「标签\u0000名称」，章节按「分卷\u0000章节名」。
+     */
+    suspend fun existingImportKeys(bookId: Long, outline: Boolean): Set<String> = buildSet {
+        if (outline) {
+            val categories = prefs.outlineCategories(bookId) ?: defaultOutlineKeys
+            outlineRepository.getOutline(bookId).forEach { item ->
+                val name = decodeOutlineFields(item.content).firstOrNull()?.second?.ifBlank { item.title } ?: item.title
+                add("${item.category}\u0000$name")
+                categories.firstOrNull { it == item.category }?.let { add("${outlineCategoryLabel(it)}\u0000$name") }
+            }
+        } else {
+            val volumes = bookRepository.getVolumes(bookId)
+            val firstVolumeTitle = volumes.firstOrNull()?.title?.trim().orEmpty()
+            val titles = volumes.associate { it.id to it.title.trim() }
+            bookRepository.getChapters(bookId).forEach { chapter ->
+                val volumeTitle = titles[chapter.volumeId].orEmpty()
+                add("$volumeTitle\u0000${chapter.title.trim()}")
+                if (volumeTitle == firstVolumeTitle) add("\u0000${chapter.title.trim()}")
+            }
+        }
+    }
+
+    /** 把待导入的大纲区块写入指定书籍（[selected] 为预览里勾选的条目下标），然后继续队列中的下一项 */
+    fun confirmOutlineImport(bookId: Long, selected: Set<Int> = headIndices()) = viewModelScope.launch {
         val head = pendingImports.value.firstOrNull() as? PendingImport.Outline ?: return@launch
         pendingImports.value = pendingImports.value.drop(1)
-        val result = outlineImporter.import(bookId, head.blocks)
+        val blocks = head.blocks.filterIndexed { i, _ -> i in selected }
+        if (blocks.isEmpty()) return@launch
+        val result = outlineImporter.import(bookId, blocks)
         importToast.value = buildString {
             append("已写入 ${result.items} 条大纲")
             if (result.newCategories.isNotEmpty()) {
@@ -1410,11 +1447,13 @@ class AiChatViewModel(
         loadBookContextNow(selectedBookIds.value.firstOrNull() ?: bookId)
     }
 
-    /** 把待导入的章节梗概写入指定书籍，然后继续队列中的下一项 */
-    fun confirmChapterImport(bookId: Long) = viewModelScope.launch {
+    /** 把待导入的章节梗概写入指定书籍（[selected] 为预览里勾选的条目下标），然后继续队列中的下一项 */
+    fun confirmChapterImport(bookId: Long, selected: Set<Int> = headIndices()) = viewModelScope.launch {
         val head = pendingImports.value.firstOrNull() as? PendingImport.Chapters ?: return@launch
         pendingImports.value = pendingImports.value.drop(1)
-        val result = chapterImporter.import(bookId, head.blocks)
+        val blocks = head.blocks.filterIndexed { i, _ -> i in selected }
+        if (blocks.isEmpty()) return@launch
+        val result = chapterImporter.import(bookId, blocks)
         importToast.value = buildString {
             append("已导入章节梗概：新建 ${result.created} 章")
             if (result.updated > 0) append("，更新 ${result.updated} 章")
@@ -1424,6 +1463,64 @@ class AiChatViewModel(
         }
         // 刷新上下文里的章节 / 分卷列表，让「章节(n)」立即反映新章节
         loadBookContextNow(selectedBookIds.value.firstOrNull() ?: bookId)
+    }
+
+    private fun headIndices(): Set<Int> = when (val head = pendingImports.value.firstOrNull()) {
+        is PendingImport.Outline -> head.blocks.indices.toSet()
+        is PendingImport.Chapters -> head.blocks.indices.toSet()
+        null -> emptySet()
+    }
+
+    /**
+     * 手动导入（模型不支持工具调用时的降级路径）：把这条回答发给当前模型，
+     * 用旧标记提示词做一次性转换（不进历史），解析结果入队后照常弹预览确认。
+     */
+    fun manualImport(messageId: Long, toolId: String) = viewModelScope.launch {
+        if (manualImportLoading.value) return@launch
+        val message = chatRepository.getMessage(messageId)
+        if (message == null || message.content.isBlank()) {
+            importToast.value = "这条回答没有可导入的内容"
+            return@launch
+        }
+        val modelId = activeModelId.value
+        if (modelId <= 0L) {
+            importToast.value = "请先选择模型"
+            return@launch
+        }
+        manualImportLoading.value = true
+        try {
+            val outline = toolId == AI_TOOL_WRITE_OUTLINE
+            val prompt = if (outline) AI_OUTLINE_TOOL_PROMPT else AI_CHAPTER_TOOL_PROMPT
+            val turns = listOf(
+                ChatTurn(ChatRole.SYSTEM, prompt),
+                ChatTurn(ChatRole.USER, "请把下面的内容转换成规定格式，只输出标记块：\n\n" + message.content)
+            )
+            val result = configRepository.sendToModel(
+                modelId,
+                AiRequest(turns = turns, model = "", temperature = 0f, maxTokens = 0)
+            )
+            if (!result.success) {
+                importToast.value = result.error?.userMessage ?: "解析失败，请重试"
+                return@launch
+            }
+            if (outline) {
+                val blocks = parseAiOutlineBlocks(result.content)
+                if (blocks.isEmpty()) {
+                    importToast.value = "没有解析到可导入的大纲内容"
+                } else {
+                    pendingImports.value = pendingImports.value + PendingImport.Outline(blocks)
+                }
+            } else {
+                val blocks = parseAiChapterBlocks(result.content)
+                if (blocks.isEmpty()) {
+                    importToast.value = "没有解析到可导入的章节梗概"
+                } else {
+                    pendingImports.value = pendingImports.value + PendingImport.Chapters(blocks)
+                }
+            }
+        } finally {
+            manualImportLoading.value = false
+        }
     }
 
     /** 正在编辑的历史用户消息 id（0 表示普通发送，>0 表示发送后将改写该条并重新生成） */
@@ -2296,6 +2393,8 @@ class AiChatViewModel(
                     pendingImports.value = pendingImports.value + PendingImport.Chapters(event.blocks)
 
                 is ChatEvent.Error -> errorMessage.value = event.message
+
+                is ChatEvent.ToolFallback -> importToast.value = event.message
 
                 ChatEvent.Done -> ok = true
             }

@@ -9,6 +9,9 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -101,27 +104,32 @@ class AiClient(
      * 发送对话请求。
      * [onDelta] 非空时使用流式（SSE）请求，边收边回调 (正文增量, 思考增量)，用于「实时显示生成」；
      * 为空时一次性返回整段结果。
+     * [tools] 非空时随请求携带工具定义；供应商拒绝该字段（400）时自动重试一次不带 tools 的请求，
+     * 并在结果上标记 [AiResult.toolsUnsupported]，由上层提示改用手动导入。
      */
     suspend fun chat(
         endpoint: ModelEndpoint,
         turns: List<ChatTurn>,
+        tools: List<AiToolSpec> = emptyList(),
         onDelta: ((String, String) -> Unit)? = null
     ): AiResult =
         withContext(Dispatchers.IO) {
             val apiKey = endpoint.provider.apiKey
             if (endpoint.provider.baseUrl.isBlank()) return@withContext AiResult.fail("未配置 baseUrl")
             if (apiKey.isBlank()) return@withContext AiResult.fail("未配置 apiKey")
-            runCatching {
+
+            suspend fun runOnce(withTools: Boolean): AiResult = runCatching {
+                val activeTools = if (withTools) tools else emptyList()
                 when (endpoint.apiType) {
                     ApiType.CHAT_COMPLETIONS ->
-                        if (onDelta != null) streamCompletions(endpoint, turns, onDelta)
-                        else chatCompletions(endpoint, turns)
+                        if (onDelta != null) streamCompletions(endpoint, turns, activeTools, onDelta)
+                        else chatCompletions(endpoint, turns, activeTools)
                     ApiType.RESPONSES ->
-                        if (onDelta != null) streamResponses(endpoint, turns, onDelta)
-                        else responses(endpoint, turns)
+                        if (onDelta != null) streamResponses(endpoint, turns, activeTools, onDelta)
+                        else responses(endpoint, turns, activeTools)
                     ApiType.ANTHROPIC_MESSAGES ->
-                        if (onDelta != null) streamAnthropic(endpoint, turns, onDelta)
-                        else anthropicMessages(endpoint, turns)
+                        if (onDelta != null) streamAnthropic(endpoint, turns, activeTools, onDelta)
+                        else anthropicMessages(endpoint, turns, activeTools)
                 }
             }.getOrElse {
                 // 用户主动「停止响应」时协程被取消，需要原样抛出，不能当成请求失败
@@ -129,6 +137,13 @@ class AiClient(
                 // 按异常类型映射到具体 AiError（超时 / 网络 / 解析 / 未知），不再压成一句字符串
                 AiResult.fail(AiError.fromThrowable(it))
             }
+
+            val first = runOnce(tools.isNotEmpty())
+            val rejectedTools = tools.isNotEmpty() && (first.error as? AiError.Server)?.code == 400
+            if (rejectedTools) {
+                val retry = runOnce(false)
+                if (retry.success) retry.copy(toolsUnsupported = true) else retry
+            } else first
         }
 
     /** 把阻塞式的 OkHttp 调用包装成可取消的挂起函数：协程取消时同步取消在途请求 */
@@ -212,7 +227,49 @@ class AiClient(
         }
     }
 
-    private suspend fun chatCompletions(endpoint: ModelEndpoint, turns: List<ChatTurn>): AiResult {
+    /** 工具 Schema 原文 → JsonObject；非法时退回一个空的 object schema，避免整个请求失败 */
+    private fun schemaOf(spec: AiToolSpec): JsonObject =
+        runCatching { json.parseToJsonElement(spec.parametersJson) as? JsonObject }.getOrNull()
+            ?: buildJsonObject { put("type", "object"); put("properties", buildJsonObject { }) }
+
+    private fun completionsTools(tools: List<AiToolSpec>): List<ChatCompletionTool>? =
+        tools.takeIf { it.isNotEmpty() }?.map {
+            ChatCompletionTool(function = ChatFunctionDef(it.name, it.description, schemaOf(it)))
+        }
+
+    private fun responsesTools(tools: List<AiToolSpec>): List<ResponsesTool>? =
+        tools.takeIf { it.isNotEmpty() }?.map { ResponsesTool(name = it.name, description = it.description, parameters = schemaOf(it)) }
+
+    private fun anthropicTools(tools: List<AiToolSpec>): List<AnthropicTool>? =
+        tools.takeIf { it.isNotEmpty() }?.map { AnthropicTool(name = it.name, description = it.description, inputSchema = schemaOf(it)) }
+
+    /** 完整响应里的工具调用（chat/completions） */
+    private fun toolCallsOf(message: ChatMessageDto?): List<AiToolCall> =
+        message?.toolCalls.orEmpty().mapNotNull { call ->
+            val name = call.function?.name?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            AiToolCall(
+                id = call.id.orEmpty(),
+                name = name,
+                arguments = call.function?.arguments?.takeIf { it.isNotBlank() } ?: "{}"
+            )
+        }
+
+    /** 完整响应里的工具调用（responses） */
+    private fun toolCallsOf(parsed: ResponsesResponse): List<AiToolCall> =
+        parsed.output.filter { it.type == "function_call" }.mapNotNull { item ->
+            val name = item.name?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            AiToolCall(
+                id = item.callId.orEmpty().ifBlank { item.id.orEmpty() },
+                name = name,
+                arguments = item.arguments?.takeIf { it.isNotBlank() } ?: "{}"
+            )
+        }
+
+    private suspend fun chatCompletions(
+        endpoint: ModelEndpoint,
+        turns: List<ChatTurn>,
+        tools: List<AiToolSpec>
+    ): AiResult {
         val rf = reasoningFields(endpoint, ApiType.CHAT_COMPLETIONS)
         val payload = ChatCompletionRequest(
             model = endpoint.modelName,
@@ -221,7 +278,8 @@ class AiClient(
             maxTokens = endpoint.maxTokens.takeIf { it > 0 },
             reasoningEffort = rf.effort,
             thinking = rf.thinking,
-            chatTemplateKwargs = rf.kwargs
+            chatTemplateKwargs = rf.kwargs,
+            tools = completionsTools(tools)
         )
         val body = json.encodeToString(ChatCompletionRequest.serializer(), payload)
             .toRequestBody(JSON_MEDIA)
@@ -239,14 +297,24 @@ class AiClient(
             val choice = parsed.choices.firstOrNull()
             val content = choice?.message?.content ?: choice?.text
             val reasoning = choice?.message?.reasoningContent.orEmpty()
+            val calls = toolCallsOf(choice?.message)
             return if (content.isNullOrBlank()) {
-                if (choice?.finishReason == "length") AiResult.fail(TRUNCATED_HINT) else AiResult.fail("模型返回为空")
+                if (calls.isNotEmpty()) AiResult.ok(
+                    "",
+                    reasoning,
+                    parsed.usage?.promptTokens ?: estimateTokens(turns.joinToString("") { it.content }),
+                    parsed.usage?.completionTokens ?: 0,
+                    parsed.usage?.promptTokensDetails?.cachedTokens ?: 0,
+                    calls
+                )
+                else if (choice?.finishReason == "length") AiResult.fail(TRUNCATED_HINT) else AiResult.fail("模型返回为空")
             } else AiResult.ok(
                 content,
                 reasoning,
                 parsed.usage?.promptTokens ?: estimateTokens(turns.joinToString("") { it.content }),
                 parsed.usage?.completionTokens ?: estimateTokens(content + reasoning),
-                parsed.usage?.promptTokensDetails?.cachedTokens ?: 0
+                parsed.usage?.promptTokensDetails?.cachedTokens ?: 0,
+                calls
             )
         }
     }
@@ -255,6 +323,7 @@ class AiClient(
     private suspend fun streamCompletions(
         endpoint: ModelEndpoint,
         turns: List<ChatTurn>,
+        tools: List<AiToolSpec>,
         onDelta: (String, String) -> Unit
     ): AiResult {
         val rf = reasoningFields(endpoint, ApiType.CHAT_COMPLETIONS)
@@ -267,7 +336,8 @@ class AiClient(
             streamOptions = StreamOptions(true),
             reasoningEffort = rf.effort,
             thinking = rf.thinking,
-            chatTemplateKwargs = rf.kwargs
+            chatTemplateKwargs = rf.kwargs,
+            tools = completionsTools(tools)
         )
         val body = json.encodeToString(ChatCompletionRequest.serializer(), payload)
             .toRequestBody(JSON_MEDIA)
@@ -284,6 +354,7 @@ class AiClient(
             val source = resp.body?.source() ?: return AiResult.fail("模型返回为空")
             val content = StringBuilder()
             val reasoning = StringBuilder()
+            val toolAcc = ToolCallAccumulator()
             var usage: Usage? = null
             var truncated = false
             var errorMessage: String? = null
@@ -322,6 +393,10 @@ class AiClient(
                     reasoning.append(dr)
                     onDelta("", dr)
                 }
+                // 工具调用参数是分片到达的，单独累积，绝不混进正文 / 思考内容
+                delta?.toolCalls?.forEach { c ->
+                    toolAcc.chatDelta(c.index, c.id, c.function?.name, c.function?.arguments)
+                }
             }
             errorMessage?.let { return AiResult.fail(it) }
             // 中途断流：连接关闭但没收到结束标志 → 明确报错，不静默当成成功
@@ -329,7 +404,8 @@ class AiClient(
                 return AiResult.fail(AiError.Network(IOException("响应中断：连接在完整结束前被关闭")))
             }
             val text = content.toString()
-            if (text.isBlank()) {
+            val calls = toolAcc.build()
+            if (text.isBlank() && calls.isEmpty()) {
                 return if (truncated) AiResult.fail(TRUNCATED_HINT) else AiResult.fail("模型返回为空")
             }
             return AiResult.ok(
@@ -337,12 +413,17 @@ class AiClient(
                 reasoning.toString(),
                 usage?.promptTokens ?: estimateTokens(turns.joinToString("") { it.content }),
                 usage?.completionTokens ?: estimateTokens(text + reasoning),
-                usage?.promptTokensDetails?.cachedTokens ?: 0
+                usage?.promptTokensDetails?.cachedTokens ?: 0,
+                calls
             )
         }
     }
 
-    private suspend fun responses(endpoint: ModelEndpoint, turns: List<ChatTurn>): AiResult {
+    private suspend fun responses(
+        endpoint: ModelEndpoint,
+        turns: List<ChatTurn>,
+        tools: List<AiToolSpec>
+    ): AiResult {
         val payload = ResponsesRequest(
             model = endpoint.modelName,
             input = turns.map { ChatMessageDto(it.role.name.lowercase(), it.content) },
@@ -350,7 +431,8 @@ class AiClient(
             maxOutputTokens = endpoint.maxTokens.takeIf { it > 0 },
             instructions = endpoint.systemPrompt.ifBlank { null },
             promptCacheKey = cacheKey(endpoint),
-            reasoning = reasoningFields(endpoint, ApiType.RESPONSES).reasoning
+            reasoning = reasoningFields(endpoint, ApiType.RESPONSES).reasoning,
+            tools = responsesTools(tools)
         )
         val body = json.encodeToString(ResponsesRequest.serializer(), payload)
             .toRequestBody(JSON_MEDIA)
@@ -367,13 +449,15 @@ class AiClient(
             parsed.error?.message?.let { return AiResult.fail(it) }
             val content = extractResponsesText(parsed)
             val reasoning = extractResponsesReasoning(parsed)
-            return if (content.isNullOrBlank()) AiResult.fail("模型返回为空")
+            val calls = toolCallsOf(parsed)
+            return if (content.isNullOrBlank() && calls.isEmpty()) AiResult.fail("模型返回为空")
             else AiResult.ok(
-                content,
+                content.orEmpty(),
                 reasoning,
                 parsed.usage?.inputTokens ?: estimateTokens(turns.joinToString("") { it.content }),
-                parsed.usage?.outputTokens ?: estimateTokens(content + reasoning),
-                parsed.usage?.inputTokensDetails?.cachedTokens ?: 0
+                parsed.usage?.outputTokens ?: estimateTokens(content.orEmpty() + reasoning),
+                parsed.usage?.inputTokensDetails?.cachedTokens ?: 0,
+                calls
             )
         }
     }
@@ -382,6 +466,7 @@ class AiClient(
     private suspend fun streamResponses(
         endpoint: ModelEndpoint,
         turns: List<ChatTurn>,
+        tools: List<AiToolSpec>,
         onDelta: (String, String) -> Unit
     ): AiResult {
         val payload = ResponsesRequest(
@@ -392,7 +477,8 @@ class AiClient(
             instructions = endpoint.systemPrompt.ifBlank { null },
             stream = true,
             promptCacheKey = cacheKey(endpoint),
-            reasoning = reasoningFields(endpoint, ApiType.RESPONSES).reasoning
+            reasoning = reasoningFields(endpoint, ApiType.RESPONSES).reasoning,
+            tools = responsesTools(tools)
         )
         val body = json.encodeToString(ResponsesRequest.serializer(), payload)
             .toRequestBody(JSON_MEDIA)
@@ -409,6 +495,7 @@ class AiClient(
             val source = resp.body?.source() ?: return AiResult.fail("模型返回为空")
             val content = StringBuilder()
             val reasoning = StringBuilder()
+            val toolAcc = ToolCallAccumulator()
             var usage: ResponsesUsage? = null
             var errorMessage: String? = null
             // 结束标志：response.completed（或 [DONE]）。未收到就 EOF，视为中途断流
@@ -440,6 +527,12 @@ class AiClient(
                         reasoning.append(event.delta)
                         onDelta("", event.delta)
                     }
+                    event.type == "response.output_item.added" && event.item?.type == "function_call" -> {
+                        toolAcc.responsesAdded(event.item.id, event.item.callId, event.item.name, event.item.arguments)
+                    }
+                    event.type == "response.function_call_arguments.delta" -> {
+                        toolAcc.responsesDelta(event.itemId ?: event.item?.id, event.delta)
+                    }
                     event.type == "response.completed" -> {
                         terminated = true
                         event.response?.usage?.let { usage = it }
@@ -452,7 +545,8 @@ class AiClient(
                 return AiResult.fail(AiError.Network(IOException("响应中断：连接在完整结束前被关闭")))
             }
             val text = content.toString()
-            if (text.isBlank()) {
+            val calls = toolAcc.build()
+            if (text.isBlank() && calls.isEmpty()) {
                 return AiResult.fail("模型返回为空")
             }
             return AiResult.ok(
@@ -460,7 +554,8 @@ class AiClient(
                 reasoning.toString(),
                 usage?.inputTokens ?: estimateTokens(turns.joinToString("") { it.content }),
                 usage?.outputTokens ?: estimateTokens(text + reasoning),
-                usage?.inputTokensDetails?.cachedTokens ?: 0
+                usage?.inputTokensDetails?.cachedTokens ?: 0,
+                calls
             )
         }
     }
@@ -493,7 +588,8 @@ class AiClient(
     private fun buildAnthropicRequest(
         endpoint: ModelEndpoint,
         turns: List<ChatTurn>,
-        stream: Boolean
+        stream: Boolean,
+        tools: List<AiToolSpec> = emptyList()
     ): AnthropicRequest {
         val system = buildList {
             if (endpoint.systemPrompt.isNotBlank()) {
@@ -533,7 +629,8 @@ class AiClient(
             // Anthropic 的 temperature 取值范围是 0~1；开启思考时不允许改温度（省略即用默认 1）
             temperature = if (thinking != null) null else endpoint.temperature.coerceIn(0f, 1f),
             stream = stream,
-            thinking = thinking
+            thinking = thinking,
+            tools = anthropicTools(tools)
         )
     }
 
@@ -547,8 +644,12 @@ class AiClient(
             .post(json.encodeToString(AnthropicRequest.serializer(), payload).toRequestBody(JSON_MEDIA))
             .build()
 
-    private suspend fun anthropicMessages(endpoint: ModelEndpoint, turns: List<ChatTurn>): AiResult {
-        val payload = buildAnthropicRequest(endpoint, turns, stream = false)
+    private suspend fun anthropicMessages(
+        endpoint: ModelEndpoint,
+        turns: List<ChatTurn>,
+        tools: List<AiToolSpec>
+    ): AiResult {
+        val payload = buildAnthropicRequest(endpoint, turns, stream = false, tools = tools)
         execute(anthropicRequest(endpoint, payload)).use { resp ->
             val text = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) return AiResult.fail(errorForStatus(resp.code, text.take(300)))
@@ -556,7 +657,15 @@ class AiClient(
             parsed.error?.message?.let { return AiResult.fail(it) }
             val content = parsed.content.filter { it.type == "text" }.mapNotNull { it.text }.joinToString("")
             val reasoning = parsed.content.filter { it.type == "thinking" }.mapNotNull { it.thinking }.joinToString("")
-            if (content.isBlank()) {
+            val calls = parsed.content.filter { it.type == "tool_use" }.mapNotNull { block ->
+                val name = block.name?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                AiToolCall(
+                    id = block.id.orEmpty(),
+                    name = name,
+                    arguments = block.input?.toString()?.takeIf { it.isNotBlank() } ?: "{}"
+                )
+            }
+            if (content.isBlank() && calls.isEmpty()) {
                 return if (parsed.stopReason == "max_tokens") AiResult.fail(TRUNCATED_HINT)
                 else AiResult.fail("模型返回为空")
             }
@@ -567,7 +676,8 @@ class AiClient(
                 reasoning,
                 if (totalInput > 0) totalInput else estimateTokens(turns.joinToString("") { it.content }),
                 u?.outputTokens ?: estimateTokens(content + reasoning),
-                u?.cacheReadInputTokens ?: 0
+                u?.cacheReadInputTokens ?: 0,
+                calls
             )
         }
     }
@@ -575,9 +685,10 @@ class AiClient(
     private suspend fun streamAnthropic(
         endpoint: ModelEndpoint,
         turns: List<ChatTurn>,
+        tools: List<AiToolSpec>,
         onDelta: (String, String) -> Unit
     ): AiResult {
-        val payload = buildAnthropicRequest(endpoint, turns, stream = true)
+        val payload = buildAnthropicRequest(endpoint, turns, stream = true, tools = tools)
         execute(anthropicRequest(endpoint, payload)).use { resp ->
             if (!resp.isSuccessful) {
                 return AiResult.fail(errorForStatus(resp.code, resp.body?.string().orEmpty().take(300)))
@@ -585,6 +696,7 @@ class AiClient(
             val source = resp.body?.source() ?: return AiResult.fail("模型返回为空")
             val content = StringBuilder()
             val reasoning = StringBuilder()
+            val toolAcc = ToolCallAccumulator()
             var inputTokens = 0
             var outputTokens = 0
             var cacheRead = 0
@@ -618,6 +730,12 @@ class AiClient(
                         if (event.delta?.stopReason == "max_tokens") truncated = true
                     }
                     "message_stop" -> terminated = true
+                    "content_block_start" -> {
+                        val block = event.contentBlock
+                        if (block?.type == "tool_use") {
+                            toolAcc.anthropicStart(event.index, block.id, block.name)
+                        }
+                    }
                     "content_block_delta" -> {
                         val t = event.delta?.text
                         val k = event.delta?.thinking
@@ -629,6 +747,10 @@ class AiClient(
                             reasoning.append(k)
                             onDelta("", k)
                         }
+                        // 工具参数分片：只进累积器，不作为正文展示
+                        if (event.delta?.type == "input_json_delta" || !event.delta?.partialJson.isNullOrEmpty()) {
+                            toolAcc.anthropicDelta(event.index, event.delta?.partialJson)
+                        }
                     }
                 }
             }
@@ -638,7 +760,8 @@ class AiClient(
                 return AiResult.fail(AiError.Network(IOException("响应中断：连接在完整结束前被关闭")))
             }
             val text = content.toString()
-            if (text.isBlank()) {
+            val calls = toolAcc.build()
+            if (text.isBlank() && calls.isEmpty()) {
                 return if (truncated) AiResult.fail(TRUNCATED_HINT) else AiResult.fail("模型返回为空")
             }
             val totalInput = inputTokens + cacheRead + cacheCreation
@@ -647,7 +770,8 @@ class AiClient(
                 reasoning.toString(),
                 if (totalInput > 0) totalInput else estimateTokens(turns.joinToString("") { it.content }),
                 outputTokens.takeIf { it > 0 } ?: estimateTokens(text + reasoning),
-                cacheRead
+                cacheRead,
+                calls
             )
         }
     }

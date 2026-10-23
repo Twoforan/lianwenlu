@@ -69,6 +69,8 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lianwenqi.app.AppContainer
+import com.lianwenqi.app.ai.AiRequest
+import com.lianwenqi.app.ai.ChatTurn
 import com.lianwenqi.app.ai.RetrievalMode
 import com.lianwenqi.app.data.AiChapterImporter
 import com.lianwenqi.app.data.AiOutlineImporter
@@ -77,9 +79,12 @@ import com.lianwenqi.app.data.GEN_SUMMARY_WORDS_MAX
 import com.lianwenqi.app.data.SortMode
 import com.lianwenqi.app.data.entity.Book
 import com.lianwenqi.app.data.entity.BookGroup
+import com.lianwenqi.app.data.entity.ChatRole
 import com.lianwenqi.app.ui.appViewModel
 import com.lianwenqi.app.ui.components.BookFormResult
+import com.lianwenqi.app.util.AI_CHAPTER_TOOL_DEFINITION_TEXT
 import com.lianwenqi.app.util.AI_CHAPTER_TOOL_PROMPT
+import com.lianwenqi.app.util.AI_OUTLINE_TOOL_DEFINITION_TEXT
 import com.lianwenqi.app.util.AI_OUTLINE_TOOL_PROMPT
 import com.lianwenqi.app.util.AI_TOOLS
 import com.lianwenqi.app.util.AI_TOOL_IMPORT_CHAPTER
@@ -90,6 +95,7 @@ import com.lianwenqi.app.util.parseAiOutlineBlocks
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
@@ -170,9 +176,12 @@ class AiToolsViewModel(private val container: AppContainer) : ViewModel() {
     /** 新建分组并返回新分组 id（书籍表单内现场建组用） */
     suspend fun createGroupAndGet(name: String): Long = bookRepository.createGroup(name)
 
-    /** 把文本中的大纲区块导入指定书籍；返回 null 表示文本里没有可解析的内容 */
+    /** 把文本中的大纲区块导入指定书籍；没有标记时调用当前模型自动提取。返回 null 表示没有可导入内容 */
     suspend fun importOutline(bookId: Long, text: String): String? {
-        val blocks = parseAiOutlineBlocks(text)
+        var blocks = parseAiOutlineBlocks(text)
+        if (blocks.isEmpty() && text.isNotBlank()) {
+            blocks = parseAiOutlineBlocks(extractMarkedText(AI_OUTLINE_TOOL_PROMPT, text).orEmpty())
+        }
         if (blocks.isEmpty()) return null
         val result = importer.import(bookId, blocks)
         return buildString {
@@ -183,9 +192,12 @@ class AiToolsViewModel(private val container: AppContainer) : ViewModel() {
         }
     }
 
-    /** 把文本中的章节梗概区块导入指定书籍；返回 null 表示文本里没有可解析的内容 */
+    /** 把文本中的章节梗概区块导入指定书籍；没有标记时调用当前模型自动提取。返回 null 表示没有可导入内容 */
     suspend fun importChapters(bookId: Long, text: String): String? {
-        val blocks = parseAiChapterBlocks(text)
+        var blocks = parseAiChapterBlocks(text)
+        if (blocks.isEmpty() && text.isNotBlank()) {
+            blocks = parseAiChapterBlocks(extractMarkedText(AI_CHAPTER_TOOL_PROMPT, text).orEmpty())
+        }
         if (blocks.isEmpty()) return null
         val result = chapterImporter.import(bookId, blocks)
         return buildString {
@@ -195,6 +207,25 @@ class AiToolsViewModel(private val container: AppContainer) : ViewModel() {
                 append("，新建分卷：${result.newVolumes.joinToString("、")}")
             }
         }
+    }
+
+    /** 自由文本 → 标记格式：用旧标记提示词向当前模型做一次性转换（不进任何会话历史） */
+    private suspend fun extractMarkedText(prompt: String, text: String): String? {
+        val modelId = prefs.activeModelId.first()
+        if (modelId <= 0L) return null
+        val result = container.configRepository.sendToModel(
+            modelId,
+            AiRequest(
+                turns = listOf(
+                    ChatTurn(ChatRole.SYSTEM, prompt),
+                    ChatTurn(ChatRole.USER, "请把下面的内容转换成规定格式，只输出标记块：\n\n$text")
+                ),
+                model = "",
+                temperature = 0f,
+                maxTokens = 0
+            )
+        )
+        return if (result.success) result.content else null
     }
 }
 
@@ -257,7 +288,7 @@ fun AiToolsScreen(onBack: () -> Unit) {
                         Column(Modifier.weight(1f)) {
                             Text("写入大纲工具", fontWeight = FontWeight.SemiBold)
                             Text(
-                                "AI 生成的人设 / 世界观等可按固定格式解析并写入作品大纲",
+                                "启用后导航栏 AI 可在回答时调用工具，把人设 / 世界观等结构化写入作品大纲",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -279,7 +310,7 @@ fun AiToolsScreen(onBack: () -> Unit) {
                             Column(Modifier.weight(1f)) {
                                 Text("启用该工具")
                                 Text(
-                                    "启用后可在 AI 聊天页勾选，AI 回答后可一键写入大纲",
+                                    "启用后可在 AI 聊天页勾选，AI 回答时可直接调用工具写入大纲",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -291,13 +322,13 @@ fun AiToolsScreen(onBack: () -> Unit) {
                             Modifier
                                 .fillMaxWidth()
                                 .clickable {
-                                    clipboard.setText(AnnotatedString(AI_OUTLINE_TOOL_PROMPT))
-                                    Toast.makeText(context, "工具提示词已复制", Toast.LENGTH_SHORT).show()
+                                    clipboard.setText(AnnotatedString(AI_OUTLINE_TOOL_DEFINITION_TEXT))
+                                    Toast.makeText(context, "工具定义已复制", Toast.LENGTH_SHORT).show()
                                 }
                                 .padding(12.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text("复制工具提示词", Modifier.weight(1f))
+                            Text("复制工具定义", Modifier.weight(1f))
                             Icon(
                                 Icons.AutoMirrored.Filled.KeyboardArrowRight,
                                 contentDescription = null,
@@ -314,9 +345,9 @@ fun AiToolsScreen(onBack: () -> Unit) {
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Column(Modifier.weight(1f)) {
-                                Text("导入大纲")
+                                Text("粘贴导入大纲")
                                 Text(
-                                    "粘贴含 <<<AI_OUTLINE_JSON_V1>>> 标记的文本，解析后写入作品大纲",
+                                    "粘贴含 <<<AI_OUTLINE_JSON_V1>>> 标记的文本，或直接粘贴自由文本由 AI 自动提取后写入作品大纲",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -346,9 +377,9 @@ fun AiToolsScreen(onBack: () -> Unit) {
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Column(Modifier.weight(1f)) {
-                            Text("章节梗概导入工具", fontWeight = FontWeight.SemiBold)
+                            Text("批量写入章节梗概", fontWeight = FontWeight.SemiBold)
                             Text(
-                                "AI 生成的章节名 / 梗概可按固定格式解析，批量写入书籍分卷与章节",
+                                "把 AI 生成的章节名与梗概批量写入书籍分卷与章节",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -370,7 +401,7 @@ fun AiToolsScreen(onBack: () -> Unit) {
                             Column(Modifier.weight(1f)) {
                                 Text("启用该工具")
                                 Text(
-                                    "启用后可在 AI 聊天页勾选，AI 回答后可一键导入章节梗概",
+                                    "启用后可在 AI 聊天页勾选，AI 回答时可直接调用工具批量写入章节梗概",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -382,13 +413,13 @@ fun AiToolsScreen(onBack: () -> Unit) {
                             Modifier
                                 .fillMaxWidth()
                                 .clickable {
-                                    clipboard.setText(AnnotatedString(AI_CHAPTER_TOOL_PROMPT))
-                                    Toast.makeText(context, "工具提示词已复制", Toast.LENGTH_SHORT).show()
+                                    clipboard.setText(AnnotatedString(AI_CHAPTER_TOOL_DEFINITION_TEXT))
+                                    Toast.makeText(context, "工具定义已复制", Toast.LENGTH_SHORT).show()
                                 }
                                 .padding(12.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text("复制工具提示词", Modifier.weight(1f))
+                            Text("复制工具定义", Modifier.weight(1f))
                             Icon(
                                 Icons.AutoMirrored.Filled.KeyboardArrowRight,
                                 contentDescription = null,
@@ -405,9 +436,9 @@ fun AiToolsScreen(onBack: () -> Unit) {
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Column(Modifier.weight(1f)) {
-                                Text("导入章节梗概")
+                                Text("粘贴导入章节梗概")
                                 Text(
-                                    "粘贴含 <<<AI_CHAPTER_JSON_V1>>> 标记的文本，解析后写入分卷与章节",
+                                    "粘贴含 <<<AI_CHAPTER_JSON_V1>>> 标记的文本，或直接粘贴自由文本由 AI 自动提取后写入分卷与章节",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -797,14 +828,18 @@ private fun AiOutlineImportDialog(vm: AiToolsViewModel, onDismiss: () -> Unit) {
                 OutlinedTextField(
                     value = text,
                     onValueChange = { text = it; error = null },
-                    label = { Text("粘贴包含大纲标记的文本") },
+                    label = { Text("粘贴含大纲标记或自由文本") },
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(180.dp)
                 )
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    if (blockCount > 0) "已识别 $blockCount 个大纲区块" else "未识别到大纲区块",
+                    when {
+                        blockCount > 0 -> "已识别 $blockCount 个大纲区块"
+                        text.isNotBlank() -> "未识别到标记，确定后将调用 AI 自动提取"
+                        else -> "未识别到大纲区块"
+                    },
                     style = MaterialTheme.typography.labelSmall,
                     color = if (blockCount > 0) MaterialTheme.colorScheme.primary
                     else MaterialTheme.colorScheme.onSurfaceVariant
@@ -816,7 +851,7 @@ private fun AiOutlineImportDialog(vm: AiToolsViewModel, onDismiss: () -> Unit) {
         },
         confirmButton = {
             Button(
-                enabled = !importing && targetBookId != null && blockCount > 0,
+                enabled = !importing && targetBookId != null && text.isNotBlank(),
                 onClick = {
                     val bookId = targetBookId ?: return@Button
                     importing = true
@@ -868,7 +903,7 @@ private fun AiChapterImportDialog(vm: AiToolsViewModel, onDismiss: () -> Unit) {
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("导入章节梗概") },
+        title = { Text("批量写入章节梗概") },
         text = {
             // 文本框固定高度并内部滚动，避免长文本时输入框顶到键盘下方遮住光标
             Column {
@@ -883,14 +918,18 @@ private fun AiChapterImportDialog(vm: AiToolsViewModel, onDismiss: () -> Unit) {
                 OutlinedTextField(
                     value = text,
                     onValueChange = { text = it; error = null },
-                    label = { Text("粘贴包含章节梗概标记的文本") },
+                    label = { Text("粘贴含章节标记或自由文本") },
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(180.dp)
                 )
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    if (blockCount > 0) "已识别 $blockCount 个章节区块" else "未识别到章节区块",
+                    when {
+                        blockCount > 0 -> "已识别 $blockCount 个章节区块"
+                        text.isNotBlank() -> "未识别到标记，确定后将调用 AI 自动提取"
+                        else -> "未识别到章节区块"
+                    },
                     style = MaterialTheme.typography.labelSmall,
                     color = if (blockCount > 0) MaterialTheme.colorScheme.primary
                     else MaterialTheme.colorScheme.onSurfaceVariant
@@ -902,7 +941,7 @@ private fun AiChapterImportDialog(vm: AiToolsViewModel, onDismiss: () -> Unit) {
         },
         confirmButton = {
             Button(
-                enabled = !importing && targetBookId != null && blockCount > 0,
+                enabled = !importing && targetBookId != null && text.isNotBlank(),
                 onClick = {
                     val bookId = targetBookId ?: return@Button
                     importing = true
