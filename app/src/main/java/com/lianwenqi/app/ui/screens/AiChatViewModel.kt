@@ -807,11 +807,21 @@ class AiChatViewModel(
      * 被停止 / 被新任务接管的旧任务不会覆盖新任务的生成态，从根本上避免「一直正在生成中」。
      */
     private fun launchGeneration(block: suspend (Long) -> Unit) {
-        // 执行阶段或已有任务在途（含弹窗收集阶段）时忽略新请求：
-        // 若在收集阶段强行取消旧任务，旧任务 finally 里的弹窗清理会误清新任务的弹窗，
-        // 导致新任务永远等不到弹窗结果，状态卡死。
-        if (_generationState.value == FlowState.Executing) return
-        if (generationJob?.isActive == true) return
+        // 执行阶段重复点击：明确提示，不再静默忽略（静默会让人误以为「卡在正在生成中」）
+        if (_generationState.value == FlowState.Executing) {
+            generationMessage.value = "当前正在生成中，请先点击「停止」后再重新发起"
+            return
+        }
+        if (generationJob?.isActive == true) {
+            // 收集阶段但已没有任何弹窗在等结果 → 陈旧任务永远等不到结果，直接接管；
+            // 弹窗还在时则让用户先在弹窗里取消，避免两个任务的弹窗互相覆盖
+            if (_generationState.value == FlowState.CollectingConfig && _generationDialog.value == null) {
+                cancelGeneration()
+            } else {
+                generationMessage.value = "请先完成或取消当前的生成设置后再试"
+                return
+            }
+        }
         val token = ++generationSeq
         generationCancelled = false
         generationMessage.value = null
@@ -834,10 +844,14 @@ class AiChatViewModel(
                 generationMessage.value = e.message ?: "生成失败"
             } finally {
                 if (token == generationSeq) {
-                    // 任务异常结束（含被取消）却仍停在 Executing 时，补一个终态，界面不会永久显示「生成中」
-                    if (_generationState.value == FlowState.Executing) {
-                        _generationState.value = FlowState.Cancelled
+                    // 任务异常结束（含被取消）却仍停在收集 / 执行阶段时，补一个终态，
+                    // 界面不会永久显示「生成中」，也不会留下永远等不到结果的弹窗
+                    when (_generationState.value) {
+                        FlowState.CollectingConfig, FlowState.Executing ->
+                            _generationState.value = FlowState.Cancelled
+                        else -> Unit
                     }
+                    _generationDialog.value = null
                     endGenerationStreaming()
                     generationJob = null
                 }
@@ -1590,6 +1604,18 @@ class AiChatViewModel(
 
     fun loadBookContext(bookId: Long? = null) {
         viewModelScope.launch { loadBookContextNow(bookId) }
+    }
+
+    /**
+     * 实例销毁时主动取消在途任务：生成协程被取消后 OkHttp 调用会同步中断，
+     * 不会留下仍在网络上等待的流式请求，也不会因旧实例残留状态导致界面「正在生成中」。
+     */
+    override fun onCleared() {
+        generationJob?.cancel()
+        generationJob = null
+        generateJob?.cancel()
+        generateJob = null
+        super.onCleared()
     }
 
     private suspend fun loadBookContextNow(bookId: Long? = null) {

@@ -174,6 +174,26 @@ class AiClient(
             }
         }
 
+    /**
+     * 流式请求的空闲看门狗。
+     *
+     * 供应商（如 DeepSeek）在排队或长时间思考时会持续发送 SSE 注释行 / 空行做心跳保活，
+     * 这些心跳会不断重置 OkHttp 的单次读超时，使服务端明明已经停滞、连接却永远不超时，
+     * 界面就会一直停在「正在生成中」，只能手动点停止。
+     * 这里单独以「最后一次收到有效增量」为基准做兜底超时，任意心跳都不能续命。
+     */
+    private class StreamIdleGuard(private val timeoutMs: Long) {
+        private var lastActivity = System.nanoTime()
+
+        /** 收到有效增量（正文 / 思考 / 工具参数 / 结束标志 / usage）时调用 */
+        fun touch() {
+            lastActivity = System.nanoTime()
+        }
+
+        fun expired(): Boolean =
+            (System.nanoTime() - lastActivity) / 1_000_000 > timeoutMs
+    }
+
     private fun buildMessages(endpoint: ModelEndpoint, turns: List<ChatTurn>): List<ChatMessageDto> =
         buildList {
             if (endpoint.systemPrompt.isNotBlank()) add(ChatMessageDto("system", endpoint.systemPrompt))
@@ -382,13 +402,16 @@ class AiClient(
             // 是否收到协议结束标志（[DONE] 或 finish_reason）。未收到就 EOF，视为中途断流
             var terminated = false
             var streamEnded = false
+            val idleGuard = StreamIdleGuard(STREAM_IDLE_TIMEOUT_MS)
             while (true) {
                 currentCoroutineContext().ensureActive()
+                if (idleGuard.expired()) return AiResult.fail(STREAM_IDLE_HINT)
                 val line = readLineOrNull(source)
                 if (line == null) {
                     streamEnded = true
                     break
                 }
+                // 空行 / 心跳注释（DeepSeek 的 `: keep-alive`）不算有效输出，不能给看门狗续命
                 if (line.isBlank() || !line.startsWith("data:")) continue
                 val data = line.removePrefix("data:").trim()
                 if (data == "[DONE]") {
@@ -398,6 +421,7 @@ class AiClient(
                 val chunk = runCatching {
                     json.decodeFromString(ChatCompletionChunk.serializer(), data)
                 }.getOrNull() ?: continue
+                idleGuard.touch()
                 chunk.error?.message?.let { errorMessage = it }
                 chunk.usage?.let { usage = it }
                 val choice = chunk.choices.firstOrNull()
@@ -527,8 +551,10 @@ class AiClient(
             // 结束标志：response.completed（或 [DONE]）。未收到就 EOF，视为中途断流
             var terminated = false
             var streamEnded = false
+            val idleGuard = StreamIdleGuard(STREAM_IDLE_TIMEOUT_MS)
             while (true) {
                 currentCoroutineContext().ensureActive()
+                if (idleGuard.expired()) return AiResult.fail(STREAM_IDLE_HINT)
                 val line = readLineOrNull(source)
                 if (line == null) {
                     streamEnded = true
@@ -543,6 +569,7 @@ class AiClient(
                 val event = runCatching {
                     json.decodeFromString(ResponsesStreamEvent.serializer(), data)
                 }.getOrNull() ?: continue
+                idleGuard.touch()
                 event.error?.message?.let { errorMessage = it }
                 when {
                     event.type == "response.output_text.delta" && !event.delta.isNullOrEmpty() -> {
@@ -735,8 +762,10 @@ class AiClient(
             // 结束标志：message_stop。未收到就 EOF，视为中途断流
             var terminated = false
             var streamEnded = false
+            val idleGuard = StreamIdleGuard(STREAM_IDLE_TIMEOUT_MS)
             while (true) {
                 currentCoroutineContext().ensureActive()
+                if (idleGuard.expired()) return AiResult.fail(STREAM_IDLE_HINT)
                 val line = readLineOrNull(source)
                 if (line == null) {
                     streamEnded = true
@@ -747,6 +776,7 @@ class AiClient(
                 val event = runCatching {
                     json.decodeFromString(AnthropicStreamEvent.serializer(), data)
                 }.getOrNull() ?: continue
+                idleGuard.touch()
                 event.error?.message?.let { errorMessage = it }
                 when (event.type) {
                     "message_start" -> event.message?.usage?.let {
@@ -820,6 +850,14 @@ class AiClient(
 
         /** 推理模型的思考过程吃满 max_tokens 时，正文会为空，给出可操作的提示 */
         private const val TRUNCATED_HINT = "回复被截断：模型思考过长占满了最大输出 token，请在「设置 → 模型」中调大「最大输出 token」后重试"
+
+        /**
+         * 流式请求的「无有效增量」兜底超时：只认正文 / 思考 / 工具参数 / 结束标志，心跳不算。
+         * 与 OkHttp 的读超时（180s）对齐，但不受心跳保活影响，避免服务端停滞时永久「正在生成中」。
+         */
+        private const val STREAM_IDLE_TIMEOUT_MS = 180_000L
+
+        private const val STREAM_IDLE_HINT = "模型长时间没有返回任何内容（超过 3 分钟），已中止本次请求，请稍后重试"
 
         private const val ANTHROPIC_VERSION = "2023-06-01"
 

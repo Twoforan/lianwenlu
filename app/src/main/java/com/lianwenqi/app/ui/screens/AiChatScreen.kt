@@ -365,13 +365,21 @@ fun AiChatScreen(initialBookId: Long?) {
                 )
             }
             val listState = rememberLazyListState()
-            // 进入会话 / 切换会话 / 新增消息后，自动停在最新对话处（滚到真正的底部，而不是最后一条的开头）。
-            // 必须先等 LazyColumn 完成一次布局（layoutInfo 有内容）再滚动：
-            // 首次进入时消息可能已就绪、列表却尚未测量，此时滚动会被忽略而停在最上方。
-            LaunchedEffect(sessionId, entries.size) {
+            // 进入会话 / 切换会话 / 用户发起新一轮对话时，自动停在最新对话处（滚到真正的底部，而不是最后一条的开头）。
+            // 只统计「用户消息」条数作为锚点：回答落库时条数不变，因此生成结束不会再把视图拉到末尾，
+            // 用户停在哪里就保持在哪里；必须先等 LazyColumn 完成一次布局（layoutInfo 有内容）再滚动。
+            val userEntryCount = entries.count { it is ChatEntry.User }
+            var positionedSessionId by remember { mutableStateOf<Long?>(null) }
+            LaunchedEffect(sessionId, userEntryCount, pendingReplyTo) {
                 if (entries.isEmpty()) return@LaunchedEffect
                 snapshotFlow { listState.layoutInfo.totalItemsCount }.first { it > 0 }
-                listState.scrollToBottom()
+                when {
+                    positionedSessionId != sessionId -> {
+                        listState.scrollToBottom()
+                        positionedSessionId = sessionId
+                    }
+                    pendingReplyTo > 0L -> listState.scrollToBottom()
+                }
             }
             // 流式输出到达时：只有用户仍停在底部才向下补滚一次；
             // 用户已上滑阅读时视角保持不动，且不再「先滚到条目顶部再滚到底部」造成抖动
@@ -1270,14 +1278,23 @@ private fun AiAssistantPanel(
             val focusIndex = chapterGroups.indexOf(focusGroup)
             val focusIsBound = (focusGroup?.chapterId ?: 0L) > 0
             val listState = rememberLazyListState()
-            // 打开抽屉 / 切换章节 / 新增消息后：绑定章节则滚到该章节对话处，否则滚到最后一条对话的末端。
-            // 生成中优先滚到底部，让流式输出始终可见（注意 pendingReplyTo 不作为 key：
-            // 生成结束它归零时不应再重跑本效果，否则会把视图又拉回分组顶部）
-            LaunchedEffect(chapterId, entries.size) {
+            // 打开抽屉 / 切换章节时定位一次：绑定章节则滚到该章节对话处，否则滚到最后一条对话的末端；
+            // 用户发起新一轮对话（pendingReplyTo 出现）时贴底跟随，让流式输出始终可见。
+            // 回答落库不改动「用户消息」条数，本效果不会再跑，生成结束不会把视图拉回末尾，
+            // 用户停在哪里就保持在哪里。
+            val userEntryCount = entries.count { it is ChatEntry.User }
+            var positionedChapterId by remember { mutableStateOf<Long?>(null) }
+            LaunchedEffect(chapterId, userEntryCount, pendingReplyTo) {
                 if (entries.isEmpty()) return@LaunchedEffect
                 snapshotFlow { listState.layoutInfo.totalItemsCount }.first { it > 0 }
-                if (pendingReplyTo > 0L || !focusIsBound || focusIndex < 0) listState.scrollToBottom()
-                else listState.scrollToItem(focusIndex)
+                when {
+                    positionedChapterId != chapterId -> {
+                        if (pendingReplyTo > 0L || !focusIsBound || focusIndex < 0) listState.scrollToBottom()
+                        else listState.scrollToItem(focusIndex)
+                        positionedChapterId = chapterId
+                    }
+                    pendingReplyTo > 0L -> listState.scrollToBottom()
+                }
             }
             // 流式增量到达时跟随：只有用户仍停在底部才向下补滚一次（单次滚动，不再来回跳），
             // 用户上滑阅读时停留位置保持不变
