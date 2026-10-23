@@ -58,15 +58,20 @@ class PrefixManageViewModel(private val container: AppContainer) : ViewModel() {
     val adaptiveFilter: StateFlow<Boolean> =
         prefs.prefixAdaptiveFilterEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
-    /** 首轮全选大纲与章节（默认关闭） */
+    /** 首轮全选大纲（默认关闭） */
     val outlineFirstRound: StateFlow<Boolean> =
         prefs.aiOutlineFirstRound.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    /** 首轮全选章节（默认开启） */
+    val chapterFirstRound: StateFlow<Boolean> =
+        prefs.aiChapterFirstRound.stateIn(viewModelScope, SharingStarted.Eagerly, true)
 
     fun setContextEnabled(v: Boolean) = viewModelScope.launch { prefs.setPrefixContextEnabled(v) }
     fun setOutlineEnabled(v: Boolean) = viewModelScope.launch { prefs.setPrefixOutlineEnabled(v) }
     fun setCustomText(v: String) = viewModelScope.launch { prefs.setPrefixCustomText(v) }
     fun setAdaptiveFilter(v: Boolean) = viewModelScope.launch { prefs.setPrefixAdaptiveFilterEnabled(v) }
     fun setOutlineFirstRound(v: Boolean) = viewModelScope.launch { prefs.setAiOutlineFirstRound(v) }
+    fun setChapterFirstRound(v: Boolean) = viewModelScope.launch { prefs.setAiChapterFirstRound(v) }
 }
 
 /**
@@ -81,6 +86,7 @@ fun PrefixManageScreen(onBack: () -> Unit) {
     val outlineEnabled by vm.outlineEnabled.collectAsState()
     val adaptiveFilter by vm.adaptiveFilter.collectAsState()
     val outlineFirstRound by vm.outlineFirstRound.collectAsState()
+    val chapterFirstRound by vm.chapterFirstRound.collectAsState()
     val savedText by vm.customText.collectAsState()
     // 输入框用本地状态，避免每次写入 DataStore 后回传造成光标跳动
     var editing by remember { mutableStateOf<String?>(null) }
@@ -154,17 +160,31 @@ fun PrefixManageScreen(onBack: () -> Unit) {
             Spacer(Modifier.height(12.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("首轮全选大纲与章节")
+                    Text("首轮全选大纲")
                     Text(
-                        "新建「跟书」会话时默认全选大纲与章节（梗概默认全部纳入、正文默认不纳入，" +
-                            "可在「选择上下文」里按卷 / 章节逐项调整）。两项内容由本页在首轮写入会话前缀并保持稳定；" +
-                            "首轮发送后勾选会自动取消，第二轮起默认不勾选，只有重新勾选才改写前缀。" +
-                            "「本章梗概」只写进本轮提示词、不进前缀，避免打断缓存。",
+                        "新建「跟书」会话时默认勾选全部大纲。大纲在首轮发送时写入会话前缀并保持稳定；" +
+                            "首轮发送后勾选会自动取消，第二轮起默认不勾选，只有重新勾选才改写前缀。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
                 Switch(checked = outlineFirstRound, onCheckedChange = { vm.setOutlineFirstRound(it) })
+            }
+            Spacer(Modifier.height(12.dp))
+            HorizontalDivider()
+            Spacer(Modifier.height(12.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("首轮全选章节")
+                    Text(
+                        "新建「跟书」会话时默认全选章节（梗概默认全部纳入、正文默认不纳入，" +
+                            "可在「选择上下文」里按卷 / 章节逐项调整）。章节在首轮发送时写入会话前缀；" +
+                            "首轮发送后勾选会自动取消，第二轮起默认不勾选，只有重新勾选才改写前缀。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(checked = chapterFirstRound, onCheckedChange = { vm.setChapterFirstRound(it) })
             }
             Spacer(Modifier.height(12.dp))
             HorizontalDivider()

@@ -1914,6 +1914,8 @@ class AiChatViewModel(
      * （标题按「书名（现）/（1）…」重排），默认全选章节 + 全选梗概。
      */
     fun newSession() {
+        // 新建会话前先终止上一会话的在途任务：生成态属于整个面板，不清理会让新会话里一直浮着「生成中」
+        abortInFlightWork()
         viewModelScope.launch {
             val bookId = selectedBookIds.value.firstOrNull() ?: defaultBookId
             val modelId = activeModelId.value.takeIf { it > 0 }
@@ -1947,16 +1949,21 @@ class AiChatViewModel(
         return id
     }
 
-    /** 新建跟书会话后的默认上下文：全选章节 + 全选梗概、不含正文；大纲按「首轮全选」开关处理 */
+    /** 新建跟书会话后的默认上下文：章节与大纲分别按各自的「首轮全选」开关处理 */
     private suspend fun applyNewBookSessionDefaults(bookId: Long) {
         loadBookContextNow(bookId)
         val all = contextChapterIds()
-        selectedChapterIds.value = all
-        summaryChapterIds.value = all
-        contentChapterIds.value = emptySet()
-        chapterAllSelected.value = all.isNotEmpty()
-        summaryAllSelected.value = all.isNotEmpty()
-        contentAllSelected.value = false
+        if (prefs.aiChapterFirstRound.first()) {
+            // 「首轮全选章节」：全选章节并把梗概全部纳入（正文默认不纳入）
+            selectedChapterIds.value = all
+            summaryChapterIds.value = all
+            contentChapterIds.value = emptySet()
+        } else {
+            selectedChapterIds.value = emptySet()
+            summaryChapterIds.value = emptySet()
+            contentChapterIds.value = emptySet()
+        }
+        refreshAllFlags()
         if (prefs.aiOutlineFirstRound.first()) {
             // 「首轮全选大纲」：把大纲写进首轮前缀，后续轮次靠前缀复用不再改写。
             // 开启「适配性筛选」时改为只全选「常驻化」分类下的全部内容，
@@ -1984,15 +1991,54 @@ class AiChatViewModel(
     }
 
     fun openSession(id: Long) {
+        if (_sessionId.value == id) return
+        // 切换会话同样先终止上一会话的在途任务，避免生成态 / 流式卡片跟到新会话
+        abortInFlightWork()
         _sessionId.value = id
         viewModelScope.launch {
             chatRepository.getSession(id)?.bookId?.let { loadBookContext(it) }
         }
     }
 
-    fun deleteSession(id: Long) = viewModelScope.launch {
-        chatRepository.deleteSession(id)
-        if (_sessionId.value == id) _sessionId.value = null
+    fun deleteSession(id: Long) {
+        if (_sessionId.value == id) abortInFlightWork()
+        viewModelScope.launch {
+            chatRepository.deleteSession(id)
+            if (_sessionId.value == id) _sessionId.value = null
+        }
+    }
+
+    /**
+     * 新建 / 切换 / 删除当前会话前，终止上一会话的在途任务并清空跨会话的临时状态。
+     * 生成态与「正在生成」回显属于整个面板而不是单个会话，不清理会让新会话一直停在生成中，
+     * 或残留上一轮的回答卡片，表现为新会话「未对话却卡在正在生成中」。
+     */
+    private fun abortInFlightWork() {
+        // 生成梗概 / 生成正文：含收集阶段的弹窗与执行阶段的在途请求
+        cancelGeneration()
+        generationCancelled = true
+        generationJob?.cancel()
+        generationJob = null
+        generationOutlinePick?.complete(null)
+        generationOutlinePick = null
+        generationMemoryAsk?.complete(null)
+        generationMemoryAsk = null
+        generationMemoryScopeAsk?.complete(null)
+        generationMemoryScopeAsk = null
+        generationSummaryFailed?.complete(SummaryFailureChoice.CANCEL)
+        generationSummaryFailed = null
+        _generationDialog.value = null
+        _generationPlan.value = null
+        _generationState.value = FlowState.Idle
+        generationMessage.value = null
+        endGenerationStreaming()
+        // 聊天回答的流式生成
+        stopGenerating()
+        // 旧会话遗留的待确认弹窗与导入队列
+        pendingMemoryAsk.value = null
+        pendingImports.value = emptyList()
+        importToast.value = null
+        editingUserMessageId.value = 0L
     }
 
     /** 修改会话标题（长按会话触发） */
@@ -2546,17 +2592,20 @@ class AiChatViewModel(
         if (session != null && sp.encode() != original) {
             chatRepository.updateSessionPrefix(sid, sp.encode())
         }
-        // 「首轮全选大纲与章节」：首轮勾选的内容已全部冻结进会话前缀，发完这一轮就把勾选清掉，
+        // 「首轮全选大纲 / 首轮全选章节」：对应内容已全部冻结进会话前缀，发完这一轮就把对应勾选清掉，
         // 第二轮起默认不勾选（再次勾选才会作为「新增参考资料」追加，不会重复提交前缀里的内容）。
         // 只在对应前缀化开关开启时清空：关闭前缀化时勾选每轮都要实时注入，不能清。
-        if (firstTime && prefs.aiOutlineFirstRound.first()) {
-            if (contextOn) {
+        if (firstTime) {
+            if (contextOn && prefs.aiChapterFirstRound.first()) {
                 selectedChapterIds.value = emptySet()
                 summaryChapterIds.value = emptySet()
                 contentChapterIds.value = emptySet()
+                refreshAllFlags()
             }
-            if (outlineOn) selectedOutlineIds.value = emptySet()
-            refreshAllFlags()
+            if (outlineOn && prefs.aiOutlineFirstRound.first()) {
+                selectedOutlineIds.value = emptySet()
+                refreshAllFlags()
+            }
         }
         val appended = sp.renderEntries(newBooks, newOutlines, newChapters)
         return PreparedPrefix(

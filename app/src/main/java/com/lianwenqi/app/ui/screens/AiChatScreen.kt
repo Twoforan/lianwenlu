@@ -127,6 +127,7 @@ import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.AnnotatedString
@@ -371,6 +372,12 @@ fun AiChatScreen(initialBookId: Long?) {
                 if (entries.isEmpty()) return@LaunchedEffect
                 snapshotFlow { listState.layoutInfo.totalItemsCount }.first { it > 0 }
                 listState.scrollToBottom()
+            }
+            // 流式输出到达时：只有用户仍停在底部才向下补滚一次；
+            // 用户已上滑阅读时视角保持不动，且不再「先滚到条目顶部再滚到底部」造成抖动
+            val followSlop = with(LocalDensity.current) { 48.dp.toPx() }
+            LaunchedEffect(pendingReplyTo, streamingContent.length, streamingReasoning.length) {
+                if (pendingReplyTo > 0L) listState.followStreaming(followSlop)
             }
             Box(
                 Modifier
@@ -1272,9 +1279,11 @@ private fun AiAssistantPanel(
                 if (pendingReplyTo > 0L || !focusIsBound || focusIndex < 0) listState.scrollToBottom()
                 else listState.scrollToItem(focusIndex)
             }
-            // 流式增量到达时跟随到底部，保证「逐步输出」实时可见
-            LaunchedEffect(pendingReplyTo, streamingContent.length) {
-                if (pendingReplyTo > 0L) listState.scrollToBottom()
+            // 流式增量到达时跟随：只有用户仍停在底部才向下补滚一次（单次滚动，不再来回跳），
+            // 用户上滑阅读时停留位置保持不变
+            val followSlop = with(LocalDensity.current) { 48.dp.toPx() }
+            LaunchedEffect(pendingReplyTo, streamingContent.length, streamingReasoning.length) {
+                if (pendingReplyTo > 0L) listState.followStreaming(followSlop)
             }
             // 一条对话的渲染（侧边栏专属：回答可一键写入当前章节）
             val renderEntry: @Composable (ChatEntry) -> Unit = { entry ->
@@ -2733,6 +2742,21 @@ private suspend fun LazyListState.scrollToBottom() {
     scrollToItem(last)
     // 用足够大但有限的像素值：Float.MAX_VALUE 参与内部累加会溢出成 Infinity/NaN，反而滚不到底部
     scrollBy(100_000f)
+}
+
+/**
+ * 流式输出时的「贴底跟随」：只滚动一次，且只有用户本来看向底部时才生效。
+ * - 不再先 scrollToItem(最后一条) 再滚到底：那是两次滚动，逐字刷新时视角会在
+ *   「条目顶部 / 列表底部」之间来回跳，表现为对话窗口一直抖动；
+ * - 用户上滑离开底部（距底部超过 [slopPx]）后不再拉回，停留位置保持不变。
+ */
+private suspend fun LazyListState.followStreaming(slopPx: Float) {
+    val info = layoutInfo
+    val last = info.visibleItemsInfo.lastOrNull() ?: return
+    if (last.index != info.totalItemsCount - 1) return
+    // 还能向下滚动的距离（含列表尾部内边距）；用户停在底部时该值很小
+    val gapPx = (last.offset + last.size - info.viewportEndOffset).toFloat()
+    if (gapPx <= slopPx) scrollBy(100_000f)
 }
 
 /** 把扁平的消息列表折叠成「用户消息 + 其回答版本」的展示列表 */
