@@ -812,8 +812,6 @@ fun AiChatScreen(initialBookId: Long?) {
         }
     }
     if (showSessions) {
-        // 0 全部 / 1 跟书 / 2 跟章节 / 3 未绑定
-        var kind by remember { mutableIntStateOf(0) }
         var search by remember { mutableStateOf("") }
         // 分组筛选：null=全部，-1=未分组，其余为分组 id
         var filterGroupId by remember { mutableStateOf<Long?>(null) }
@@ -833,14 +831,8 @@ fun AiChatScreen(initialBookId: Long?) {
             }
         }
 
-        val filtered = remember(sessions, kind, search, filterGroupId, filterBookId, filterVolumeId, filterChapterId, filterChapters, books) {
+        val filtered = remember(sessions, search, filterGroupId, filterBookId, filterVolumeId, filterChapterId, filterChapters, books) {
             sessions.filter { s ->
-                val matchKind = when (kind) {
-                    1 -> s.chapterId == null && s.bookId != null
-                    2 -> s.chapterId != null
-                    3 -> s.bookId == null
-                    else -> true
-                }
                 val matchBook = filterBookId == null || s.bookId == filterBookId
                 val matchGroup = when (filterGroupId) {
                     null -> true
@@ -852,7 +844,7 @@ fun AiChatScreen(initialBookId: Long?) {
                 val matchChapter = filterChapterId == null || s.chapterId == filterChapterId
                 val matchSearch = search.isBlank() ||
                     s.title.contains(search.trim(), ignoreCase = true)
-                matchKind && matchBook && matchGroup && matchVolume && matchChapter && matchSearch
+                matchBook && matchGroup && matchVolume && matchChapter && matchSearch
             }
         }
 
@@ -868,23 +860,6 @@ fun AiChatScreen(initialBookId: Long?) {
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
-                    Spacer(Modifier.height(8.dp))
-                    // 类型筛选：窄屏时横向滚动，标签强制单行，避免「未绑定」被挤成多行
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        FilterChip(selected = kind == 0, onClick = { kind = 0 },
-                            label = { Text("全部", maxLines = 1, softWrap = false) })
-                        FilterChip(selected = kind == 1, onClick = { kind = 1 },
-                            label = { Text("跟书", maxLines = 1, softWrap = false) })
-                        FilterChip(selected = kind == 2, onClick = { kind = 2 },
-                            label = { Text("跟章节", maxLines = 1, softWrap = false) })
-                        FilterChip(selected = kind == 3, onClick = { kind = 3 },
-                            label = { Text("未绑定", maxLines = 1, softWrap = false) })
-                    }
                     Spacer(Modifier.height(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         FilterDropdown(
@@ -917,7 +892,7 @@ fun AiChatScreen(initialBookId: Long?) {
                             }
                         )
                     }
-                    if (kind == 2 && filterBookId != null) {
+                    if (filterBookId != null) {
                         Spacer(Modifier.height(8.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             FilterDropdown(
@@ -1432,16 +1407,15 @@ private fun AiAssistantPanel(
                     selected = selChapters,
                     summarySelected = selSummary,
                     contentSelected = selContent,
-                    allSelected = chapterAll,
+                    // 「全选」= 梗概与正文两列都全选
+                    allSelected = summaryAll && contentAll,
                     summaryAll = summaryAll,
                     contentAll = contentAll,
                     onToggleAll = { vm.selectAllChapters() },
                     onToggleSummary = { vm.selectAllSummary() },
                     onToggleContent = { vm.selectAllContent() },
-                    onToggleChapter = { vm.toggleChapter(it) },
                     onToggleChapterSummary = { vm.toggleChapterSummary(it) },
                     onToggleChapterContent = { vm.toggleChapterContent(it) },
-                    onToggleVolume = { vm.toggleVolume(it) },
                     onToggleVolumeSummary = { vm.toggleVolumeSummary(it) },
                     onToggleVolumeContent = { vm.toggleVolumeContent(it) }
                 )
@@ -2312,10 +2286,8 @@ private fun ContextPicker(
     onToggleAll: () -> Unit,
     onToggleSummary: () -> Unit,
     onToggleContent: () -> Unit,
-    onToggleChapter: (Long) -> Unit,
     onToggleChapterSummary: (Long) -> Unit,
     onToggleChapterContent: (Long) -> Unit,
-    onToggleVolume: (Long) -> Unit,
     onToggleVolumeSummary: (Long) -> Unit,
     onToggleVolumeContent: (Long) -> Unit
 ) {
@@ -2366,7 +2338,7 @@ private fun ContextPicker(
             GenPill("梗概", summaryAll) { onToggleSummary() }
             GenPill("正文", contentAll) { onToggleContent() }
         }
-        // 三列含义表头：章节 / 梗概 / 正文
+        // 两列含义表头：章节 / 梗概 / 正文（章节列不再有勾选框，勾梗概或正文即纳入该章）
         Row(
             Modifier.fillMaxWidth().padding(start = 14.dp, end = 12.dp, bottom = 2.dp),
             verticalAlignment = Alignment.CenterVertically
@@ -2391,7 +2363,6 @@ private fun ContextPicker(
                         onToggleExpand = { collapsed[v.id] = expanded },
                         summarySelected = list.all { it.id in summarySelected },
                         contentSelected = list.all { it.id in contentSelected },
-                        onToggle = { onToggleVolume(v.id) },
                         onToggleSummary = { onToggleVolumeSummary(v.id) },
                         onToggleContent = { onToggleVolumeContent(v.id) }
                     )
@@ -2399,11 +2370,9 @@ private fun ContextPicker(
                         list.forEach { ch ->
                             GenChapterRow(
                                 label = ch.title,
-                                selected = ch.id in selected,
                                 summary = ch.id in summarySelected,
                                 content = ch.id in contentSelected,
                                 indented = true,
-                                onToggle = { onToggleChapter(ch.id) },
                                 onToggleSummary = { onToggleChapterSummary(ch.id) },
                                 onToggleContent = { onToggleChapterContent(ch.id) }
                             )
@@ -2414,11 +2383,9 @@ private fun ContextPicker(
             chapters.filter { it.volumeId == null }.forEach { ch ->
                 GenChapterRow(
                     label = ch.title,
-                    selected = ch.id in selected,
                     summary = ch.id in summarySelected,
                     content = ch.id in contentSelected,
                     indented = false,
-                    onToggle = { onToggleChapter(ch.id) },
                     onToggleSummary = { onToggleChapterSummary(ch.id) },
                     onToggleContent = { onToggleChapterContent(ch.id) }
                 )
@@ -2443,7 +2410,7 @@ private fun GenColumnCheckbox(checked: Boolean, onToggle: () -> Unit) {
     }
 }
 
-/** 上下文里的分卷行（对齐设计稿）：折叠箭头 + 整卷勾选 + 名称 + 已选数 + 梗概 / 正文两列 */
+/** 上下文里的分卷行（对齐设计稿）：折叠箭头 + 名称 + 已选数 + 梗概 / 正文两列 */
 @Composable
 private fun GenVolumeRow(
     label: String,
@@ -2453,7 +2420,6 @@ private fun GenVolumeRow(
     onToggleExpand: () -> Unit,
     summarySelected: Boolean,
     contentSelected: Boolean,
-    onToggle: () -> Unit,
     onToggleSummary: () -> Unit,
     onToggleContent: () -> Unit
 ) {
@@ -2473,8 +2439,7 @@ private fun GenVolumeRow(
                 tint = PickerMuted
             )
         }
-        GenCheckbox(checked = total > 0 && picked == total, onCheckedChange = { onToggle() })
-        Spacer(Modifier.width(8.dp))
+        Spacer(Modifier.width(4.dp))
         Text(
             label,
             color = PickerInk,
@@ -2491,22 +2456,19 @@ private fun GenVolumeRow(
     }
 }
 
-/** 上下文里的章节行：是否纳入 + 梗概 + 正文三列 */
+/** 上下文里的章节行：章节名 + 梗概 / 正文两列（任一列勾选即自动纳入该章） */
 @Composable
 private fun GenChapterRow(
     label: String,
-    selected: Boolean,
     summary: Boolean,
     content: Boolean,
     indented: Boolean,
-    onToggle: () -> Unit,
     onToggleSummary: () -> Unit,
     onToggleContent: () -> Unit
 ) {
     Row(
         Modifier
             .fillMaxWidth()
-            .clickable(onClick = onToggle)
             .padding(start = if (indented) 22.dp else 12.dp, end = 12.dp, top = 6.dp, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -2514,8 +2476,6 @@ private fun GenChapterRow(
             Box(Modifier.size(6.dp).clip(CircleShape).background(PickerInactive))
             Spacer(Modifier.width(10.dp))
         }
-        GenCheckbox(checked = selected, onCheckedChange = { onToggle() })
-        Spacer(Modifier.width(8.dp))
         Text(
             label,
             color = PickerInk,
