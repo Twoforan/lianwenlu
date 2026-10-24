@@ -29,6 +29,7 @@ import com.lianwenqi.app.data.AiChapterImporter
 import com.lianwenqi.app.data.AiOutlineImporter
 import com.lianwenqi.app.data.ChatEvent
 import com.lianwenqi.app.data.GEN_KIND_SUMMARY
+import com.lianwenqi.app.data.MAX_CHAT_MESSAGE_CHARS
 import com.lianwenqi.app.data.MemoryGateway
 import com.lianwenqi.app.data.PromptLog
 import com.lianwenqi.app.data.PromptLogContext
@@ -84,6 +85,9 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+
+/** 消息超长的统一提示：只提示、不提交，也不做任何截断 */
+private const val MSG_TOO_LONG = "消息过长，请缩短后重试"
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class AiChatViewModel(
@@ -454,6 +458,11 @@ class AiChatViewModel(
      * 不再自动写回本章；由用户在回答操作栏点「写入梗概」决定是否写入。
      */
     fun startGenerateSummary() = launchGeneration { sid ->
+        // 提示词过长：提示后直接放弃本次生成（不截断、不落库）
+        if (input.value.trim().length > MAX_CHAT_MESSAGE_CHARS) {
+            generationMessage.value = MSG_TOO_LONG
+            return@launchGeneration
+        }
         val chapterId = fixedChapterId
         if (chapterId == null) {
             noticeThenCancel("请在章节编辑页使用「生成梗概」")
@@ -544,6 +553,11 @@ class AiChatViewModel(
      * 之后进入 Executing 只读执行；任一弹窗取消即整体终止。
      */
     fun startGenerateContent(onSummary: (String) -> Unit) = launchGeneration { sid ->
+        // 提示词过长：提示后直接放弃本次生成（不截断、不落库）
+        if (input.value.trim().length > MAX_CHAT_MESSAGE_CHARS) {
+            generationMessage.value = MSG_TOO_LONG
+            return@launchGeneration
+        }
         val chapterId = fixedChapterId
         if (chapterId == null) {
             noticeThenCancel("请在章节编辑页使用「生成正文」")
@@ -2166,6 +2180,11 @@ class AiChatViewModel(
     }
 
     fun send(overrideText: String? = null, systemPrompt: String = "") = viewModelScope.launch {
+        // 消息过长：提示后直接放弃本次发送（不截断、不落库）
+        if ((overrideText ?: input.value).trim().length > MAX_CHAT_MESSAGE_CHARS) {
+            errorMessage.value = MSG_TOO_LONG
+            return@launch
+        }
         if (shouldAskMemoryVectorize()) {
             pendingMemoryAsk.value = MemoryVectorizeAsk(overrideText, systemPrompt)
             return@launch
@@ -2377,12 +2396,21 @@ class AiChatViewModel(
 
     /** 保存对话中某条消息的编辑结果 */
     fun updateMessage(id: Long, content: String) = viewModelScope.launch {
+        // 编辑后同样不允许超长内容落库：提示后放弃保存，不做截断
+        if (content.length > MAX_CHAT_MESSAGE_CHARS) {
+            errorMessage.value = MSG_TOO_LONG
+            return@launch
+        }
         chatRepository.updateMessageContent(id, content)
     }
 
     /** 保存编辑后的回答，并让 AI 基于修改后的内容继续 */
     fun saveAndContinue(assistantMessageId: Long, content: String, userMessageId: Long) =
         launchGenerating {
+            if (content.length > MAX_CHAT_MESSAGE_CHARS) {
+                errorMessage.value = MSG_TOO_LONG
+                return@launchGenerating
+            }
             val sid = _sessionId.value ?: return@launchGenerating
             val modelId = activeModelId.value
             if (modelId <= 0L) {

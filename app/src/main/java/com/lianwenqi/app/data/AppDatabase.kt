@@ -192,13 +192,34 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * 修复历史遗留的超长行：整本正文被冻结进会话前缀、超长提示词日志 / 正文等，
+         * 单行超过 SQLite CursorWindow（2MB）上限后读取会抛 SQLiteBlobTooBigException 直接闪退。
+         * 首次打开数据库时把超限文本截断到安全长度，之后用标记表跳过，避免每次启动全表扫描。
+         */
+        private val REPAIR_OVERSIZED_ROWS = object : RoomDatabase.Callback() {
+            override fun onOpen(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS db_repair_flag (id INTEGER PRIMARY KEY, done INTEGER NOT NULL DEFAULT 0)")
+                val repaired = db.query("SELECT done FROM db_repair_flag WHERE id = 1").use {
+                    it.moveToFirst() && it.getInt(0) == 1
+                }
+                if (repaired) return
+                db.execSQL("UPDATE chat_message SET content = substr(content, 1, $MAX_STORED_CONTENT) WHERE length(content) > $MAX_STORED_CONTENT")
+                db.execSQL("UPDATE chat_message SET reasoning = substr(reasoning, 1, $MAX_STORED_REASONING) WHERE length(reasoning) > $MAX_STORED_REASONING")
+                db.execSQL("UPDATE chat_message SET promptExtra = substr(promptExtra, 1, $MAX_STORED_PROMPT_EXTRA) WHERE length(promptExtra) > $MAX_STORED_PROMPT_EXTRA")
+                db.execSQL("UPDATE chat_message SET promptLog = substr(promptLog, 1, $MAX_STORED_PROMPT_LOG) WHERE length(promptLog) > $MAX_STORED_PROMPT_LOG")
+                db.execSQL("UPDATE chat_session SET prefix = substr(prefix, 1, $MAX_STORED_PREFIX) WHERE length(prefix) > $MAX_STORED_PREFIX")
+                db.execSQL("INSERT OR REPLACE INTO db_repair_flag (id, done) VALUES (1, 1)")
+            }
+        }
+
         fun get(context: Context): AppDatabase =
             INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
                     context.applicationContext,
                     AppDatabase::class.java,
                     "lianwenqi.db"
-                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15).build().also { INSTANCE = it }
+                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15).addCallback(REPAIR_OVERSIZED_ROWS).build().also { INSTANCE = it }
             }
     }
 }

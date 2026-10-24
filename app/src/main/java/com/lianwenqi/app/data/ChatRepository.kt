@@ -7,6 +7,21 @@ import com.lianwenqi.app.data.entity.OutlineItem
 import com.lianwenqi.app.data.entity.outlineCategoryLabel
 import kotlinx.coroutines.flow.Flow
 
+/*
+ * 单行文本超过 SQLite CursorWindow（2MB）后，读取该行会抛 SQLiteBlobTooBigException，
+ * 导致「打开 AI 聊天就闪退」。以下上限保证单行体积远低于该限制（中文按 3 字节/字估算）。
+ */
+internal const val MAX_STORED_CONTENT = 250_000
+internal const val MAX_STORED_REASONING = 80_000
+internal const val MAX_STORED_PROMPT_EXTRA = 50_000
+internal const val MAX_STORED_PROMPT_LOG = 120_000
+internal const val MAX_STORED_PREFIX = 300_000
+
+/** 单条聊天消息允许提交的最大字数；超过时由界面提示「消息过长，请缩短后重试」并放弃提交，不做截断 */
+internal const val MAX_CHAT_MESSAGE_CHARS = MAX_STORED_CONTENT
+
+internal fun String.capStored(max: Int): String = if (length > max) take(max) else this
+
 /** 对话领域：会话、消息、上下文组装 */
 class ChatRepository(private val db: AppDatabase) : ChatGateway {
     private val chatDao = db.chatDao()
@@ -46,13 +61,15 @@ class ChatRepository(private val db: AppDatabase) : ChatGateway {
 
     suspend fun updateSessions(sessions: List<ChatSession>) = chatDao.updateSessions(sessions)
 
-    suspend fun updateSession(session: ChatSession) = chatDao.updateSession(session)
+    suspend fun updateSession(session: ChatSession) =
+        chatDao.updateSession(session.copy(prefix = session.prefix.capStored(MAX_STORED_PREFIX)))
 
     /** 修改会话标题 */
     suspend fun updateSessionTitle(id: Long, title: String) = chatDao.updateSessionTitle(id, title)
 
     /** 更新会话级「前缀」（只增不减的前缀冻结数据） */
-    suspend fun updateSessionPrefix(id: Long, prefix: String) = chatDao.updateSessionPrefix(id, prefix)
+    suspend fun updateSessionPrefix(id: Long, prefix: String) =
+        chatDao.updateSessionPrefix(id, prefix.capStored(MAX_STORED_PREFIX))
 
     suspend fun deleteSession(id: Long) {
         chatDao.clearMessages(id)
@@ -88,14 +105,14 @@ class ChatRepository(private val db: AppDatabase) : ChatGateway {
                 content = content,
                 replyToId = replyToId,
                 variantIndex = variantIndex,
-                reasoning = reasoning,
+                reasoning = reasoning.capStored(MAX_STORED_REASONING),
                 contextSnapshot = contextSnapshot,
-                promptExtra = promptExtra,
+                promptExtra = promptExtra.capStored(MAX_STORED_PROMPT_EXTRA),
                 promptTokens = promptTokens,
                 completionTokens = completionTokens,
                 cachedTokens = cachedTokens,
                 chapterId = chapterId,
-                promptLog = promptLog
+                promptLog = promptLog.capStored(MAX_STORED_PROMPT_LOG)
             )
         )
         chatDao.getSession(sessionId)?.let {
@@ -104,7 +121,7 @@ class ChatRepository(private val db: AppDatabase) : ChatGateway {
         return id
     }
 
-    /** 编辑已有消息的正文 */
+    /** 编辑已有消息的正文（超长在前面的输入校验里已拦下，这里不做截断） */
     suspend fun updateMessageContent(id: Long, content: String) = chatDao.updateContent(id, content)
 
     /** 设置某条回答正文的折叠状态（收起后再次进入会话仍保持） */
