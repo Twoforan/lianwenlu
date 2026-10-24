@@ -36,6 +36,8 @@ data class StyleSettings(
     val bold: Boolean = false,
     val italic: Boolean = false,
     val center: Boolean = false,
+    /** 细体：字重比常规更细，与加粗互斥（阅读器专用，编辑页不使用） */
+    val thin: Boolean = false,
     val textColor: Int = 0xFF1A1A1A.toInt(),
     val backgroundColor: Int = 0xFFFFFFFF.toInt()
 )
@@ -158,5 +160,9 @@ object TextTool {
         else -> FontFamily.Default
     }
 
-    fun weightOf(bold: Boolean): FontWeight = if (bold) FontWeight.Bold else FontWeight.Normal
+    fun weightOf(bold: Boolean, thin: Boolean = false): FontWeight = when {
+        bold -> FontWeight.Bold
+        thin -> FontWeight.Light
+        else -> FontWeight.Normal
+    }
 }

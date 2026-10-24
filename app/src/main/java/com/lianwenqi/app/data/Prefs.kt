@@ -18,8 +18,13 @@ import com.lianwenqi.app.ai.storage
 import com.lianwenqi.app.data.entity.ContextSnapshot
 import com.lianwenqi.app.data.entity.decodeContextSnapshot
 import com.lianwenqi.app.util.FormatSettings
+import com.lianwenqi.app.util.IMPORTED_IMAGE_PREFIX
+import com.lianwenqi.app.util.ReaderBackgroundType
+import com.lianwenqi.app.util.ReaderPageStyle
+import com.lianwenqi.app.util.ReaderSettings
 import com.lianwenqi.app.util.StyleSettings
 import com.lianwenqi.app.util.TextTool
+import com.lianwenqi.app.util.importedName
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -149,6 +154,7 @@ class Prefs(private val context: Context) {
         val rBold = booleanPreferencesKey("reader_style_bold")
         val rItalic = booleanPreferencesKey("reader_style_italic")
         val rCenter = booleanPreferencesKey("reader_style_center")
+        val rThin = booleanPreferencesKey("reader_style_thin")
         val rTextColor = intPreferencesKey("reader_style_text_color")
         val rBgColor = intPreferencesKey("reader_style_bg_color")
 
@@ -158,6 +164,16 @@ class Prefs(private val context: Context) {
         val rPadV = intPreferencesKey("reader_fmt_pad_v")
         val rIndent = intPreferencesKey("reader_fmt_indent")
         val rBlankLines = intPreferencesKey("reader_fmt_blank_lines")
+
+        // 阅读行为：翻页动画（旧版 reader_page_mode 仅用于迁移）、音量键、背景类型与图片
+        val rPageStyle = stringPreferencesKey("reader_page_style")
+        val rVolumeKeys = booleanPreferencesKey("reader_volume_keys")
+        val rBgType = stringPreferencesKey("reader_bg_type")
+        val rBgImage = stringPreferencesKey("reader_bg_image")
+
+        // 用户导入的字体 / 背景图，元素格式 "显示名|绝对路径"
+        val rImportedFonts = stringSetPreferencesKey("reader_imported_fonts")
+        val rImportedImages = stringSetPreferencesKey("reader_imported_images")
     }
 
     val nightMode: Flow<Boolean> = context.dataStore.data.map { it[K.nightMode] ?: false }
@@ -180,9 +196,6 @@ class Prefs(private val context: Context) {
     val activeModelId: Flow<Long> = context.dataStore.data.map { it[K.activeModelId] ?: 0L }
     val lastBookId: Flow<Long> = context.dataStore.data.map { it[K.lastBookId] ?: 0L }
     val lastChapterId: Flow<Long> = context.dataStore.data.map { it[K.lastChapterId] ?: 0L }
-
-    /** 阅读器翻页方式：0 上下滚动，1 左右翻页 */
-    val readerPageMode: Flow<Int> = context.dataStore.data.map { it[K.readerPageMode] ?: 0 }
 
     /** 阅读器全屏（隐藏系统状态栏与导航栏） */
     val readerImmersive: Flow<Boolean> = context.dataStore.data.map { it[K.readerImmersive] ?: true }
@@ -327,8 +340,24 @@ class Prefs(private val context: Context) {
             bold = it[K.rBold] ?: false,
             italic = it[K.rItalic] ?: false,
             center = it[K.rCenter] ?: false,
+            thin = it[K.rThin] ?: false,
             textColor = it[K.rTextColor] ?: 0xFF1A1A1A.toInt(),
             backgroundColor = it[K.rBgColor] ?: 0xFFFFFFFF.toInt()
+        )
+    }
+
+    /** 阅读器行为设置：翻页动画（含旧版两档设置的迁移）、音量键翻页、背景与导入资源 */
+    val readerSettings: Flow<ReaderSettings> = context.dataStore.data.map {
+        val legacyPageMode = it[K.readerPageMode] ?: 0
+        val pageStyle = it[K.rPageStyle]
+            ?: if (legacyPageMode == 1) ReaderPageStyle.SLIDE else ReaderPageStyle.SCROLL
+        ReaderSettings(
+            pageStyle = pageStyle,
+            volumeKeys = it[K.rVolumeKeys] ?: false,
+            backgroundType = it[K.rBgType] ?: ReaderBackgroundType.COLOR,
+            backgroundImage = it[K.rBgImage] ?: "",
+            importedFonts = it[K.rImportedFonts] ?: emptySet(),
+            importedImages = it[K.rImportedImages] ?: emptySet()
         )
     }
 
@@ -371,7 +400,6 @@ class Prefs(private val context: Context) {
     suspend fun setListMode(v: Boolean) = writePrefs { it[K.listMode] = v }
     suspend fun setKeepScreenOn(v: Boolean) = writePrefs { it[K.keepScreenOn] = v }
     suspend fun setActiveModelId(v: Long) = writePrefs { it[K.activeModelId] = v }
-    suspend fun setReaderPageMode(v: Int) = writePrefs { it[K.readerPageMode] = v }
     suspend fun setReaderImmersive(v: Boolean) = writePrefs { it[K.readerImmersive] = v }
     suspend fun setAiOutlineFirstRound(v: Boolean) = writePrefs { it[K.aiOutlineFirstRound] = v }
     suspend fun setAiChapterFirstRound(v: Boolean) = writePrefs { it[K.aiChapterFirstRound] = v }
@@ -474,8 +502,45 @@ class Prefs(private val context: Context) {
             it[K.rBold] = next.bold
             it[K.rItalic] = next.italic
             it[K.rCenter] = next.center
+            it[K.rThin] = next.thin
             it[K.rTextColor] = next.textColor
             it[K.rBgColor] = next.backgroundColor
+        }
+    }
+
+    suspend fun updateReaderSettings(block: (ReaderSettings) -> ReaderSettings) {
+        val next = block(readerSettings.firstValue())
+        writePrefs {
+            it[K.rPageStyle] = next.pageStyle
+            it[K.rVolumeKeys] = next.volumeKeys
+            it[K.rBgType] = next.backgroundType
+            it[K.rBgImage] = next.backgroundImage
+        }
+    }
+
+    /** 记录导入字体；同名的旧记录会被新路径覆盖，避免列表膨胀 */
+    suspend fun addImportedFont(spec: String) = writePrefs {
+        val cur = it[K.rImportedFonts] ?: emptySet()
+        val name = importedName(spec)
+        it[K.rImportedFonts] = cur.filterNot { old -> importedName(old) == name }.toSet() + spec
+    }
+
+    /** 记录导入背景图；同名旧图会被新路径覆盖 */
+    suspend fun addImportedImage(spec: String) = writePrefs {
+        val cur = it[K.rImportedImages] ?: emptySet()
+        val name = importedName(spec)
+        it[K.rImportedImages] = cur.filterNot { old -> importedName(old) == name }.toSet() + spec
+    }
+
+    /** 删除导入背景图记录（同时把仍指向它的当前背景重置为纯色） */
+    suspend fun removeImportedImage(spec: String) = writePrefs {
+        val cur = it[K.rImportedImages] ?: emptySet()
+        val name = importedName(spec)
+        it[K.rImportedImages] = cur.filterNot { old -> importedName(old) == name }.toSet()
+        val current = it[K.rBgImage] ?: ""
+        if (current == IMPORTED_IMAGE_PREFIX + name) {
+            it[K.rBgImage] = ""
+            it[K.rBgType] = ReaderBackgroundType.COLOR
         }
     }
 
