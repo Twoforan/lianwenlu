@@ -52,11 +52,13 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import com.lianwenqi.app.util.FormatSettings
 import com.lianwenqi.app.util.IMPORTED_FONT_PREFIX
 import com.lianwenqi.app.util.IMPORTED_IMAGE_PREFIX
@@ -85,8 +87,16 @@ fun ReaderBackgroundLayer(style: StyleSettings, reader: ReaderSettings) {
             null
         }
         if (model != null) {
+            // 仿真翻页会把这一层连同正文一起渲染进软件 Bitmap，
+            // 背景图若被 Coil 解码成硬件 Bitmap 绘制到软件 Canvas 会直接抛
+            // IllegalArgumentException（Software rendering doesn't support hardware bitmaps），
+            // 所以阅读区背景一律禁用硬件 Bitmap。
+            val context = LocalContext.current
+            val request = remember(context, model) {
+                ImageRequest.Builder(context).data(model).allowHardware(false).build()
+            }
             AsyncImage(
-                model = model,
+                model = request,
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize()
