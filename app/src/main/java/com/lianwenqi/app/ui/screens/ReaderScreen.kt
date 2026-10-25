@@ -59,6 +59,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -68,13 +69,10 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
-import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -132,6 +130,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import ptq.mpga.ptqbookpageview.widget.PTQBookPageView
+import ptq.mpga.ptqbookpageview.widget.PTQBookPageViewRequest
+import ptq.mpga.ptqbookpageview.widget.PTQBookPageViewState
+import ptq.mpga.ptqbookpageview.widget.rememberPTQBookPageViewConfig
 import kotlin.math.abs
 
 /** 正文底部为常驻页脚预留的额外间距（dp） */
@@ -145,9 +147,6 @@ private const val CHAPTER_SWIPE_DP = 56
 private const val TURN_FLICK_PX = 70f
 private const val TURN_ANIM_MS = 420
 private const val TURN_CANCEL_MS = 180
-
-/** 仿真翻页时页面旋转角度上限，避免页面完全侧立时出现长时间的细线/透明闪烁 */
-private const val TURN_SIMULATION_MAX_DEG = 88f
 
 /** 进度面板 / 目录里的一个分卷分组；[volumeId] 为 null 表示未分卷章节 */
 internal data class ReaderVolumeGroup(
@@ -437,6 +436,8 @@ fun ReaderScreen(bookId: Long, chapterId: Long, onBack: () -> Unit) {
                 pageStyle = settings.pageStyle,
                 navTick = navTick,
                 navDir = navDir,
+                previousChapterData = if (index > 0) chapters.getOrNull(index - 1) else null,
+                nextChapterData = if (index >= 0 && index < chapters.lastIndex) chapters.getOrNull(index + 1) else null,
                 onToggleMenu = { toggleMenu() },
                 onPrevChapter = { goChapter(-1) },
                 onNextChapter = { goChapter(1) },
@@ -738,6 +739,8 @@ private fun PagedReader(
     pageStyle: String,
     navTick: Int,
     navDir: Int,
+    previousChapterData: Chapter?,
+    nextChapterData: Chapter?,
     onToggleMenu: () -> Unit,
     onPrevChapter: () -> Unit,
     onNextChapter: () -> Unit,
@@ -773,22 +776,111 @@ private fun PagedReader(
             (maxHeight - (format.paddingVertical * 2 + READER_FOOTER_SPACE).dp).roundToPx()
         }
 
-        val pages = remember(full, widthPx, heightPx, textStyle) {
-            paginate(measurer, full, textStyle, widthPx, heightPx)
+        // 已排版过的章节页缓存：跨章翻页动画需要取到上一章末页 / 下一章首页
+        val chapterPageCache = remember(widthPx, heightPx, textStyle) {
+            mutableMapOf<Long, List<ReaderPage>>()
         }
+        val chapterHeadCache = remember(widthPx, heightPx, textStyle) {
+            mutableMapOf<Long, ReaderPage>()
+        }
+        val lineHeightPx = with(localDensity) {
+            if (textStyle.lineHeight.value.isNaN()) {
+                // lineHeight 未指定时按字号估算，仅用于跨章首页的排版行数上限
+                (textStyle.fontSize * 1.6f).toPx()
+            } else {
+                textStyle.lineHeight.toPx()
+            }
+        }
+
+        val pages = remember(full, widthPx, heightPx, textStyle) {
+            paginate(measurer, full, textStyle, widthPx, heightPx).also { computed ->
+                chapter?.id?.let { id ->
+                    chapterPageCache[id] = computed
+                    if (chapterPageCache.size > 5) {
+                        chapterPageCache.keys.firstOrNull { key ->
+                            key != id && key != previousChapterData?.id && key != nextChapterData?.id
+                        }?.let(chapterPageCache::remove)
+                    }
+                }
+            }
+        }
+        // 上一章末页：作为左侧跨章页。上一章本次没读过时在这里补排版一次（并写入缓存），
+        // 保证「往回翻进上一章」同样有翻页动画，而不是直接跳章
+        val previousTail = remember(pages, previousChapterData?.id, widthPx, heightPx, textStyle) {
+            previousChapterData?.let { prev ->
+                val computed = chapterPageCache[prev.id] ?: paginate(
+                    measurer,
+                    readerChapterText(prev, style, format),
+                    textStyle,
+                    widthPx,
+                    heightPx
+                ).also { chapterPageCache[prev.id] = it }
+                computed.lastOrNull()
+            }
+        }
+        // 下一章首页（排版量很小）：作为右侧跨章页，翻到它之后真正切章
+        val nextHead = remember(nextChapterData?.id, widthPx, heightPx, textStyle) {
+            nextChapterData?.let { next ->
+                chapterHeadCache.getOrPut(next.id) {
+                    paginateHead(
+                        measurer,
+                        readerChapterText(next, style, format),
+                        textStyle,
+                        widthPx,
+                        heightPx,
+                        lineHeightPx
+                    )
+                }
+            }
+        }
+        // 仿真 / 覆盖模式用于翻页的页序列（可能包含前后章的跨章页）
+        val flipPages = remember(pages, previousTail, nextHead) {
+            buildList {
+                previousTail?.let { add(it) }
+                addAll(pages)
+                nextHead?.let { add(it) }
+            }
+        }
+        val pageBase = if (previousTail != null) 1 else 0
+
+        // 切章落点：进入上一章时要停在章末，其余情况停在章首
+        var enterAtEnd by remember { mutableStateOf(false) }
+
         // 排版变化前所在页的起始字符，用于重新分页后回到同一定位
-        var anchorChar by remember(chapter?.id) { mutableIntStateOf(0) }
-        var simplePage by remember(chapter?.id) { mutableIntStateOf(0) }
+        var anchorChar by remember(chapter?.id) {
+            mutableIntStateOf(if (enterAtEnd) pages.lastOrNull()?.startChar ?: 0 else 0)
+        }
+        var simplePage by remember(chapter?.id) {
+            mutableIntStateOf(if (enterAtEnd) pages.lastIndex.coerceAtLeast(0) else 0)
+        }
         val pagerState = rememberPagerState(pageCount = { pages.size })
 
         // 仿真 / 覆盖翻页：手势直接驱动翻页进度，targetPage 为 -1 表示当前没有进行中的翻页
-        var turnIndex by remember(chapter?.id) { mutableIntStateOf(0) }
+        var turnIndex by remember(chapter?.id) {
+            mutableIntStateOf(if (enterAtEnd) pages.lastIndex.coerceAtLeast(0) else 0)
+        }
         var targetPage by remember { mutableIntStateOf(-1) }
         var forward by remember { mutableStateOf(true) }
         var turnProgress by remember { mutableFloatStateOf(0f) }
         var turnJob by remember { mutableStateOf<Job?>(null) }
-        // 翻页过程中若重新分页（改字号 / 行距），按最新的页数收尾，避免落到越界页码
-        val latestPageCount by rememberUpdatedState(pages.size)
+
+        /** 当前章页在 flipPages 中的下标 */
+        fun flipIndex(): Int = (pageBase + turnIndex).coerceIn(0, flipPages.lastIndex)
+
+        /** 翻页落点：跨章页触发切章，普通页直接更新页码 */
+        fun commitFlip(destination: Int) {
+            when {
+                destination < pageBase -> {
+                    enterAtEnd = true
+                    onPrevChapter()
+                }
+                destination >= pageBase + pages.size -> {
+                    enterAtEnd = false
+                    onNextChapter()
+                }
+                else -> turnIndex = (destination - pageBase).coerceIn(0, pages.lastIndex)
+            }
+        }
 
         val toggleMenu by rememberUpdatedState(onToggleMenu)
         val prevChapter by rememberUpdatedState(onPrevChapter)
@@ -807,7 +899,7 @@ private fun PagedReader(
                         animationSpec = tween(if (commit) TURN_ANIM_MS else TURN_CANCEL_MS)
                     ) { value, _ -> turnProgress = value }
                     if (commit) {
-                        turnIndex = destination.coerceIn(0, (latestPageCount - 1).coerceAtLeast(0))
+                        commitFlip(destination)
                     }
                 } finally {
                     targetPage = -1
@@ -816,12 +908,19 @@ private fun PagedReader(
             }
         }
 
-        /** 触发一次完整翻页（点击 / 音量键）；越过本章首页 / 末页时直接切章 */
+        /** 触发一次完整翻页（点击 / 音量键）；越过本章首页 / 末页时切章（仿真模式由翻页组件处理） */
         fun turnPage(next: Boolean) {
+            if (pageStyle == ReaderPageStyle.SIMULATION) return
             if (targetPage >= 0) return
-            val destination = turnIndex + if (next) 1 else -1
-            if (destination !in pages.indices) {
-                if (next) nextChapter() else prevChapter()
+            val destination = flipIndex() + if (next) 1 else -1
+            if (destination !in flipPages.indices) {
+                if (next) {
+                    enterAtEnd = false
+                    nextChapter()
+                } else {
+                    enterAtEnd = true
+                    prevChapter()
+                }
                 return
             }
             forward = next
@@ -830,15 +929,18 @@ private fun PagedReader(
             settleTurn(commit = true)
         }
 
-        // 换章后回到该章第一页（首屏定位）
+        // 换章后定位到该章首屏；从章首往回翻时定位到上一章末尾
         LaunchedEffect(chapter?.id) {
-            anchorChar = 0
-            simplePage = 0
+            val target = if (enterAtEnd) pages.lastIndex.coerceAtLeast(0) else 0
+            anchorChar = pages.getOrNull(target)?.startChar ?: 0
+            simplePage = target
             turnJob?.cancel()
-            turnIndex = 0
+            turnIndex = target
             targetPage = -1
             turnProgress = 0f
-            pagerState.scrollToPage(0)
+            if (pagerState.currentPage != target) pagerState.scrollToPage(target)
+            // 落点已消费，后续再进入其他章节时恢复为章首
+            enterAtEnd = false
         }
 
         // 字号 / 行距 / 边距等变化导致重新分页时，尽量回到原阅读位置
@@ -907,7 +1009,24 @@ private fun PagedReader(
         // 音量键翻页（方向与系统音量键一致：加键下一页、减键上一页）
         LaunchedEffect(navTick) {
             if (navTick <= 0) return@LaunchedEffect
+            // 仿真翻页的动画由翻页组件内部驱动（CurlFlipReader 会处理音量键）
+            if (pageStyle == ReaderPageStyle.SIMULATION) return@LaunchedEffect
             if (navDir > 0) nextPage() else prevPage()
+        }
+
+        /** 单页内容：纸张背景 + 正文；仿真与覆盖翻页共用同一份页面 */
+        @Composable
+        fun pageSurface(index: Int) {
+            Box(Modifier.fillMaxSize()) {
+                // 纸张背景随页面一起翻动，否则只有文字在动
+                ReaderBackgroundLayer(style, reader)
+                Box(Modifier.fillMaxSize().padding(pagePadding)) {
+                    Text(
+                        text = flipPages.getOrNull(index)?.text ?: AnnotatedString(""),
+                        style = textStyle
+                    )
+                }
+            }
         }
 
         if (pageStyle == ReaderPageStyle.NONE) {
@@ -1001,34 +1120,35 @@ private fun PagedReader(
                     }
                 }
             }
+        } else if (pageStyle == ReaderPageStyle.SIMULATION) {
+            // 仿真翻页交给 PTQFlipper 的纸张卷曲组件：拖动跟手，带网格扭曲、纸背与阴影
+            CurlFlipReader(
+                pages = flipPages,
+                currentPage = flipIndex(),
+                pageColor = Color(style.backgroundColor),
+                navTick = navTick,
+                navDir = navDir,
+                onPageChange = { display -> commitFlip(display) },
+                onPrevChapter = {
+                    enterAtEnd = true
+                    prevChapter()
+                },
+                onNextChapter = {
+                    enterAtEnd = false
+                    nextChapter()
+                },
+                onToggleMenu = { toggleMenu() },
+                pageContent = { index -> pageSurface(index) }
+            )
         } else {
-            // 仿真 / 覆盖：手势直接驱动翻页进度（跟手拖动）。
-            // 仿真 = 翻动页连同纸张背景绕装订边翻转；覆盖 = 旧页不动，新页连同背景滑入盖住。
-            val simulation = pageStyle == ReaderPageStyle.SIMULATION
+            // 覆盖：旧页不动，新页连同背景从右侧（向后翻时从左侧）滑入
             val pageWidthPx = with(localDensity) { maxWidth.toPx() }
             val animating = targetPage >= 0
-            // 采用单一完整页面图层做仿真翻转，避免逐条裁剪导致的透明缝隙。
-            // 相机距离较大，降低透视畸变；阴影单独绘制，跟随进度移动。
-            val cameraDistancePx = 1800f * localDensity.density
-
-            @Composable
-            fun pageSurface(index: Int) {
-                Box(Modifier.fillMaxSize()) {
-                    // 纸张背景随页面一起翻动，否则只有文字在动
-                    ReaderBackgroundLayer(style, reader)
-                    Box(Modifier.fillMaxSize().padding(pagePadding)) {
-                        Text(
-                            text = pages.getOrNull(index)?.text ?: AnnotatedString(""),
-                            style = textStyle
-                        )
-                    }
-                }
-            }
 
             Box(
                 Modifier
                     .fillMaxSize()
-                    .pointerInput(pages.size) {
+                    .pointerInput(flipPages.size) {
                         var acc = 0f
                         detectHorizontalDragGestures(
                             onDragStart = { acc = 0f },
@@ -1039,8 +1159,8 @@ private fun PagedReader(
                                     // 拖动一小段后锁定方向与目标页，随后进度直接跟手
                                     if (abs(acc) > 3f) {
                                         val next = acc < 0f
-                                        val destination = turnIndex + if (next) 1 else -1
-                                        if (destination in pages.indices) {
+                                        val destination = flipIndex() + if (next) 1 else -1
+                                        if (destination in flipPages.indices) {
                                             forward = next
                                             targetPage = destination
                                         }
@@ -1058,7 +1178,13 @@ private fun PagedReader(
                                     targetPage >= 0 -> settleTurn(commit = turnProgress > 0.25f)
                                     // 本章首 / 末页：拖动距离够就直接切章
                                     abs(acc) > TURN_FLICK_PX ->
-                                        if (acc < 0f) nextChapter() else prevChapter()
+                                        if (acc < 0f) {
+                                            enterAtEnd = false
+                                            nextChapter()
+                                        } else {
+                                            enterAtEnd = true
+                                            prevChapter()
+                                        }
                                 }
                                 acc = 0f
                             },
@@ -1079,91 +1205,145 @@ private fun PagedReader(
                         }
                     }
             ) {
-                if (simulation) {
-                    // 目标页固定在下方，翻动页连同纸张背景绕装订边翻转离开
+                // 旧页留在底部不动，新页从右侧（向后翻时从左侧）滑入
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .zIndex(0f)
+                ) {
+                    pageSurface(flipIndex())
+                }
+                if (animating) {
                     Box(
                         Modifier
                             .fillMaxSize()
-                            .zIndex(0f)
-                    ) {
-                        pageSurface(if (animating) targetPage else turnIndex)
-                    }
-                    if (animating) {
-                        Box(
-                            Modifier
-                                .fillMaxSize()
-                                .zIndex(1f)
-                        ) {
-                            // 完整页面作为一个连续图层翻转，避免旧版逐条递归裁剪产生的透明裂缝。
-                            // 页面背景和正文在同一图层内，因此不会出现背景/文字分离。
-                            Box(
-                                Modifier
-                                    .fillMaxSize()
-                                    .drawWithContent {
-                                        drawContent()
-                                        // 沿自由边增加柔和的纸面阴影；阴影随翻页推进逐渐增强。
-                                        val shadeAlpha = (0.06f + 0.28f * turnProgress)
-                                            .coerceIn(0f, 0.34f)
-                                        val shadowBrush = if (forward) {
-                                            Brush.horizontalGradient(
-                                                0f to Color.Black.copy(alpha = shadeAlpha),
-                                                0.22f to Color.Black.copy(alpha = shadeAlpha * 0.55f),
-                                                0.58f to Color.Transparent,
-                                                1f to Color.Transparent
-                                            )
-                                        } else {
-                                            Brush.horizontalGradient(
-                                                0f to Color.Transparent,
-                                                0.42f to Color.Transparent,
-                                                0.78f to Color.Black.copy(alpha = shadeAlpha * 0.55f),
-                                                1f to Color.Black.copy(alpha = shadeAlpha)
-                                            )
-                                        }
-                                        drawRect(brush = shadowBrush)
-                                    }
-                                    .graphicsLayer {
-                                        rotationY = (if (forward) -1f else 1f) *
-                                            TURN_SIMULATION_MAX_DEG * turnProgress
-                                        cameraDistance = cameraDistancePx
-                                        transformOrigin = TransformOrigin(
-                                            pivotFractionX = if (forward) 0f else 1f,
-                                            pivotFractionY = 0.5f
-                                        )
-                                        // 接近侧面时渐隐，避免 3D 投影在 90° 附近出现细线闪烁。
-                                        alpha = if (turnProgress < 0.88f) 1f else
-                                            ((1f - turnProgress) / 0.12f).coerceIn(0f, 1f)
-                                    }
-                            ) {
-                                pageSurface(turnIndex)
+                            .zIndex(1f)
+                            .graphicsLayer {
+                                // 从右侧（向后翻时从左侧）滑入，位移在图层里算，拖动时不触发重组
+                                val direction = if (forward) 1f else -1f
+                                translationX = direction * pageWidthPx * (1f - turnProgress)
+                                shadowElevation = 10.dp.toPx()
+                                shape = RectangleShape
                             }
-                        }
-                    }
-                } else {
-                    // 旧页留在底部不动，新页从右侧（向后翻时从左侧）滑入
-                    Box(
-                        Modifier
-                            .fillMaxSize()
-                            .zIndex(0f)
                     ) {
-                        pageSurface(turnIndex)
+                        pageSurface(targetPage)
                     }
-                    if (animating) {
-                        Box(
-                            Modifier
-                                .fillMaxSize()
-                                .zIndex(1f)
-                                .graphicsLayer {
-                                    // 从右侧（向后翻时从左侧）滑入，位移在图层里算，拖动时不触发重组
-                                    val direction = if (forward) 1f else -1f
-                                    translationX = direction * pageWidthPx * (1f - turnProgress)
-                                    shadowElevation = 10.dp.toPx()
-                                    shape = RectangleShape
-                                }
-                        ) {
-                            pageSurface(targetPage)
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 仿真翻页容器：内部使用移植自 PTQFlipper（MIT，https://github.com/FantasticPornTaiQiang/PTQFlipper）
+ * 的 PTQBookPageView，由它负责纸张卷曲、网格扭曲、纸背与阴影的绘制。
+ *
+ * - [currentPage] 为外部受控页码（可能落在前后章的跨章页上），翻页完成后通过 [onPageChange] 交回新页码
+ * - 本章首页 / 末页继续翻时交给 [onPrevChapter] / [onNextChapter] 切章
+ * - 左右三分之一交给翻页器翻页，中间三分之一用于呼出菜单
+ * - 音量键通过 [navTick] / [navDir] 触发，复用组件内部的翻页动画
+ */
+@Composable
+private fun CurlFlipReader(
+    pages: List<ReaderPage>,
+    currentPage: Int,
+    pageColor: Color,
+    navTick: Int,
+    navDir: Int,
+    onPageChange: (Int) -> Unit,
+    onPrevChapter: () -> Unit,
+    onNextChapter: () -> Unit,
+    onToggleMenu: () -> Unit,
+    pageContent: @Composable (Int) -> Unit
+) {
+    val pageCount = pages.size.coerceAtLeast(1)
+    val safePage = currentPage.coerceIn(0, pageCount - 1)
+    // 页码 / 页数直接派生：换章后与新页面列表在同一帧生效，
+    // 若用 LaunchedEffect 延迟写入，会先按旧页码渲染一帧旧内容，表现为翻页闪一下
+    val viewState = remember(pageCount, safePage) {
+        PTQBookPageViewState(pageCount, safePage)
+    }
+    val config by rememberPTQBookPageViewConfig(pageColor = pageColor)
+    // 程序化翻页（音量键）与位图刷新入口
+    val turnRequest = remember { PTQBookPageViewRequest() }
+    val latestPageCount by rememberUpdatedState(pageCount)
+    val latestOnPageChange by rememberUpdatedState(onPageChange)
+    val latestPrevChapter by rememberUpdatedState(onPrevChapter)
+    val latestNextChapter by rememberUpdatedState(onNextChapter)
+    val latestToggleMenu by rememberUpdatedState(onToggleMenu)
+
+    // 重新分页 / 换章后页面位图需要重拍；不重建组件，避免跨章翻页时闪一下
+    LaunchedEffect(pages) {
+        turnRequest.refresh()
+    }
+
+    // 音量键翻页：复用组件内部的翻页动画
+    var handledNavTick by remember { mutableIntStateOf(navTick) }
+    LaunchedEffect(navTick) {
+        if (navTick == handledNavTick) return@LaunchedEffect
+        handledNavTick = navTick
+        if (navDir > 0) turnRequest.next() else turnRequest.previous()
+    }
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            .pointerInput(Unit) {
+                val slop = viewConfiguration.touchSlop
+                awaitPointerEventScope {
+                    while (true) {
+                        val down = awaitFirstDown(
+                            requireUnconsumed = false,
+                            pass = PointerEventPass.Initial
+                        )
+                        val start = down.position
+                        var moved = false
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                            if ((change.position - start).getDistance() > slop) moved = true
+                            if (!change.pressed) break
+                        }
+                        val third = size.width / 3f
+                        if (!moved && start.x >= third && start.x <= third * 2f) {
+                            latestToggleMenu()
                         }
                     }
                 }
+            }
+    ) {
+        PTQBookPageView(
+            modifier = Modifier.fillMaxSize(),
+            config = config,
+            state = viewState,
+            request = turnRequest
+        ) {
+            onTurnPageRequest { page, next, success ->
+                if (success) {
+                    val destination = page + if (next) 1 else -1
+                    latestOnPageChange(destination.coerceIn(0, latestPageCount - 1))
+                } else if (next) {
+                    latestNextChapter()
+                } else {
+                    latestPrevChapter()
+                }
+            }
+            tapBehavior { _, rightDown, touch ->
+                when {
+                    touch.x < rightDown.x / 3f -> false
+                    touch.x > rightDown.x * 2f / 3f -> true
+                    else -> null
+                }
+            }
+            contents { page, refresh ->
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .background(pageColor)
+                ) {
+                    pageContent(page)
+                }
+                refresh()
             }
         }
     }
@@ -1198,6 +1378,40 @@ private fun paginate(
         line = end
     }
     return pages.ifEmpty { listOf(ReaderPage(0, text)) }
+}
+
+/**
+ * 只排版下一页的首页：跨章翻页动画需要把它作为右侧跨章页，
+ * 通过限制 maxLines 把排版量压在一两页内，避免为动画排版整章。
+ */
+private fun paginateHead(
+    measurer: TextMeasurer,
+    text: AnnotatedString,
+    style: TextStyle,
+    widthPx: Int,
+    heightPx: Int,
+    lineHeightPx: Float
+): ReaderPage {
+    if (text.isEmpty() || widthPx <= 0 || heightPx <= 0) return ReaderPage(0, text)
+    val maxLines = if (lineHeightPx > 0f) {
+        ((heightPx / lineHeightPx).toInt() * 2 + 4).coerceAtLeast(8)
+    } else {
+        40
+    }
+    val layout = measurer.measure(
+        text = text,
+        style = style,
+        maxLines = maxLines,
+        constraints = Constraints(maxWidth = widthPx)
+    )
+    if (layout.lineCount == 0) return ReaderPage(0, text)
+    val limit = heightPx.toFloat()
+    val top = layout.getLineTop(0)
+    var end = 0
+    while (end < layout.lineCount && layout.getLineBottom(end) - top <= limit) end++
+    if (end == 0) end = 1
+    val endChar = if (end >= layout.lineCount) text.length else layout.getLineStart(end)
+    return ReaderPage(0, text.subSequence(0, endChar))
 }
 
 /**
