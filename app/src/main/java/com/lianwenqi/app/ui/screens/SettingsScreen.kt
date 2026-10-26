@@ -169,6 +169,7 @@ fun SettingsScreen(
     onOpenAiTools: () -> Unit = {},
     onOpenPrefix: () -> Unit = {},
     onOpenMemory: () -> Unit = {},
+    onOpenStyle: () -> Unit = {},
     onOpenManual: () -> Unit = {},
     onOpenUpdate: () -> Unit = {}
 ) {
@@ -445,6 +446,31 @@ fun SettingsScreen(
                                 Text("长期记忆（书本向量化）")
                                 Text(
                                     "书籍正文向量化后，发送时按本章梗概与提示词语义检索相关片段，作为参考资料写入本轮对话",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Icon(
+                                Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Spacer(Modifier.height(12.dp))
+                        HorizontalDivider()
+                        Spacer(Modifier.height(12.dp))
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable(onClick = onOpenStyle)
+                                .padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text("文风配置")
+                                Text(
+                                    "管理文风档案，为后续写作提供风格参考",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )

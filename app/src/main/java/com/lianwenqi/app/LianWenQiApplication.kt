@@ -20,6 +20,11 @@ import com.lianwenqi.app.data.MemoryRepository
 import com.lianwenqi.app.data.ManualSeeder
 import com.lianwenqi.app.data.OutlineRepository
 import com.lianwenqi.app.data.Prefs
+import com.lianwenqi.app.data.StyleRepository
+import com.lianwenqi.app.data.style.StyleAnalysisService
+import com.lianwenqi.app.data.style.StyleConstraintLoader
+import com.lianwenqi.app.data.style.StyleProfileSaver
+import com.lianwenqi.app.data.style.StyleProfileUpdater
 import com.lianwenqi.app.update.UpdateChecker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -38,6 +43,21 @@ class AppContainer(val app: Application) {
     val chatRepository: ChatRepository = ChatRepository(database)
     val outlineRepository: OutlineRepository = OutlineRepository(database)
     val configRepository: ConfigRepository = ConfigRepository(database, aiClient)
+    val styleRepository: StyleRepository = StyleRepository(database)
+    /** 文风分析：复用现有模型配置与 [AiClient]，不另建 API 客户端 */
+    val styleAnalysisService: StyleAnalysisService = StyleAnalysisService(configRepository, aiClient)
+    val styleProfileSaver: StyleProfileSaver = StyleProfileSaver(styleRepository)
+    /** 文风档案编辑：复用同一 Repository，保存前查重与结构校验 */
+    val styleProfileUpdater: StyleProfileUpdater = StyleProfileUpdater(styleRepository)
+
+    /**
+     * 生成请求的文风加载入口：每次按书籍 id 实时读取 styleId 与档案，
+     * 换绑 / 解绑 / 编辑 / 删除后下一次生成立即使用最新数据。
+     */
+    val styleConstraintLoader: StyleConstraintLoader = StyleConstraintLoader(
+        styleIdOf = { bookId -> bookRepository.getBook(bookId)?.styleId },
+        profileOf = { id -> styleRepository.getProfile(id) }
+    )
     val updateChecker: UpdateChecker = UpdateChecker(app)
 
     /** 向量化专用的 Embedding 客户端（只在向量化 / 检索时调用，不参与对话请求） */

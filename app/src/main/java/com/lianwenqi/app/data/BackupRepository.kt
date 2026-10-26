@@ -8,6 +8,8 @@ import com.lianwenqi.app.data.entity.BookGroup
 import com.lianwenqi.app.data.entity.Chapter
 import com.lianwenqi.app.data.entity.OutlineCategory
 import com.lianwenqi.app.data.entity.OutlineItem
+import com.lianwenqi.app.data.entity.StyleProfile
+import com.lianwenqi.app.data.entity.StyleSourceType
 import com.lianwenqi.app.data.entity.Volume
 import com.lianwenqi.app.data.entity.defaultOutlineKeys
 import com.lianwenqi.app.util.buildTitle
@@ -46,7 +48,27 @@ data class BackupBook(
     /** 已「常驻化」的大纲分类标签 */
     val pinnedOutlineCategories: List<String> = emptyList(),
     /** 各分类的字段模板（未设置过的分类不出现） */
-    val outlineFields: Map<String, List<String>> = emptyMap()
+    val outlineFields: Map<String, List<String>> = emptyMap(),
+    /**
+     * 绑定的文风档案在 [BackupStyleProfile.id] 中的值；0 表示未绑定。
+     * 旧备份没有该字段，按 0（未绑定）处理。
+     */
+    val styleId: Long = 0
+)
+
+/** 备份文件里的文风档案：只保留分析结果与来源元数据，不含样本文本 */
+@Serializable
+data class BackupStyleProfile(
+    /** 导出时的原 id，仅用于恢复时把书籍绑定重映射到新档案，不直接写入数据库 */
+    val id: Long = 0,
+    val name: String,
+    val sourceType: String = StyleSourceType.MANUAL.name,
+    val sourceMeta: String = "{}",
+    val analysisJson: String = "{}",
+    val analysisVersion: Int = 1,
+    val modelName: String = "",
+    val createdAt: Long = 0,
+    val updatedAt: Long = 0
 )
 
 @Serializable
@@ -83,7 +105,9 @@ data class BackupPayload(
     val format: Int = BackupRepository.FORMAT_VERSION,
     val exportedAt: Long = System.currentTimeMillis(),
     val appVersion: String = "",
-    val books: List<BackupBook> = emptyList()
+    val books: List<BackupBook> = emptyList(),
+    /** 文风档案；旧备份没有该字段，按空列表处理 */
+    val styleProfiles: List<BackupStyleProfile> = emptyList()
 )
 
 /** 恢复结果：新建 / 覆盖 / 跳过的书籍数量 */
@@ -104,6 +128,7 @@ class BackupRepository(
     private val outlineDao = db.outlineDao()
     private val groupDao = db.bookGroupDao()
     private val memoryChunkDao = db.memoryChunkDao()
+    private val styleDao = db.styleProfileDao()
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -158,10 +183,12 @@ class BackupRepository(
 
     /**
      * 恢复：重名书籍按 [overwrite] 覆盖（整本替换）或跳过，其余按新书加入书架。
+     * 先恢复文风档案并建立「备份原 id → 新 id」映射，再按映射恢复书籍绑定，保证引用有效。
      * 整段导入在同一事务内完成，中途失败不会留下半本书。
      */
     suspend fun restore(payload: BackupPayload, overwrite: Boolean): RestoreResult = db.withTransaction {
         val groups = groupDao.getAll().toMutableList()
+        val styleMap = restoreStyleProfiles(payload.styleProfiles)
         var created = 0
         var replaced = 0
         var skipped = 0
@@ -179,9 +206,41 @@ class BackupRepository(
             } else {
                 created++
             }
-            insertBook(raw.copy(title = title), groups)
+            insertBook(raw.copy(title = title), groups, styleMap)
         }
         RestoreResult(created = created, replaced = replaced, skipped = skipped)
+    }
+
+    /**
+     * 恢复文风档案：同一份备份里同名档案只建一份，本机已有的同名档案直接复用（不覆盖已有分析结果）；
+     * 新档案一律由数据库分配新 id，不用备份里的 id，避免与本机档案冲突。
+     */
+    private suspend fun restoreStyleProfiles(profiles: List<BackupStyleProfile>): Map<Long, Long> {
+        val idMap = mutableMapOf<Long, Long>()
+        profiles.forEach { raw ->
+            val name = raw.name.trim()
+            if (name.isBlank()) return@forEach
+            val existing = styleDao.findByName(name)
+            if (existing != null) {
+                if (raw.id != 0L) idMap[raw.id] = existing.id
+                return@forEach
+            }
+            val now = System.currentTimeMillis()
+            val newId = styleDao.insert(
+                StyleProfile(
+                    name = name,
+                    sourceType = StyleSourceType.fromKey(raw.sourceType).name,
+                    sourceMeta = raw.sourceMeta.ifBlank { "{}" },
+                    analysisJson = raw.analysisJson.ifBlank { "{}" },
+                    analysisVersion = raw.analysisVersion,
+                    modelName = raw.modelName,
+                    createdAt = raw.createdAt.takeIf { it > 0 } ?: now,
+                    updatedAt = raw.updatedAt.takeIf { it > 0 } ?: now
+                )
+            )
+            if (raw.id != 0L) idMap[raw.id] = newId
+        }
+        return idMap
     }
 
     private suspend fun exportPayload(): BackupPayload {
@@ -229,13 +288,27 @@ class BackupRepository(
                 },
                 outlineCategories = distinctCategories,
                 pinnedOutlineCategories = prefs.pinnedOutlineCategories(book.id).toList(),
-                outlineFields = fields
+                outlineFields = fields,
+                styleId = book.styleId
             )
         }
         return BackupPayload(
             exportedAt = System.currentTimeMillis(),
             appVersion = appVersionName(),
-            books = books
+            books = books,
+            styleProfiles = styleDao.getAll().map { profile ->
+                BackupStyleProfile(
+                    id = profile.id,
+                    name = profile.name,
+                    sourceType = profile.sourceType,
+                    sourceMeta = profile.sourceMeta,
+                    analysisJson = profile.analysisJson,
+                    analysisVersion = profile.analysisVersion,
+                    modelName = profile.modelName,
+                    createdAt = profile.createdAt,
+                    updatedAt = profile.updatedAt
+                )
+            }
         )
     }
 
@@ -247,7 +320,11 @@ class BackupRepository(
         bookDao.deleteById(bookId)
     }
 
-    private suspend fun insertBook(book: BackupBook, groups: MutableList<BookGroup>): Long {
+    private suspend fun insertBook(
+        book: BackupBook,
+        groups: MutableList<BookGroup>,
+        styleMap: Map<Long, Long>
+    ): Long {
         val groupId = book.groupName.trim().takeIf { it.isNotBlank() }?.let { name ->
             groups.firstOrNull { it.name == name }?.id ?: run {
                 val id = groupDao.insert(BookGroup(name = name, sortOrder = groups.size))
@@ -269,7 +346,9 @@ class BackupRepository(
                 pinned = false,
                 groupId = groupId,
                 createdAt = book.createdAt.takeIf { it > 0 } ?: now,
-                updatedAt = book.updatedAt.takeIf { it > 0 } ?: now
+                updatedAt = book.updatedAt.takeIf { it > 0 } ?: now,
+                // 按恢复时建立的 id 映射换算；映射不到（档案被跳过 / 旧备份）一律视为未绑定
+                styleId = styleMap[book.styleId] ?: 0
             )
         )
         val volumes = book.volumes.sortedBy { it.sortOrder }

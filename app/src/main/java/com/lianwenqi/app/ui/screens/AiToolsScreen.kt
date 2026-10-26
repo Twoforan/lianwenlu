@@ -27,7 +27,6 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -38,7 +37,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.RadioButton
 import androidx.compose.material3.RangeSlider
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SliderDefaults
@@ -71,7 +69,6 @@ import androidx.lifecycle.viewModelScope
 import com.lianwenqi.app.AppContainer
 import com.lianwenqi.app.ai.AiRequest
 import com.lianwenqi.app.ai.ChatTurn
-import com.lianwenqi.app.ai.RetrievalMode
 import com.lianwenqi.app.data.AiChapterImporter
 import com.lianwenqi.app.data.AiOutlineImporter
 import com.lianwenqi.app.data.GEN_CONTENT_WORDS_MAX
@@ -135,9 +132,6 @@ class AiToolsViewModel(private val container: AppContainer) : ViewModel() {
     val genContentWordRange: StateFlow<IntRange> =
         prefs.genContentWordRange.stateIn(viewModelScope, SharingStarted.Eagerly, 0..GEN_CONTENT_WORDS_MAX)
 
-    val genContentMemoryMode: StateFlow<RetrievalMode> =
-        prefs.genContentMemoryMode.stateIn(viewModelScope, SharingStarted.Eagerly, RetrievalMode.ASK)
-
     val genContentWithSummary: StateFlow<Boolean> =
         prefs.genContentWithSummary.stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
@@ -152,8 +146,6 @@ class AiToolsViewModel(private val container: AppContainer) : ViewModel() {
     fun setGenContentWordRange(min: Int, max: Int) =
         viewModelScope.launch { prefs.setGenContentWordRange(min, max) }
 
-    fun setGenContentMemoryMode(v: RetrievalMode) = viewModelScope.launch { prefs.setGenContentMemoryMode(v) }
-
     fun setGenContentWithSummary(v: Boolean) = viewModelScope.launch { prefs.setGenContentWithSummary(v) }
 
     fun setGenCarryHistory(v: Boolean) = viewModelScope.launch { prefs.setGenCarryHistory(v) }
@@ -166,7 +158,8 @@ class AiToolsViewModel(private val container: AppContainer) : ViewModel() {
         coverColor = r.coverColor,
         volumePrefix = r.volumePrefix,
         chapterPrefix = r.chapterPrefix,
-        groupId = r.groupId
+        groupId = r.groupId,
+        styleId = r.styleId
     )
 
     /** 复制封面图到应用私有目录，返回本地路径 */
@@ -454,7 +447,7 @@ fun AiToolsScreen(onBack: () -> Unit) {
                 }
             }
 
-            // 生成设置：生成梗概 / 生成正文的字数、范围、记忆检索与同时生成梗概
+            // 生成设置：生成梗概 / 生成正文的字数、限定范围与同时生成梗概
             Card(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
                 Row(
                     Modifier
@@ -466,7 +459,7 @@ fun AiToolsScreen(onBack: () -> Unit) {
                     Column(Modifier.weight(1f)) {
                         Text("生成设置", fontWeight = FontWeight.SemiBold)
                         Text(
-                            "生成梗概 / 生成正文的字数范围、限定范围、记忆检索与同时生成梗概",
+                            "生成梗概 / 生成正文的字数范围、限定范围与同时生成梗概",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -513,7 +506,8 @@ private val GenTrackIdle = Color(0xFFE8E4FF)
 private val GenCardBorder = Color(0xFFF1EDF1)
 
 /**
- * 生成设置：生成梗概 / 生成正文的字数范围、限定范围、记忆检索与同时生成梗概。
+ * 生成设置：生成梗概 / 生成正文的字数范围、限定范围与同时生成梗概。
+ * 记忆检索是否启用跟随 AI 面板的勾选，本页不再提供开关。
  * 版式对齐设计稿：奶油底 + 大圆角卡片 + 圆形淡紫图标徽标 + 淡紫滑块与数值药丸。
  *
  * 说明：请求的 max_tokens 由模型自身配置决定，这里的字数只写进提示词做硬约束；
@@ -525,7 +519,6 @@ private fun AiGenerateSettingsScreen(vm: AiToolsViewModel, onBack: () -> Unit) {
     val summaryRange by vm.genSummaryWordRange.collectAsState()
     val limitScope by vm.genSummaryLimitScope.collectAsState()
     val contentRange by vm.genContentWordRange.collectAsState()
-    val memoryMode by vm.genContentMemoryMode.collectAsState()
     val withSummary by vm.genContentWithSummary.collectAsState()
     val carryHistory by vm.genCarryHistory.collectAsState()
 
@@ -567,25 +560,15 @@ private fun AiGenerateSettingsScreen(vm: AiToolsViewModel, onBack: () -> Unit) {
                 )
             }
 
-            // 生成正文：字数区间 + 记忆检索
+            // 生成正文：字数区间 + 记忆检索说明（开关状态跟随 AI 面板的勾选）
             GenCard {
                 GenSectionHead(Icons.AutoMirrored.Filled.Article, "生成正文")
                 GenDesc("限定字数（0–$GEN_CONTENT_WORDS_MAX）：生成的正文要落在这个区间内；下限拉到 0 表示不约束下限。")
                 WordRangeSlider(contentRange, GEN_CONTENT_WORDS_MAX) { min, max ->
                     vm.setGenContentWordRange(min, max)
                 }
-
-                Spacer(Modifier.height(10.dp))
-                GenSectionHead(Icons.Filled.Search, "记忆检索")
-                GenDesc("生成正文前是否按本章梗概检索本书已写正文，命中片段作为参考资料一并生成（检索段数沿用长期记忆里的区块设置）。")
-                genMemoryOptions.forEach { option ->
-                    GenRadioOption(
-                        label = option.label,
-                        hint = option.hint,
-                        selected = memoryMode == option.value,
-                        onClick = { vm.setGenContentMemoryMode(option.value) }
-                    )
-                }
+                GenDesc("记忆检索跟随 AI 面板里「记忆检索」的勾选：勾选则生成正文前按本章梗概检索本书已写正文，" +
+                    "命中片段作为参考资料一并生成；取消勾选则不检索（检索段数沿用长期记忆里的区块设置）。")
             }
 
             // 生成正文的同时生成梗概
@@ -689,27 +672,6 @@ private fun GenSubSetting(
     }
 }
 
-/** 记忆检索的单选项：选中的整块淡紫底 */
-@Composable
-private fun GenRadioOption(label: String, hint: String, selected: Boolean, onClick: () -> Unit) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .background(if (selected) GenSelectedBg else Color.Transparent, RoundedCornerShape(15.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.Top
-    ) {
-        RadioButton(selected = selected, onClick = onClick)
-        Spacer(Modifier.width(6.dp))
-        Column(Modifier.weight(1f)) {
-            Text(label, color = GenInk, fontSize = 16.sp, fontWeight = FontWeight.Medium)
-            Spacer(Modifier.height(2.dp))
-            Text(hint, color = GenMuted, fontSize = 12.sp, lineHeight = 19.sp)
-        }
-    }
-}
-
 /** 整块可切换的开关卡：徽标 + 标题/说明 + 开关 */
 @Composable
 private fun GenToggleCard(
@@ -786,14 +748,6 @@ private fun WordRangeSlider(range: IntRange, cap: Int, onChange: (Int, Int) -> U
         )
     }
 }
-
-private data class GenMemoryOption(val value: RetrievalMode, val label: String, val hint: String)
-
-private val genMemoryOptions = listOf(
-    GenMemoryOption(RetrievalMode.ON, "开启", "每次生成正文前自动按本章梗概检索本书正文片段并注入参考资料"),
-    GenMemoryOption(RetrievalMode.OFF, "关闭", "不检索，只用本章梗概与本会话前缀生成"),
-    GenMemoryOption(RetrievalMode.ASK, "询问", "每次生成正文前弹窗询问是否启用（默认）")
-)
 
 /** 导入大纲弹窗：选书（可现场新建）+ 粘贴文本 + 解析导入 */
 @Composable

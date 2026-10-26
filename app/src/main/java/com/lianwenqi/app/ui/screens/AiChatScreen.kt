@@ -1047,6 +1047,8 @@ fun AiAssistantDrawer(
     onWriteToChapter: (String) -> Unit,
     /** 把「生成梗概」产出的梗概写回当前章节的梗概（经编辑器本地缓冲，避免被整章保存覆盖） */
     onGeneratedSummary: (String) -> Unit,
+    /** 跳转到本卷上一章节；没有上一章时提示 */
+    onPrevChapter: () -> Unit,
     /** 跳转到本卷下一章节；没有下一章时新建章节再跳转 */
     onNextChapter: () -> Unit,
     /** 进入当前章节的阅读预览 */
@@ -1070,8 +1072,8 @@ fun AiAssistantDrawer(
             modifier = Modifier.align(Alignment.CenterEnd)
         ) {
             AiAssistantPanel(
-                bookId, chapterId, onDismiss, onWriteToChapter, onGeneratedSummary, onNextChapter,
-                onPreview, onChapterRenamed
+                bookId, chapterId, onDismiss, onWriteToChapter, onGeneratedSummary,
+                onPrevChapter, onNextChapter, onPreview, onChapterRenamed
             )
         }
     }
@@ -1085,6 +1087,7 @@ private fun AiAssistantPanel(
     onDismiss: () -> Unit,
     onWriteToChapter: (String) -> Unit,
     onGeneratedSummary: (String) -> Unit,
+    onPrevChapter: () -> Unit,
     onNextChapter: () -> Unit,
     onPreview: () -> Unit,
     onChapterRenamed: (Long, String) -> Unit
@@ -1211,16 +1214,12 @@ private fun AiAssistantPanel(
                         Icon(Icons.Filled.Close, contentDescription = "关闭")
                     }
                 }
-                // 当前所在章节：长按可改章节名（保存后同步到书籍）
+                // 当前所在章节：长按章节名可改名（保存后同步到书籍）；右侧箭头切换上一章 / 下一章
                 val currentChapterTitle = chapters.firstOrNull { it.id == chapterId }?.title.orEmpty()
                 Row(
                     Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(10.dp))
-                        .combinedClickable(
-                            onClick = {},
-                            onLongClick = { renamingChapterId = chapterId }
-                        )
                         .padding(horizontal = 6.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -1235,7 +1234,25 @@ private fun AiAssistantPanel(
                         "当前章节：${currentChapterTitle.ifBlank { "未命名章节" }}",
                         style = MaterialTheme.typography.bodySmall,
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .weight(1f)
+                            .combinedClickable(
+                                onClick = {},
+                                onLongClick = { renamingChapterId = chapterId }
+                            )
+                    )
+                    // 上一章：没有上一章时由编辑器一侧提示
+                    ChapterSwitchArrow(
+                        icon = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
+                        desc = "上一章",
+                        onClick = onPrevChapter
+                    )
+                    // 下一章：没有下一章时由编辑器一侧新建章节再跳转
+                    ChapterSwitchArrow(
+                        icon = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        desc = "下一章",
+                        onClick = onNextChapter
                     )
                 }
             }
@@ -1431,19 +1448,21 @@ private fun AiAssistantPanel(
             }
             }
 
+            // 「文风样本」：与「记忆检索」同款的勾选占位，暂未接入任何功能
+            var styleSample by remember { mutableStateOf(false) }
             // 按钮行：按可用宽度等分容纳，不横向滚动
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                SelectorButton("上下文", openPanel == "context", Modifier.weight(1.14f)) {
+                SelectorButton("上下文", openPanel == "context", Modifier.weight(1f)) {
                     openPanel = if (openPanel == "context") null else "context"
                     manifestState = 0
                 }
-                SelectorButton("大纲", openPanel == "outline", Modifier.weight(0.94f)) {
+                SelectorButton("大纲", openPanel == "outline", Modifier.weight(0.88f)) {
                     openPanel = if (openPanel == "outline") null else "outline"
                     manifestState = 0
                 }
@@ -1453,10 +1472,15 @@ private fun AiAssistantPanel(
                     memoryRetrieval,
                     { vm.toggleMemoryRetrieval() },
                     enabled = memoryToolReady,
-                    modifier = Modifier.weight(1.06f)
+                    modifier = Modifier.weight(1.12f)
                 )
-                // 跳转到本卷下一章节；没有下一章时新建章节再跳转
-                SmallChip("下一章", false, { onNextChapter() }, modifier = Modifier.weight(0.86f))
+                // 「文风样本」：与「记忆检索」一样的勾选按钮，先占位（勾选状态仅本地保存，暂无实际作用）
+                SmallChip(
+                    "文风样本",
+                    styleSample,
+                    { styleSample = !styleSample },
+                    modifier = Modifier.weight(1.12f)
+                )
             }
 
             if (editingUserMsgId > 0L) {
@@ -1701,94 +1725,6 @@ private fun AiAssistantPanel(
                 onConfirm = { vm.confirmSummaryOutlines(picked.toList()) },
                 showCancel = true
             )
-        }
-
-        // 记忆检索询问（对齐设计稿）：关闭 / 开启；点 × / 遮罩 / 返回即终止整个生成流程
-        is GenerationDialog.AskMemoryRetrieval -> Dialog(
-            onDismissRequest = { vm.cancelGeneration() },
-            properties = DialogProperties(usePlatformDefaultWidth = false)
-        ) {
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 20.dp)
-                    .clip(RoundedCornerShape(24.dp))
-                    .background(PickerSurface)
-            ) {
-                Row(
-                    Modifier.fillMaxWidth().padding(start = 18.dp, end = 8.dp, top = 16.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Box(
-                        Modifier.size(44.dp).clip(CircleShape).background(PickerSoft),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            Icons.Filled.Search,
-                            contentDescription = null,
-                            tint = PickerPurple,
-                            modifier = Modifier.size(22.dp)
-                        )
-                    }
-                    Spacer(Modifier.width(12.dp))
-                    Text("是否启用记忆检索", color = PickerInk, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-                    Spacer(Modifier.weight(1f))
-                    IconButton(onClick = { vm.cancelGeneration() }) {
-                        Icon(Icons.Filled.Close, contentDescription = "关闭", tint = PickerMuted)
-                    }
-                }
-                Column(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 18.dp)
-                        .clip(RoundedCornerShape(18.dp))
-                        .background(PickerSoftRow)
-                        .padding(16.dp)
-                ) {
-                    Text(
-                        "本次将以本章梗概作为检索词：",
-                        color = PickerInk,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Spacer(Modifier.height(10.dp))
-                    Text(dialog.queryDigest, color = PickerMuted, fontSize = 13.sp, lineHeight = 20.sp)
-                    Spacer(Modifier.height(12.dp))
-                    Text(
-                        "开启：命中的本书正文片段作为参考资料一并生成；\n关闭：仅按本章梗概与本会话前缀生成。",
-                        color = PickerMuted,
-                        fontSize = 12.sp,
-                        lineHeight = 19.sp
-                    )
-                }
-                Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 14.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Box(
-                        Modifier
-                            .weight(1f)
-                            .clip(RoundedCornerShape(15.dp))
-                            .border(1.dp, PickerBorder, RoundedCornerShape(15.dp))
-                            .clickable { vm.chooseMemoryRetrieval(false) }
-                            .padding(vertical = 14.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text("关闭", color = PickerInk, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                    }
-                    Box(
-                        Modifier
-                            .weight(1f)
-                            .clip(RoundedCornerShape(15.dp))
-                            .background(Brush.linearGradient(listOf(PickerPurple2, PickerPurple)))
-                            .clickable { vm.chooseMemoryRetrieval(true) }
-                            .padding(vertical = 14.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text("开启", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                    }
-                }
-            }
         }
 
         is GenerationDialog.PickMemoryScope -> MemoryScopePickerDialog(
@@ -2153,6 +2089,14 @@ private fun AssistantBarAction(
     }
 }
 
+/** 侧边 AI 抽屉「当前章节」栏里的切章箭头（上一章 / 下一章） */
+@Composable
+private fun ChapterSwitchArrow(icon: ImageVector, desc: String, onClick: () -> Unit) {
+    IconButton(onClick = onClick, modifier = Modifier.size(30.dp)) {
+        Icon(icon, contentDescription = desc, modifier = Modifier.size(20.dp))
+    }
+}
+
 /** 面板顶部的紧凑筛选标签 */
 @Composable
 private fun SmallChip(
@@ -2245,7 +2189,7 @@ private fun GenPill(label: String, selected: Boolean, modifier: Modifier = Modif
 
 /**
  * 工具条上方的冒泡小弹窗：检索中 / 生成中等耗时过程的轻量提示。
- * 带阴影的药丸浮在对话区底部，避免挤占工具条宽度（尤其不再占用「下一章」所在的那一行）。
+ * 带阴影的药丸浮在对话区底部，避免挤占工具条宽度（尤其不再占用勾选框所在的那一行）。
  */
 @Composable
 private fun FloatingStatusBubble(text: String, modifier: Modifier = Modifier) {
@@ -2658,7 +2602,7 @@ private fun GenEntryRow(label: String, selected: Boolean, onToggle: () -> Unit) 
  * 下拉里展示全称「备注（显示名）+ 供应商」，与主界面模型下拉一致。
  */
 @Composable
-private fun ModelSelectorChip(
+internal fun ModelSelectorChip(
     models: List<AiModel>,
     providers: List<Provider>,
     activeId: Long,

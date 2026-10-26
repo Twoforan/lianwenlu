@@ -80,6 +80,45 @@ class GenerationPromptTest {
     }
 
     @Test
+    fun buildGenerationPrefixTurns_styleBlockComesFirst() {
+        val turns = buildGenerationPrefixTurns(
+            customPrefix = "自定义前缀",
+            reference = "书A",
+            styleBlock = "【文风约束】\n整体风格：短句为主"
+        )
+        assertEquals(listOf(ChatRole.SYSTEM, ChatRole.SYSTEM, ChatRole.SYSTEM), turns.map { it.role })
+        // 文风块冻结在会话前缀最前，先于自定义前缀与参考资料载入
+        assertTrue(turns[0].content.startsWith("【文风约束】"))
+        assertEquals("自定义前缀", turns[1].content)
+        assertTrue(turns[2].content.contains("书A"))
+        assertEquals(1, turns.sumOf { Regex("【文风约束】").findAll(it.content).count() })
+    }
+
+    @Test
+    fun buildGenerationPrefixTurns_blankStyleBlockKeepsLegacyOrder() {
+        val legacy = buildGenerationPrefixTurns("自定义前缀", "书A")
+        val blankStyle = buildGenerationPrefixTurns("自定义前缀", "书A", styleBlock = "")
+        assertEquals(legacy, blankStyle)
+        assertEquals(2, blankStyle.size)
+    }
+
+    @Test
+    fun buildContentTurns_neverCarriesStyleBlock() {
+        val turns = buildContentTurns("梗概", "大纲", "", "只写三个自然段", null)
+        assertTrue(turns.none { it.content.contains("【文风约束】") })
+        // 用户本次任务的明确要求原样保留
+        assertEquals("只写三个自然段", turns.last().content)
+    }
+
+    @Test
+    fun buildSummaryTurns_hasNoStyleInjectionPoint() {
+        // 内部剧情提纲不注入文风：构建结果不包含任何文风块
+        val turns = buildSummaryTurns("写梗概", 100..200, "【参考资料】书A", "第2章")
+        assertTrue(turns.none { it.content.contains("【文风约束】") })
+        assertEquals(3, turns.size)
+    }
+
+    @Test
     fun buildGenerationPrefixTurns_mirrorsChatBlockOrderAndHeader() {
         val turns = buildGenerationPrefixTurns(
             customPrefix = "前缀文本",

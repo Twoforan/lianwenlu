@@ -4,6 +4,7 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -16,6 +17,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
@@ -33,6 +35,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -47,10 +50,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.lianwenqi.app.data.entity.Book
 import com.lianwenqi.app.data.entity.BookGroup
+import com.lianwenqi.app.data.style.StyleLibraryState
 import com.lianwenqi.app.util.buildTitle
 import kotlinx.coroutines.launch
 import java.io.File
@@ -64,7 +69,9 @@ data class BookFormResult(
     val volumePrefix: String,
     val chapterPrefix: String,
     /** 所属分组 id，null 表示不分组 */
-    val groupId: Long?
+    val groupId: Long?,
+    /** 绑定的文风档案 id；0 表示不使用文风 */
+    val styleId: Long = 0
 )
 
 /**
@@ -76,6 +83,9 @@ fun BookFormDialog(
     dialogTitle: String,
     initial: Book?,
     groups: List<BookGroup>,
+    /** 非 null 时展示「文风绑定」选择项；新建与编辑书籍均传入 */
+    styleLibrary: StyleLibraryState? = null,
+    onRetryStyleProfiles: () -> Unit = {},
     onPickCover: (Uri, (String?) -> Unit) -> Unit,
     /** 现场新建分组，返回新分组 id（创建后自动选中） */
     onCreateGroup: suspend (String) -> Long,
@@ -89,6 +99,8 @@ fun BookFormDialog(
     var volumePrefix by remember { mutableStateOf(initial?.volumePrefix ?: "第%n卷") }
     var chapterPrefix by remember { mutableStateOf(initial?.chapterPrefix ?: "第%n章") }
     var groupId by remember { mutableStateOf(initial?.groupId) }
+    var styleId by remember { mutableStateOf(initial?.styleId ?: 0L) }
+    var showStylePicker by remember { mutableStateOf(false) }
     // 现场新建分组：输入框非 null 时展示
     var newGroupName by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
@@ -279,6 +291,69 @@ fun BookFormDialog(
                     }
                 }
 
+                if (styleLibrary != null) {
+                    SectionLabel("文风绑定")
+                    Text(
+                        if (initial == null) {
+                            "可选：为这本书绑定一个文风档案。仅建立关联，不会自动改变生成内容。"
+                        } else {
+                            "可更换或解除这本书的文风绑定。仅调整关联，不会改动正文或其他书籍。"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    val selectedStyle = styleLibrary.rows.firstOrNull { it.profile.id == styleId }
+                    // 已绑定但当前列表里查不到（档案被删除）或读取失败，都提示需要重新选择
+                    val styleMissing = styleId != 0L && !styleLibrary.loading && selectedStyle == null
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable { showStylePicker = true },
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                    ) {
+                        Row(
+                            Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    when {
+                                        styleId == 0L -> "不使用文风"
+                                        selectedStyle != null -> selectedStyle.profile.name
+                                        styleLibrary.loading -> "正在加载文风档案…"
+                                        styleLibrary.error != null ->
+                                            "无法确认当前文风档案，请点击「选择」重新读取"
+                                        else -> "所选文风档案已不存在，请重新选择"
+                                    },
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = if (styleMissing) {
+                                        MaterialTheme.colorScheme.error
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurface
+                                    },
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                if (styleId != 0L && selectedStyle != null) {
+                                    Text(
+                                        "已绑定文风档案",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                            Text(
+                                "选择",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
+                }
+
                 SectionLabel("标题前缀")
                 Text(
                     "新建分卷 / 章节时自动顺延编号：%n 阿拉伯数字，%N 中文数字。",
@@ -321,7 +396,8 @@ fun BookFormDialog(
                                 coverColor = color,
                                 volumePrefix = volumePrefix.ifBlank { "第%n卷" },
                                 chapterPrefix = chapterPrefix.ifBlank { "第%n章" },
-                                groupId = groupId
+                                groupId = groupId,
+                                styleId = styleId
                             )
                         )
                     }
@@ -334,6 +410,21 @@ fun BookFormDialog(
             TextButton(onClick = onDismiss, shape = RoundedCornerShape(12.dp)) { Text("取消") }
         }
     )
+
+    // 文风档案选择：取消时不改变原有选择
+    val library = styleLibrary
+    if (showStylePicker && library != null) {
+        StyleProfilePickerDialog(
+            state = library,
+            selectedId = styleId,
+            onRetry = onRetryStyleProfiles,
+            onConfirm = {
+                styleId = it
+                showStylePicker = false
+            },
+            onDismiss = { showStylePicker = false }
+        )
+    }
 }
 
 /** 弹窗内的小节标题 */

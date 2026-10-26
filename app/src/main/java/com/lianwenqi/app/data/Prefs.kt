@@ -11,10 +11,6 @@ import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
-import com.lianwenqi.app.ai.RETRIEVAL_ASK
-import com.lianwenqi.app.ai.RetrievalMode
-import com.lianwenqi.app.ai.retrievalModeOf
-import com.lianwenqi.app.ai.storage
 import com.lianwenqi.app.data.entity.ContextSnapshot
 import com.lianwenqi.app.data.entity.decodeContextSnapshot
 import com.lianwenqi.app.util.FormatSettings
@@ -128,7 +124,6 @@ class Prefs(private val context: Context) {
         val genSummaryLimitScope = booleanPreferencesKey("gen_summary_limit_scope")
         val genContentMinWords = intPreferencesKey("gen_content_min_words")
         val genContentMaxWords = intPreferencesKey("gen_content_max_words")
-        val genContentMemoryMode = stringPreferencesKey("gen_content_memory_mode")
         val genContentWithSummary = booleanPreferencesKey("gen_content_with_summary")
 
         // 生成工具（生成梗概 / 生成正文）的请求是否携带本会话历史对话（默认关闭）
@@ -243,10 +238,6 @@ class Prefs(private val context: Context) {
     val genContentWordRange: Flow<IntRange> = context.dataStore.data.map {
         wordsRange(it[K.genContentMinWords] ?: 0, it[K.genContentMaxWords] ?: GEN_CONTENT_WORDS_MAX, GEN_CONTENT_WORDS_MAX)
     }
-
-    /** 「生成正文」的记忆检索三态（开 / 关 / 询问，默认询问） */
-    val genContentMemoryMode: Flow<RetrievalMode> =
-        context.dataStore.data.map { retrievalModeOf(it[K.genContentMemoryMode] ?: RETRIEVAL_ASK) }
 
     /** 「生成正文」是否同时生成梗概（生成后静默写入本章梗概，默认关闭） */
     val genContentWithSummary: Flow<Boolean> =
@@ -421,7 +412,6 @@ class Prefs(private val context: Context) {
         it[K.genContentMinWords] = r.first
         it[K.genContentMaxWords] = r.last
     }
-    suspend fun setGenContentMemoryMode(v: RetrievalMode) = writePrefs { it[K.genContentMemoryMode] = v.storage }
     suspend fun setGenContentWithSummary(v: Boolean) = writePrefs { it[K.genContentWithSummary] = v }
     suspend fun setGenCarryHistory(v: Boolean) = writePrefs { it[K.genCarryHistory] = v }
 

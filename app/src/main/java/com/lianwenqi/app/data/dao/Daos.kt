@@ -16,6 +16,7 @@ import com.lianwenqi.app.data.entity.MemoryChunk
 import com.lianwenqi.app.data.entity.OutlineItem
 import com.lianwenqi.app.data.entity.Prompt
 import com.lianwenqi.app.data.entity.Provider
+import com.lianwenqi.app.data.entity.StyleProfile
 import com.lianwenqi.app.data.entity.Volume
 import kotlinx.coroutines.flow.Flow
 
@@ -81,6 +82,44 @@ interface BookDao {
     suspend fun touch(id: Long, time: Long, chapterId: Long?, chapterTitle: String?)
 
     @Query("DELETE FROM book WHERE id = :id")
+    suspend fun deleteById(id: Long)
+
+    /** 书籍的文风绑定；0 表示解绑 */
+    @Query("UPDATE book SET styleId = :styleId WHERE id = :id")
+    suspend fun setStyle(id: Long, styleId: Long)
+
+    /** 删除文风档案前，批量解绑所有引用它的书籍，避免留下无效绑定 */
+    @Query("UPDATE book SET styleId = 0 WHERE styleId = :styleId")
+    suspend fun clearStyle(styleId: Long)
+
+    /** 绑定该文风档案的书籍数量 */
+    @Query("SELECT COUNT(*) FROM book WHERE styleId = :styleId")
+    suspend fun countByStyle(styleId: Long): Int
+}
+
+/** 文风档案的读写 */
+@Dao
+interface StyleProfileDao {
+    @Query("SELECT * FROM style_profile ORDER BY updatedAt DESC, id DESC")
+    fun observeAll(): Flow<List<StyleProfile>>
+
+    @Query("SELECT * FROM style_profile ORDER BY updatedAt DESC, id DESC")
+    suspend fun getAll(): List<StyleProfile>
+
+    @Query("SELECT * FROM style_profile WHERE id = :id")
+    suspend fun getById(id: Long): StyleProfile?
+
+    /** 备份恢复时按名称复用同名档案 */
+    @Query("SELECT * FROM style_profile WHERE name = :name LIMIT 1")
+    suspend fun findByName(name: String): StyleProfile?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(profile: StyleProfile): Long
+
+    @Update
+    suspend fun update(profile: StyleProfile)
+
+    @Query("DELETE FROM style_profile WHERE id = :id")
     suspend fun deleteById(id: Long)
 }
 

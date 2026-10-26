@@ -429,7 +429,6 @@ class AiChatViewModel(
     private var generationJob: Job? = null
     private var generationCancelled = false
     private var generationOutlinePick: CompletableDeferred<List<Long>?>? = null
-    private var generationMemoryAsk: CompletableDeferred<Boolean?>? = null
     private var generationMemoryScopeAsk: CompletableDeferred<Set<Long>?>? = null
     private var generationSummaryFailed: CompletableDeferred<SummaryFailureChoice>? = null
 
@@ -549,7 +548,8 @@ class AiChatViewModel(
     }
 
     /**
-     * 侧边抽屉「生成正文」：按固定顺序一次性弹完所有决策弹窗（梗概标签多选 → 记忆检索询问），
+     * 侧边抽屉「生成正文」：按固定顺序一次性弹完所有决策弹窗（梗概标签多选 → 记忆检索范围），
+     * 记忆检索是否启用直接跟随 AI 面板的「记忆检索」勾选，不再弹窗询问；
      * 之后进入 Executing 只读执行；任一弹窗取消即整体终止。
      */
     fun startGenerateContent(onSummary: (String) -> Unit) = launchGeneration { sid ->
@@ -563,7 +563,8 @@ class AiChatViewModel(
             noticeThenCancel("请在章节编辑页使用「生成正文」")
             return@launchGeneration
         }
-        val chapterTitle = bookRepository.getChapter(chapterId)?.title.orEmpty()
+        val chapter = bookRepository.getChapter(chapterId)
+        val chapterTitle = chapter?.title.orEmpty()
         // 先固定本轮提示词：后续弹窗 / 生成期间输入框的变化不再影响本轮实际发送的内容
         val userPrompt = input.value
         val withSummary = prefs.genContentWithSummary.first()
@@ -577,24 +578,18 @@ class AiChatViewModel(
             }
             GenerationMode.CONTENT_ONLY
         }
-        val memoryCfg = prefs.genContentMemoryMode.first()
         val memoryScopeLimit = prefs.memoryScopeLimitEnabled.first()
+        // 记忆检索直接跟随 AI 面板里「记忆检索」的勾选：勾选即开启，取消勾选即关闭
+        val memory = if (memoryRetrievalEnabled.value) RetrievalMode.ON else RetrievalMode.OFF
         var picked = emptyList<Long>()
-        var memory = if (memoryCfg == RetrievalMode.ON) RetrievalMode.ON else RetrievalMode.OFF
-        // ① 选梗概参考标签 ② 询问记忆检索：顺序固定，前一个确定后才弹下一个；任一取消即整体终止
-        for (kind in contentDialogOrder(mode, limitScope, memoryCfg == RetrievalMode.ASK)) {
+        // ① 选梗概参考标签：顺序固定，取消即整体终止
+        for (kind in contentDialogOrder(mode, limitScope)) {
             when (kind) {
                 GenerationDialogKind.PICK_SUMMARY_OUTLINES ->
                     picked = askSummaryOutlines() ?: return@launchGeneration
-                GenerationDialogKind.ASK_MEMORY ->
-                    memory = if (askMemoryRetrieval(retrievalQueryDigest(chapterId, picked)) == true) {
-                        RetrievalMode.ON
-                    } else {
-                        RetrievalMode.OFF
-                    }
             }
         }
-        // ③ 开启「记忆检索是否限定范围」时，确认启用检索后再选择检索章节（只列已向量化章节）
+        // ② 记忆检索已勾选且开启「记忆检索是否限定范围」时，选择检索章节（只列已向量化章节）
         var memoryChapterIds: Set<Long>? = null
         if (memory == RetrievalMode.ON && memoryScopeLimit) {
             val memoryBookId = currentMemoryBookId()
@@ -688,18 +683,17 @@ class AiChatViewModel(
             chatRepository.updateSessionPrefix(sid, sp.encode())
         }
 
-        val turns = assembleGenerationTurns(
-            prefix, ref, history,
-            buildContentTurns(
-                summary = summary,
-                // 生成专用块只带本轮新增的大纲资料；已冻结的会话前缀已在前段共享块里
-                outlineSlot = listOf(ref.extra, adaptive).filter { it.isNotBlank() }.joinToString("\n\n"),
-                memoryBlock = memoryRef.text,
-                userInput = userPrompt,
-                range = plan.contentWordRange,
-                chapterTitle = chapterTitle
-            )
+        // 正文专用块：文风约束已冻结在会话前缀首块（见 [prepareSessionPrefix]），这里不再重复注入
+        val contentTurns = buildContentTurns(
+            summary = summary,
+            // 生成专用块只带本轮新增的大纲资料；已冻结的会话前缀已在前段共享块里
+            outlineSlot = listOf(ref.extra, adaptive).filter { it.isNotBlank() }.joinToString("\n\n"),
+            memoryBlock = memoryRef.text,
+            userInput = userPrompt,
+            range = plan.contentWordRange,
+            chapterTitle = chapterTitle
         )
+        val turns = assembleGenerationTurns(prefix, ref, history, contentTurns)
         // 先落「用户消息」：输入框提示词 + 「生成正文」标记；本轮新增的参考资料随消息落库成为历史的一部分。
         // 放在模型请求之前，回答位置才能就地显示流式输出（「正在生成」）。
         // 若用户点了某条历史提示词的「编辑」后再生成，则改写那一轮并追加新回答版本（见 [openGenerationRound]）
@@ -773,12 +767,6 @@ class AiChatViewModel(
         generationOutlinePick = null
     }
 
-    /** 记忆检索询问弹窗：开启 / 关闭；取消（含 onDismiss）走 [cancelGeneration] */
-    fun chooseMemoryRetrieval(enable: Boolean) {
-        generationMemoryAsk?.complete(enable)
-        generationMemoryAsk = null
-    }
-
     /** 生成路径的记忆检索范围弹窗：确定后返回选中的章节 */
     fun confirmGenerationMemoryScope(ids: Set<Long>) {
         generationMemoryScopeAsk?.complete(ids)
@@ -801,8 +789,6 @@ class AiChatViewModel(
         generationCancelled = true
         generationOutlinePick?.complete(null)
         generationOutlinePick = null
-        generationMemoryAsk?.complete(null)
-        generationMemoryAsk = null
         generationMemoryScopeAsk?.complete(null)
         generationMemoryScopeAsk = null
         generationSummaryFailed?.complete(SummaryFailureChoice.CANCEL)
@@ -933,21 +919,6 @@ class AiChatViewModel(
             if (generationOutlinePick === deferred) {
                 generationOutlinePick = null
                 if (_generationDialog.value === GenerationDialog.PickSummaryOutlines) _generationDialog.value = null
-            }
-        }
-    }
-
-    private suspend fun askMemoryRetrieval(digest: String): Boolean? {
-        val deferred = CompletableDeferred<Boolean?>()
-        generationMemoryAsk = deferred
-        _generationState.value = FlowState.CollectingConfig
-        _generationDialog.value = GenerationDialog.AskMemoryRetrieval(digest)
-        return try {
-            deferred.await()
-        } finally {
-            if (generationMemoryAsk === deferred) {
-                generationMemoryAsk = null
-                if (_generationDialog.value is GenerationDialog.AskMemoryRetrieval) _generationDialog.value = null
             }
         }
     }
@@ -1321,7 +1292,8 @@ class AiChatViewModel(
         addAll(
             buildGenerationPrefixTurns(
                 customPrefix = prefix.custom,
-                reference = ref.sharedReference
+                reference = ref.sharedReference,
+                styleBlock = prefix.style
             )
         )
         if (history.prior.isNotBlank()) add(ChatTurn(ChatRole.SYSTEM, PRIOR_CONTEXT_HEADER + history.prior))
@@ -1362,17 +1334,6 @@ class AiChatViewModel(
         fullPrompt = fullPrompt,
         genKind = genKind
     )
-
-    /** 记忆检索询问弹窗里展示的检索词摘要：以本章梗概（+ 选定标签）构造，超长截断 */
-    private suspend fun retrievalQueryDigest(chapterId: Long, outlineIds: List<Long>): String {
-        val summary = bookRepository.getChapter(chapterId)?.summary.orEmpty().trim()
-        if (summary.isBlank()) return "（本章尚无梗概，将改用你在输入框中填写的内容作为检索词）"
-        val heads = outlineIds.mapNotNull { id ->
-            _outline.value.firstOrNull { it.id == id }?.let { outlineHeadOf(it) }
-        }
-        val q = buildRetrievalQuery(summary, heads).replace('\n', ' ')
-        return if (q.length > 120) q.take(120) + "…" else q
-    }
 
     // ---------------- AI 工具 ----------------
 
@@ -2059,8 +2020,6 @@ class AiChatViewModel(
         generationJob = null
         generationOutlinePick?.complete(null)
         generationOutlinePick = null
-        generationMemoryAsk?.complete(null)
-        generationMemoryAsk = null
         generationMemoryScopeAsk?.complete(null)
         generationMemoryScopeAsk = null
         generationSummaryFailed?.complete(SummaryFailureChoice.CANCEL)
@@ -2493,6 +2452,7 @@ class AiChatViewModel(
             variantIndex = variantIndex,
             writeOutlineTool = writeOutlineToolOn(),
             chapterImportTool = chapterImportToolOn(),
+            stylePrefix = p.style,
             prefixText = p.custom,
             referencePrefix = p.reference,
             priorContext = priorContext,
@@ -2532,7 +2492,7 @@ class AiChatViewModel(
     /**
      * 会话级前缀：区分「一开始的上下文预设」与「后续新勾选内容」的注入位置。
      * - 首轮（[SessionPrefix.initialized] 为 false）：把当时勾选的书籍 / 大纲 / 章节冻结成前置参考资料
-     *   预设块，本轮不产生尾部追加文本。
+     *   预设块，本轮不产生尾部追加文本；同时把当前书籍的文风约束冻结为前缀首块。
      * - 之后每轮：只有「重新勾选」（上次没勾、本次勾）的条目才处理 —— 已在预设内的条目对比内容后
      *   原位替换；从未冻结过的新条目渲染成文本作为「尾部追加」返回，由调用方挂到当轮用户消息尾端
      *   （成为历史对话的一部分），从而不破坏「预设 + 历史对话」的前缀字节结构。
@@ -2551,6 +2511,16 @@ class AiChatViewModel(
         if (firstTime) {
             // 首次建立前缀时把设置里的「自定义前缀」取一次，之后冻结在本会话内
             sp = sp.copy(custom = prefs.prefixCustomText.first().trim(), initialized = true)
+        }
+        // 文风块冻结在会话前缀的首块：读到可用文风后不再随档案编辑 / 换绑变化；
+        // 为空（未绑定 / 当时读取失败）时继续尝试，避免会话建立后绑定文风却一直不生效
+        if (sp.style.isBlank()) {
+            val styleBookId = session?.bookId
+                ?: fixedChapterId?.let { bookRepository.getChapter(it)?.bookId }
+                ?: defaultBookId
+                ?: selectedBookIds.value.singleOrNull()
+            val styleBlock = container.styleConstraintLoader.apply(styleBookId).block
+            if (styleBlock.isNotBlank()) sp = sp.copy(style = styleBlock)
         }
 
         // 本轮「重新勾选」的新条目（渲染后追加到历史对话尾端，成为历史的一部分）
@@ -2662,6 +2632,7 @@ class AiChatViewModel(
         val appended = sp.renderEntries(newBooks, newOutlines, newChapters)
         return PreparedPrefix(
             custom = sp.custom,
+            style = sp.style,
             reference = sp.renderReference(includeChapters = contextOn, includeOutlines = outlineOn),
             contextOn = contextOn,
             outlineOn = outlineOn,
@@ -2708,6 +2679,7 @@ class AiChatViewModel(
         val sp = SessionPrefix.decode(chatRepository.getSession(sid)?.prefix.orEmpty())
         return PreparedPrefix(
             custom = sp.custom,
+            style = sp.style,
             reference = sp.renderReference(includeChapters = contextOn, includeOutlines = outlineOn),
             contextOn = contextOn,
             outlineOn = outlineOn,
@@ -2764,6 +2736,8 @@ class AiChatViewModel(
     /** 会话前缀准备结果：自定义前缀文本 + 前置参考资料 + 两个开关状态 + 本轮尾部追加文本 */
     private data class PreparedPrefix(
         val custom: String,
+        /** 已冻结的文风约束块：会话前缀的首块，为空表示本次没有可用文风 */
+        val style: String = "",
         val reference: String,
         val contextOn: Boolean,
         val outlineOn: Boolean,

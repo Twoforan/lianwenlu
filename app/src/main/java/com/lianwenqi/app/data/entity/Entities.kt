@@ -1,5 +1,6 @@
 package com.lianwenqi.app.data.entity
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
@@ -36,8 +37,60 @@ data class Book(
     val updatedAt: Long = System.currentTimeMillis(),
     /** 上次编辑的章节，用于书架展示 */
     val lastChapterId: Long? = null,
-    val lastChapterTitle: String? = null
+    val lastChapterTitle: String? = null,
+    /** 绑定的文风档案 id；0 表示未绑定（不建外键，引用一致性由 StyleRepository 保证） */
+    @ColumnInfo(defaultValue = "0")
+    val styleId: Long = 0
 )
+
+/** 文风样本来源类型 */
+enum class StyleSourceType(val label: String) {
+    /** 由整本书文件抽取样本 */
+    WHOLE_BOOK("整本书文件"),
+    /** 由多个章节抽取样本 */
+    CHAPTERS("多个章节"),
+    /** 手动创建（没有样本文本） */
+    MANUAL("手动创建");
+
+    companion object {
+        /** 解析存储值；未知值回落到 [MANUAL]，保证旧数据与未来新增类型都能读 */
+        fun fromKey(key: String): StyleSourceType =
+            entries.firstOrNull { it.name == key } ?: MANUAL
+    }
+}
+
+/**
+ * 文风档案：从样本文本分析得到、可复用的结构化文风结果。
+ * 只保存分析结果与来源元数据，不保存整本书 / 章节的原始正文。
+ */
+@Entity(tableName = "style_profile")
+data class StyleProfile(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val name: String,
+    /** 来源类型存储值，见 [StyleSourceType] */
+    val sourceType: String = StyleSourceType.MANUAL.name,
+    /** 来源元数据（JSON 对象）：文件名 / 章节数 / 样本字数 / 抽样范围等，不含正文 */
+    val sourceMeta: String = "{}",
+    /** 结构化分析结果（JSON 对象），大小上限见 [MAX_ANALYSIS_JSON_BYTES] */
+    val analysisJson: String = "{}",
+    /** 分析模板版本号，用于区分不同版本的分析格式 */
+    val analysisVersion: Int = 1,
+    /** 生成该档案时使用的模型标识 / 名称（仅作历史记录，不存任何密钥） */
+    val modelName: String = "",
+    val createdAt: Long = System.currentTimeMillis(),
+    val updatedAt: Long = System.currentTimeMillis()
+) {
+    val sourceTypeEnum: StyleSourceType get() = StyleSourceType.fromKey(sourceType)
+
+    companion object {
+        /** analysisJson 字节上限（约 32KB）；超限由 StyleRepository 明确报错，不静默截断 */
+        const val MAX_ANALYSIS_JSON_BYTES = 32 * 1024
+        /** sourceMeta 字节上限 */
+        const val MAX_SOURCE_META_BYTES = 8 * 1024
+        /** 档案名称长度上限 */
+        const val MAX_NAME_LENGTH = 100
+    }
+}
 
 /** 分卷 */
 @Entity(tableName = "volume", indices = [Index("bookId")])
@@ -338,6 +391,12 @@ data class PrefixEntry(
 data class SessionPrefix(
     /** 自定义前缀（纯文本）：建立前缀时从设置取一次后冻结在本会话，之后不随设置变化 */
     val custom: String = "",
+    /**
+     * 文风约束块（纯文本）：会话前缀的**首块**，优先级高于自定义前缀与参考资料。
+     * 首次能读到可用文风时冻结在这里，之后不随档案编辑 / 换绑变化；
+     * 为空表示尚未冻结（未绑定或当时读取失败），下次发送会再尝试读取。
+     */
+    val style: String = "",
     /** 是否已建立：为 false 时下次发送才会取一次设置里的自定义前缀 */
     val initialized: Boolean = false,
     /**

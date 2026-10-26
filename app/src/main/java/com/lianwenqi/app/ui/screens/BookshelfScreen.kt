@@ -111,6 +111,7 @@ fun BookshelfScreen(
     val sortMode by vm.sortMode.collectAsState()
     val sortAsc by vm.sortAsc.collectAsState()
     val groups by vm.groups.collectAsState()
+    val styleLibrary by vm.styleLibrary.collectAsState()
 
     var showCreate by remember { mutableStateOf(false) }
     var showMoreMenu by remember { mutableStateOf(false) }
@@ -414,39 +415,69 @@ fun BookshelfScreen(
             dialogTitle = "新建书籍",
             initial = null,
             groups = groups,
+            styleLibrary = styleLibrary,
+            onRetryStyleProfiles = vm::retryStyleProfiles,
             onPickCover = { uri, cb -> vm.pickCover(uri, cb) },
             onCreateGroup = { vm.createGroupAndGet(it) },
             onConfirm = { r ->
-                // 新建后停留在书架，由列表刷新显示新书
-                vm.createBook(r.title, r.intro, r.coverPath, r.coverColor, r.volumePrefix, r.chapterPrefix, r.groupId) { _ ->
-                    showCreate = false
-                }
+                // 创建成功后停留在书架，由列表刷新显示新书；失败时保留弹窗并提示原因
+                vm.createBook(
+                    title = r.title,
+                    intro = r.intro,
+                    coverPath = r.coverPath,
+                    coverColor = r.coverColor,
+                    volumePrefix = r.volumePrefix,
+                    chapterPrefix = r.chapterPrefix,
+                    groupId = r.groupId,
+                    styleId = r.styleId,
+                    onCreated = { showCreate = false },
+                    onError = { message ->
+                        Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                    }
+                )
             },
             onDismiss = { showCreate = false }
         )
     }
 
-    // 编辑书籍：封面 / 书名 / 简介 / 分组 / 前缀
+    // 编辑书籍：封面 / 书名 / 简介 / 分组 / 前缀 / 文风绑定（换绑或解除绑定）
     editBookTarget?.let { target ->
         BookFormDialog(
             dialogTitle = "编辑书籍",
             initial = target,
             groups = groups,
+            styleLibrary = styleLibrary,
+            onRetryStyleProfiles = vm::retryStyleProfiles,
             onPickCover = { uri, cb -> vm.pickCover(uri, cb) },
             onCreateGroup = { vm.createGroupAndGet(it) },
             onConfirm = { r ->
+                // 保存成功后关闭弹窗；失败时保留弹窗与原绑定，并提示原因
                 vm.updateBook(
-                    target.copy(
-                        title = r.title,
-                        intro = r.intro,
-                        coverPath = r.coverPath,
-                        coverColor = r.coverColor,
-                        volumePrefix = r.volumePrefix,
-                        chapterPrefix = r.chapterPrefix,
-                        groupId = r.groupId
-                    )
+                    bookId = target.id,
+                    title = r.title,
+                    intro = r.intro,
+                    coverPath = r.coverPath,
+                    coverColor = r.coverColor,
+                    volumePrefix = r.volumePrefix,
+                    chapterPrefix = r.chapterPrefix,
+                    groupId = r.groupId,
+                    styleId = r.styleId,
+                    onUpdated = {
+                        editBookTarget = null
+                        // 文风块在会话前缀里冻结：换绑 / 解绑只影响之后新建的对话
+                        if (r.styleId != target.styleId) {
+                            val message = if (r.styleId == 0L) {
+                                "文风已解绑，需新建对话后才会生效"
+                            } else {
+                                "文风已换绑，需新建对话后才会生效"
+                            }
+                            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                        }
+                    },
+                    onError = { message ->
+                        Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                    }
                 )
-                editBookTarget = null
             },
             onDismiss = { editBookTarget = null }
         )

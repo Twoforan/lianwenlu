@@ -37,6 +37,9 @@ import com.lianwenqi.app.ui.screens.MemorySettingsScreen
 import com.lianwenqi.app.ui.screens.PrefixManageScreen
 import com.lianwenqi.app.ui.screens.ReaderScreen
 import com.lianwenqi.app.ui.screens.SettingsScreen
+import com.lianwenqi.app.ui.screens.StyleLibraryScreen
+import com.lianwenqi.app.ui.screens.StyleProfileDetailScreen
+import com.lianwenqi.app.ui.screens.StyleSettingsScreen
 
 object Routes {
     const val SHELL = "shell"
@@ -48,6 +51,9 @@ object Routes {
     const val PREFIX_MANAGE = "prefix"
     const val MEMORY = "memory"
     const val MEMORY_PROGRESS = "memoryprogress"
+    const val STYLE = "style"
+    const val STYLE_LIBRARY = "stylelibrary"
+    const val STYLE_DETAIL = "style/{profileId}"
     const val UPDATE = "update"
     const val MANUAL = "manual"
 
@@ -55,6 +61,7 @@ object Routes {
     fun editor(bookId: Long, chapterId: Long) = "editor/$bookId/$chapterId"
     fun reader(bookId: Long, chapterId: Long) = "reader/$bookId/$chapterId"
     fun bookSearch(bookId: Long) = "booksearch/$bookId"
+    fun styleProfile(profileId: Long) = "style/$profileId"
 }
 
 private data class TabItem(val route: String, val label: String, val icon: ImageVector)
@@ -88,6 +95,32 @@ fun RootNavHost() {
 
         composable(Routes.MEMORY_PROGRESS) {
             MemoryProgressScreen(onBack = { rootNav.popBackStack() })
+        }
+
+        composable(Routes.STYLE) {
+            StyleSettingsScreen(
+                onBack = { rootNav.popBackStack() },
+                onOpenLibrary = { rootNav.navigate(Routes.STYLE_LIBRARY) }
+            )
+        }
+
+        composable(Routes.STYLE_LIBRARY) {
+            StyleLibraryScreen(
+                onBack = { rootNav.popBackStack() },
+                onOpenProfile = { profileId -> rootNav.navigate(Routes.styleProfile(profileId)) },
+                // 新建档案复用文风配置页的样本导入与分析流程
+                onCreate = { rootNav.popBackStack() }
+            )
+        }
+
+        composable(
+            Routes.STYLE_DETAIL,
+            arguments = listOf(navArgument("profileId") { type = NavType.LongType })
+        ) { entry ->
+            StyleProfileDetailScreen(
+                profileId = entry.arguments?.getLong("profileId") ?: 0L,
+                onBack = { rootNav.popBackStack() }
+            )
         }
 
         composable(Routes.UPDATE) {
@@ -212,6 +245,7 @@ private fun MainShell(rootNav: NavHostController) {
                     onOpenAiTools = { rootNav.navigate(Routes.AI_TOOLS) },
                     onOpenPrefix = { rootNav.navigate(Routes.PREFIX_MANAGE) },
                     onOpenMemory = { rootNav.navigate(Routes.MEMORY) },
+                    onOpenStyle = { rootNav.navigate(Routes.STYLE) },
                     onOpenManual = { rootNav.navigate(Routes.MANUAL) },
                     onOpenUpdate = { rootNav.navigate(Routes.UPDATE) }
                 )

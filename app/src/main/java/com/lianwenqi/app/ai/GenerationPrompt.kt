@@ -34,7 +34,7 @@ private fun taskHead(chapterTitle: String, action: String): String =
     else "你的任务：现在撰写的是「${chapterTitle.trim()}」，请$action。\n"
 
 /**
- * 生成请求与聊天请求共用的前段块：自定义前缀 → 「以下是参考资料」。
+ * 生成请求与聊天请求共用的前段块：文风约束（会话内冻结）→ 自定义前缀 → 「以下是参考资料」。
  * 顺序与 [com.lianwenqi.app.data.SendChatMessageUseCase] 组装聊天请求时完全一致，
  * 用来让两边命中同一段供应商侧前缀缓存；生成专用块（[buildSummaryTurns] / [buildContentTurns]）
  * 在本函数结果之后追加（需要携带历史对话时，历史插在两者中间）。
@@ -43,8 +43,11 @@ private fun taskHead(chapterTitle: String, action: String): String =
  */
 fun buildGenerationPrefixTurns(
     customPrefix: String,
-    reference: String
+    reference: String,
+    styleBlock: String = ""
 ): List<ChatTurn> = buildList {
+    // 文风块最优先：冻结在会话前缀的最前面，先于自定义前缀与参考资料载入
+    if (styleBlock.isNotBlank()) add(ChatTurn(ChatRole.SYSTEM, styleBlock))
     if (customPrefix.isNotBlank()) add(ChatTurn(ChatRole.SYSTEM, customPrefix))
     if (reference.isNotBlank()) add(ChatTurn(ChatRole.SYSTEM, REFERENCE_BLOCK_HEADER + reference))
 }
@@ -108,6 +111,8 @@ fun buildSummaryTurns(
  * 生成正文的 messages，块顺序固定为：
  * 系统写作指令 → 本章梗概槽位 → 大纲 / 人物设定槽位 → 记忆检索参考资料块（仅启用时）→ 用户即时输入。
  * （调用方可在本块之前插入「前情提要」参考资料块，见 [PRIOR_CONTEXT_HEADER]。）
+ *
+ * 文风约束块不在这里：它已冻结进会话前缀，由 [buildGenerationPrefixTurns] 排在最前载入。
  *
  * 参考资料各块独立成段、顺序稳定：同一章重新生成正文时只有最后一句用户输入会变，
  * 前面部分逐字节一致，供应商侧前缀缓存可持续命中。

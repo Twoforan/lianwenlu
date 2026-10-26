@@ -28,8 +28,10 @@ android {
         applicationId = "com.lianwenqi.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 67
-        versionName = "4.5.2"
+        versionCode = 68
+        versionName = "4.5.3"
+
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         vectorDrawables { useSupportLibrary = true }
 
@@ -135,4 +137,11 @@ dependencies {
     // JVM 单元测试（手写 fake，不用 Mockito/MockK）
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.0")
+
+    // 仪器测试：Room 数据层与数据库迁移验证（需连接设备 / 模拟器）
+    androidTestImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test:core-ktx:1.6.1")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.0")
 }

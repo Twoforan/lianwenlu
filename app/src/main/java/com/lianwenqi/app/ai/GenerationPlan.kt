@@ -1,47 +1,24 @@
 package com.lianwenqi.app.ai
 
-/** 「生成正文」时记忆检索的配置三态：开 / 关 / 询问 */
-enum class RetrievalMode { ON, OFF, ASK }
-
-/** [RetrievalMode] 在 DataStore 里的存储值 */
-const val RETRIEVAL_ON = "on"
-const val RETRIEVAL_OFF = "off"
-const val RETRIEVAL_ASK = "ask"
-
-/** 存储值 → 三态（未知值回退为「询问」） */
-fun retrievalModeOf(storage: String): RetrievalMode = when (storage) {
-    RETRIEVAL_ON -> RetrievalMode.ON
-    RETRIEVAL_OFF -> RetrievalMode.OFF
-    else -> RetrievalMode.ASK
-}
-
-/** 三态 → 存储值 */
-val RetrievalMode.storage: String
-    get() = when (this) {
-        RetrievalMode.ON -> RETRIEVAL_ON
-        RetrievalMode.OFF -> RETRIEVAL_OFF
-        RetrievalMode.ASK -> RETRIEVAL_ASK
-    }
+/** 「生成正文」时的记忆检索配置：开 / 关（直接取 AI 面板里「记忆检索」的勾选状态） */
+enum class RetrievalMode { ON, OFF }
 
 /** 生成正文「一次性收集」阶段要弹出的弹窗类型 */
-enum class GenerationDialogKind { PICK_SUMMARY_OUTLINES, ASK_MEMORY }
+enum class GenerationDialogKind { PICK_SUMMARY_OUTLINES }
 
 /**
- * 生成正文「一次性收集」阶段的弹窗顺序，**顺序固定**，前一个确定后才弹下一个：
- * ① 选梗概参考标签（仅「同时生成梗概」且「限定梗概范围」开启时）；
- * ② 询问是否启用记忆检索（仅配置为「询问」时）。
+ * 生成正文「一次性收集」阶段的弹窗顺序，**顺序固定**：
+ * 选梗概参考标签（仅「同时生成梗概」且「限定梗概范围」开启时）。
+ * 记忆检索不再弹窗询问，直接按 AI 面板里「记忆检索」的勾选状态决定。
  * 返回空列表表示无需弹窗，可直接进入执行阶段。
  */
 fun contentDialogOrder(
     mode: GenerationMode,
-    limitSummaryScope: Boolean,
-    memoryAsk: Boolean
+    limitSummaryScope: Boolean
 ): List<GenerationDialogKind> = buildList {
     if (mode == GenerationMode.CONTENT_WITH_SUMMARY && limitSummaryScope) {
         add(GenerationDialogKind.PICK_SUMMARY_OUTLINES)
     }
-    // 记忆检索只服务于生成正文，「生成梗概」不涉及
-    if (memoryAsk && mode != GenerationMode.SUMMARY_ONLY) add(GenerationDialogKind.ASK_MEMORY)
 }
 
 /** 单次生成的模式 */
@@ -85,7 +62,7 @@ data class GenerationPlan(
     val contentWordRange: IntRange?,
     /** 限定梗概范围时用户选中的大纲条目 id；非限定模式为空 */
     val selectedOutlineIds: List<Long> = emptyList(),
-    /** 已从 ASK 解析为 ON/OFF 的最终决策 */
+    /** 本次是否启用记忆检索（直接取 AI 面板「记忆检索」的勾选状态） */
     val memoryRetrieval: RetrievalMode = RetrievalMode.OFF,
     /** 用户选定的记忆检索章节范围；null 表示全书章节 */
     val memoryChapterIds: Set<Long>? = null
@@ -108,9 +85,6 @@ data class MemoryScopePick(
 sealed interface GenerationDialog {
     /** 限定梗概范围：让用户按大纲条目多选，确定后作为参考资料 */
     data object PickSummaryOutlines : GenerationDialog
-
-    /** 询问是否启用记忆检索；[queryDigest] 展示将以本章梗概构造的检索 query 摘要 */
-    data class AskMemoryRetrieval(val queryDigest: String) : GenerationDialog
 
     /** 开启「记忆检索是否限定范围」时，确认启用检索后选择检索章节 */
     data class PickMemoryScope(val pick: MemoryScopePick) : GenerationDialog

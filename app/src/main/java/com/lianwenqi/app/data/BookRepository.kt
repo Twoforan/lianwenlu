@@ -27,6 +27,7 @@ class BookRepository(private val db: AppDatabase) {
     private val chapterDao = db.chapterDao()
     private val outlineDao = db.outlineDao()
     private val groupDao = db.bookGroupDao()
+    private val styleProfileDao = db.styleProfileDao()
     // 删除章节 / 书籍 / 合并章节时需要同步清理其长期记忆向量块，避免已删内容仍被检索召回
     private val memoryChunkDao = db.memoryChunkDao()
 
@@ -55,7 +56,10 @@ class BookRepository(private val db: AppDatabase) {
 
     suspend fun allBooks(): List<Book> = bookDao.getAll()
 
-    /** 新建书籍：同时创建首卷与首章 */
+    /**
+     * 新建书籍：同时创建首卷与首章。[styleId] 为 0 表示不绑定文风档案。
+     * 绑定非 0 档案时在同一事务内校验档案存在，避免写入悬空引用。
+     */
     suspend fun createBook(
         title: String,
         intro: String,
@@ -63,8 +67,12 @@ class BookRepository(private val db: AppDatabase) {
         coverColor: Int,
         volumePrefix: String,
         chapterPrefix: String,
-        groupId: Long? = null
+        groupId: Long? = null,
+        styleId: Long = 0
     ): Long = db.withTransaction {
+        if (styleId != 0L) {
+            requireNotNull(styleProfileDao.getById(styleId)) { "文风档案不存在：$styleId" }
+        }
         val bookId = bookDao.insert(
             Book(
                 title = title,
@@ -73,7 +81,8 @@ class BookRepository(private val db: AppDatabase) {
                 coverColor = coverColor,
                 volumePrefix = volumePrefix,
                 chapterPrefix = chapterPrefix,
-                groupId = groupId
+                groupId = groupId,
+                styleId = styleId
             )
         )
         val volumeId = volumeDao.insert(
@@ -103,6 +112,7 @@ class BookRepository(private val db: AppDatabase) {
     /**
      * 「复制本书」：新建一本空白书（只有默认首卷首章），把原书的大纲条目完整复制过去
      * （分类标签、字段、排序位置一并保留）。新书标题自动加序号，从（1）开始取第一个未被占用的。
+     * 文风绑定随书籍配置一并保留（引用原档案 id，不复制档案本身）。
      * 返回新书 id（原书不存在时返回 0）。
      */
     suspend fun copyBookOutline(sourceBookId: Long): Long = db.withTransaction {
@@ -119,7 +129,8 @@ class BookRepository(private val db: AppDatabase) {
             coverColor = src.coverColor,
             volumePrefix = src.volumePrefix,
             chapterPrefix = src.chapterPrefix,
-            groupId = src.groupId
+            groupId = src.groupId,
+            styleId = src.styleId
         )
         outlineDao.getByBook(sourceBookId).forEach { item ->
             outlineDao.insert(item.copy(id = 0, bookId = newId))
@@ -127,9 +138,19 @@ class BookRepository(private val db: AppDatabase) {
         newId
     }
 
-    /** 更新书籍信息（编辑：封面 / 书名 / 简介 / 分组 / 前缀等） */
-    suspend fun updateBook(book: Book) =
+    /**
+     * 更新书籍信息（编辑：封面 / 书名 / 简介 / 分组 / 前缀 / 文风绑定）。
+     * 在同一事务内校验书籍仍存在、非 0 的 [Book.styleId] 指向的档案仍存在，避免写入悬空绑定。
+     * 书籍不存在时返回 false（不写入）；档案不存在时抛 [IllegalArgumentException] 并整笔回滚。
+     */
+    suspend fun updateBook(book: Book): Boolean = db.withTransaction {
+        if (bookDao.getById(book.id) == null) return@withTransaction false
+        if (book.styleId != 0L) {
+            requireNotNull(styleProfileDao.getById(book.styleId)) { "文风档案不存在：${book.styleId}" }
+        }
         bookDao.update(book.copy(updatedAt = System.currentTimeMillis()))
+        true
+    }
 
     suspend fun setPinned(bookId: Long, pinned: Boolean) = bookDao.setPinned(bookId, pinned)
 

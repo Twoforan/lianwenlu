@@ -1,6 +1,7 @@
 package com.lianwenqi.app.ui.screens
 
 import android.view.HapticFeedbackConstants
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -667,6 +668,21 @@ fun ChapterEditorScreen(
                 if (content.text.isBlank()) writeAiToChapter(text) else pendingAiWrite = text
             },
             onGeneratedSummary = { applyGeneratedSummary(it) },
+            onPrevChapter = {
+                // 跳转本卷上一章节；已是本卷第一章时只提示，不跨卷
+                val cur = chapters.firstOrNull { it.id == currentId }
+                val ordered = chapters
+                    .filter { it.volumeId == cur?.volumeId }
+                    .sortedBy { it.sortOrder }
+                val idx = ordered.indexOfFirst { it.id == currentId }
+                val prev = if (idx > 0) ordered[idx - 1] else null
+                if (prev != null) {
+                    currentId = prev.id
+                    aiOpen = true
+                } else {
+                    Toast.makeText(context, "已经是第一章了，没有上一章", Toast.LENGTH_SHORT).show()
+                }
+            },
             onNextChapter = {
                 // 跳转本卷下一章节；没有下一章时先新建一章（落在本卷）再跳过去，并保持侧边 AI 对话栏打开
                 val cur = chapters.firstOrNull { it.id == currentId }

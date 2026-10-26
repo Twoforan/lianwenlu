@@ -16,6 +16,7 @@ import com.lianwenqi.app.data.dao.MemoryChunkDao
 import com.lianwenqi.app.data.dao.OutlineDao
 import com.lianwenqi.app.data.dao.PromptDao
 import com.lianwenqi.app.data.dao.ProviderDao
+import com.lianwenqi.app.data.dao.StyleProfileDao
 import com.lianwenqi.app.data.dao.VolumeDao
 import com.lianwenqi.app.data.entity.AiModel
 import com.lianwenqi.app.data.entity.Book
@@ -27,6 +28,7 @@ import com.lianwenqi.app.data.entity.MemoryChunk
 import com.lianwenqi.app.data.entity.OutlineItem
 import com.lianwenqi.app.data.entity.Prompt
 import com.lianwenqi.app.data.entity.Provider
+import com.lianwenqi.app.data.entity.StyleProfile
 import com.lianwenqi.app.data.entity.Volume
 
 @Database(
@@ -41,9 +43,10 @@ import com.lianwenqi.app.data.entity.Volume
         AiModel::class,
         ChatSession::class,
         ChatMessage::class,
-        MemoryChunk::class
+        MemoryChunk::class,
+        StyleProfile::class
     ],
-    version = 15,
+    version = 16,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
@@ -58,6 +61,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun aiModelDao(): AiModelDao
     abstract fun chatDao(): ChatDao
     abstract fun memoryChunkDao(): MemoryChunkDao
+    abstract fun styleProfileDao(): StyleProfileDao
 
     companion object {
         @Volatile
@@ -193,6 +197,28 @@ abstract class AppDatabase : RoomDatabase() {
         }
 
         /**
+         * v16：文风档案表 + 书籍文风绑定字段。
+         * 旧书统一为未绑定（styleId = 0），已有书籍 / 卷 / 章节 / 正文 / 大纲等数据保持不变。
+         */
+        internal val MIGRATION_15_16 = object : Migration(15, 16) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS style_profile (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "name TEXT NOT NULL, " +
+                        "sourceType TEXT NOT NULL, " +
+                        "sourceMeta TEXT NOT NULL, " +
+                        "analysisJson TEXT NOT NULL, " +
+                        "analysisVersion INTEGER NOT NULL, " +
+                        "modelName TEXT NOT NULL, " +
+                        "createdAt INTEGER NOT NULL, " +
+                        "updatedAt INTEGER NOT NULL)"
+                )
+                db.execSQL("ALTER TABLE book ADD COLUMN styleId INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        /**
          * 修复历史遗留的超长行：整本正文被冻结进会话前缀、超长提示词日志 / 正文等，
          * 单行超过 SQLite CursorWindow（2MB）上限后读取会抛 SQLiteBlobTooBigException 直接闪退。
          * 首次打开数据库时把超限文本截断到安全长度，之后用标记表跳过，避免每次启动全表扫描。
@@ -219,7 +245,7 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "lianwenqi.db"
-                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15).addCallback(REPAIR_OVERSIZED_ROWS).build().also { INSTANCE = it }
+                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16).addCallback(REPAIR_OVERSIZED_ROWS).build().also { INSTANCE = it }
             }
     }
 }

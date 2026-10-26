@@ -117,6 +117,8 @@ data class SendChatRequest(
     val writeOutlineTool: Boolean,
     /** 「章节梗概导入工具」当前是否生效 */
     val chapterImportTool: Boolean,
+    /** 会话级「文风约束块」（冻结在会话前缀首块），为空则不发送 */
+    val stylePrefix: String = "",
     /** 会话级的「自定义前缀」（纯文本），为空则不发送 */
     val prefixText: String = "",
     /** 会话已冻结的「参考资料前缀」（书籍/大纲/章节字面文本），为空则不发送 */
@@ -252,7 +254,8 @@ class SendChatMessageUseCase(
             addAll(
                 buildGenerationPrefixTurns(
                     customPrefix = request.prefixText,
-                    reference = reference
+                    reference = reference,
+                    styleBlock = request.stylePrefix
                 )
             )
             // 历史统一压成一个 System「前情提要」块，与生成路径同构：
