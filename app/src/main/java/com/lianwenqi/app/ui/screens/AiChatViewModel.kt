@@ -589,15 +589,28 @@ class AiChatViewModel(
                     picked = askSummaryOutlines() ?: return@launchGeneration
             }
         }
-        // ② 记忆检索已勾选且开启「记忆检索是否限定范围」时，选择检索章节（只列已向量化章节）
+        // ② 记忆检索已勾选且开启「记忆检索是否限定范围」：直接沿用勾选记忆检索时已选定的范围，
+        //    不再重复弹窗；仅当从未选过、或所选章节已失效（被删 / 未向量化）时才补弹一次
         var memoryChapterIds: Set<Long>? = null
         if (memory == RetrievalMode.ON && memoryScopeLimit) {
             val memoryBookId = currentMemoryBookId()
             if (memoryBookId != null) {
-                val pick = buildMemoryScopePick(memoryBookId, onlyVectorized = true)
-                // 没有任何已向量化章节时不弹范围选择，按全书检索继续生成（结果自然为空）
-                if (pick != null) {
-                    memoryChapterIds = askMemoryScope(pick) ?: return@launchGeneration
+                val remembered = memoryScopeSelection.value
+                    ?.takeIf { it.bookId == memoryBookId }
+                    ?.chapterIds
+                    ?.let { ids ->
+                        val vectorized = container.memoryRepository.vectorizedChapterIds(memoryBookId).toSet()
+                        ids.filter { it in vectorized }.toSet()
+                    }
+                    ?.takeIf { it.isNotEmpty() }
+                if (remembered != null) {
+                    memoryChapterIds = remembered
+                } else {
+                    val pick = buildMemoryScopePick(memoryBookId, onlyVectorized = true)
+                    // 没有任何已向量化章节时不弹范围选择，按全书检索继续生成（结果自然为空）
+                    if (pick != null) {
+                        memoryChapterIds = askMemoryScope(pick) ?: return@launchGeneration
+                    }
                 }
             }
         }
