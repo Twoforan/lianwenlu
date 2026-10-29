@@ -164,9 +164,9 @@ class MemoryRepository(
         if (query.isBlank()) return emptyList()
         // 用户限定了检索范围时，只在这些章节的向量块里检索
         if (chapterIds != null && chapterIds.isEmpty()) return emptyList()
-        // 只召回「现存章节」的向量块：章节被删除后其向量即使因异常尚未物理清理，
-        // 也不能再作为参考资料进入提示词，避免污染新文参考与多花无谓的 token。
-        val existingChapterIds = chapterDao.getByBook(bookId).map { it.id }.toSet()
+        // 只召回「有效章节」的向量块：章节被删除、或旧版本删分卷留下的孤儿章节，
+        // 其向量即使因异常尚未物理清理，也不能再作为参考资料进入提示词，避免污染新文参考与多花无谓的 token。
+        val existingChapterIds = chapterDao.validIdsByBook(bookId).toSet()
         // 当前正在写的章节不进候选池：它已经在本章梗概 / 正文里了，
         // 留着只会凭「和自己梗概最像」把其它章节挤出去
         val rows = chunkDao.getByBook(bookId).filter {
@@ -227,7 +227,7 @@ class MemoryRepository(
      */
     private suspend fun positionBiasOf(bookId: Long, scope: String): Map<Long, Float>? {
         if (scope == MemorySearchScope.RANDOM) return null
-        val chapters = chapterDao.getByBook(bookId)
+        val chapters = chapterDao.getValidByBook(bookId)
         if (chapters.size <= 1) return null
         val weight = HashMap<Long, Float>(chapters.size)
         chapters.forEachIndexed { index, chapter ->
@@ -280,7 +280,8 @@ class MemoryRepository(
         onlyChapterIds: Set<Long>? = null
     ) {
         withContext(Dispatchers.IO) {
-            val chapters = chapterDao.getByBook(bookId)
+            // 只对有效章节向量化：孤儿章节不参与，也不在进度页显示
+            val chapters = chapterDao.getValidByBook(bookId)
             val volumeTitles = volumeDao.getByBook(bookId).associate { it.id to it.title }
             val targets = chapters.filter { it.content.isNotBlank() && (onlyChapterIds == null || it.id in onlyChapterIds) }
             // 向量化源签名（向量化工具 + 模型）并进块哈希：换了源，旧哈希全部失配，整本自动重跑。

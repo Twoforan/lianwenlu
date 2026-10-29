@@ -1,6 +1,7 @@
 package com.lianwenqi.app.data
 
 import android.content.Context
+import android.util.Log
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
@@ -46,7 +47,7 @@ import com.lianwenqi.app.data.entity.Volume
         MemoryChunk::class,
         StyleProfile::class
     ],
-    version = 16,
+    version = 17,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
@@ -219,6 +220,31 @@ abstract class AppDatabase : RoomDatabase() {
         }
 
         /**
+         * v17：清理历史遗留的「孤儿章节」。
+         * 旧版本删除分卷只删 volume 行，章节的 volumeId 悬空：目录里看不见，却仍出现在
+         * 向量化进度、能被记忆检索召回，并会被备份导出后在恢复时复活。
+         * 与删除分卷的级联语义保持一致：连同这些章节的向量块一并删除；未分卷（volumeId 为空）
+         * 的章节属于有效数据，不在此列。清理数量写入日志便于追溯。
+         */
+        internal val MIGRATION_16_17 = object : Migration(16, 17) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                val orphanIds = mutableListOf<Long>()
+                db.query(
+                    "SELECT c.id FROM chapter c LEFT JOIN volume v ON v.id = c.volumeId " +
+                        "WHERE c.volumeId IS NOT NULL AND (v.id IS NULL OR v.bookId != c.bookId)"
+                ).use { cursor ->
+                    while (cursor.moveToNext()) orphanIds += cursor.getLong(0)
+                }
+                if (orphanIds.isEmpty()) return
+                val placeholders = orphanIds.joinToString(",") { "?" }
+                val args = orphanIds.toTypedArray()
+                db.execSQL("DELETE FROM memory_chunk WHERE chapterId IN ($placeholders)", args)
+                db.execSQL("DELETE FROM chapter WHERE id IN ($placeholders)", args)
+                Log.i("AppDatabase", "v17 清理孤儿章节 ${orphanIds.size} 个：$orphanIds")
+            }
+        }
+
+        /**
          * 修复历史遗留的超长行：整本正文被冻结进会话前缀、超长提示词日志 / 正文等，
          * 单行超过 SQLite CursorWindow（2MB）上限后读取会抛 SQLiteBlobTooBigException 直接闪退。
          * 首次打开数据库时把超限文本截断到安全长度，之后用标记表跳过，避免每次启动全表扫描。
@@ -245,7 +271,7 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "lianwenqi.db"
-                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16).addCallback(REPAIR_OVERSIZED_ROWS).build().also { INSTANCE = it }
+                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17).addCallback(REPAIR_OVERSIZED_ROWS).build().also { INSTANCE = it }
             }
     }
 }

@@ -41,7 +41,7 @@ class BookRepository(private val db: AppDatabase) {
     fun observeBookSummaries(mode: SortMode, asc: Boolean): Flow<List<BookSummary>> =
         observeBooks(mode, asc).map { books ->
             books.map { b ->
-                val chapters = chapterDao.getByBook(b.id)
+                val chapters = chapterDao.getValidByBook(b.id)
                 BookSummary(
                     book = b,
                     wordCount = chapters.sumOf { TextTool.countWords(it.content) },
@@ -167,9 +167,14 @@ class BookRepository(private val db: AppDatabase) {
 
     fun observeVolumes(bookId: Long): Flow<List<Volume>> = volumeDao.observeByBook(bookId)
 
-    fun observeChapters(bookId: Long): Flow<List<Chapter>> = chapterDao.observeByBook(bookId)
+    /**
+     * 有效章节：行存在且 volumeId 为空或指向同一本书的现存分卷。
+     * 目录、阅读器、搜索、向量化进度、记忆检索候选池与备份导出统一使用这一口径，
+     * 历史遗留的孤儿章节（volumeId 指向已删分卷）在这里被排除。
+     */
+    fun observeChapters(bookId: Long): Flow<List<Chapter>> = chapterDao.observeValidByBook(bookId)
 
-    suspend fun getChapters(bookId: Long): List<Chapter> = chapterDao.getByBook(bookId)
+    suspend fun getChapters(bookId: Long): List<Chapter> = chapterDao.getValidByBook(bookId)
 
     suspend fun getVolumes(bookId: Long): List<Volume> = volumeDao.getByBook(bookId)
 
@@ -247,8 +252,24 @@ class BookRepository(private val db: AppDatabase) {
         remaining.forEachIndexed { i, c -> if (c.sortOrder != i) chapterDao.setOrder(c.id, i) }
     }
 
-    suspend fun deleteVolume(volumeId: Long) {
+    /**
+     * 删除分卷：连同该卷下的章节与这些章节的向量块一起级联删除，整段在同一事务内完成，
+     * 不会出现「卷没了、章节还在」的孤儿状态；删除后全书章节序号归一化为连续。
+     * 返回被删除的章节数（分卷不存在时返回 0）。
+     */
+    suspend fun deleteVolume(volumeId: Long): Int = db.withTransaction {
+        val volume = volumeDao.getById(volumeId) ?: return@withTransaction 0
+        val bookId = volume.bookId
+        val doomed = chapterDao.getByBook(bookId).filter { it.volumeId == volumeId }
+        doomed.forEach { memoryChunkDao.deleteByChapter(it.id) }
+        doomed.forEach { chapterDao.deleteById(it.id) }
         volumeDao.deleteById(volumeId)
+        normalizeChapterOrder(bookId)
+        // 分卷序号同样归一化，避免目录顺序出现跳号
+        volumeDao.getByBook(bookId).forEachIndexed { i, v ->
+            if (v.sortOrder != i) volumeDao.setOrder(v.id, i)
+        }
+        doomed.size
     }
 
     suspend fun renameVolume(volume: Volume, title: String) = volumeDao.update(volume.copy(title = title))

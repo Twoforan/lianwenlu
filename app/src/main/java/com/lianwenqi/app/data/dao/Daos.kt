@@ -131,6 +131,9 @@ interface VolumeDao {
     @Query("SELECT * FROM volume WHERE bookId = :bookId ORDER BY sortOrder ASC, id ASC")
     suspend fun getByBook(bookId: Long): List<Volume>
 
+    @Query("SELECT * FROM volume WHERE id = :id")
+    suspend fun getById(id: Long): Volume?
+
     @Insert
     suspend fun insert(volume: Volume): Long
 
@@ -155,6 +158,33 @@ interface ChapterDao {
 
     @Query("SELECT * FROM chapter WHERE bookId = :bookId ORDER BY sortOrder ASC, id ASC")
     suspend fun getByBook(bookId: Long): List<Chapter>
+
+    /**
+     * 有效章节：行存在，且 [Chapter.volumeId] 为空（未分卷）或指向同一本书的现存分卷。
+     * 旧版本删除分卷只删了 volume 行，会留下 volumeId 悬空的孤儿章节；所有面向用户的读取
+     * （目录、阅读、搜索、向量化、记忆检索、备份导出）都必须走这里，避免各写各的过滤条件。
+     */
+    @Query(
+        "SELECT c.* FROM chapter c LEFT JOIN volume v ON v.id = c.volumeId " +
+            "WHERE c.bookId = :bookId AND (c.volumeId IS NULL OR (v.id IS NOT NULL AND v.bookId = c.bookId)) " +
+            "ORDER BY c.sortOrder ASC, c.id ASC"
+    )
+    fun observeValidByBook(bookId: Long): Flow<List<Chapter>>
+
+    /** 有效章节的可挂起版本，口径与 [observeValidByBook] 完全一致 */
+    @Query(
+        "SELECT c.* FROM chapter c LEFT JOIN volume v ON v.id = c.volumeId " +
+            "WHERE c.bookId = :bookId AND (c.volumeId IS NULL OR (v.id IS NOT NULL AND v.bookId = c.bookId)) " +
+            "ORDER BY c.sortOrder ASC, c.id ASC"
+    )
+    suspend fun getValidByBook(bookId: Long): List<Chapter>
+
+    /** 有效章节 id 集合，供记忆检索 / 向量化等只需要 id 的场景复用同一口径 */
+    @Query(
+        "SELECT c.id FROM chapter c LEFT JOIN volume v ON v.id = c.volumeId " +
+            "WHERE c.bookId = :bookId AND (c.volumeId IS NULL OR (v.id IS NOT NULL AND v.bookId = c.bookId))"
+    )
+    suspend fun validIdsByBook(bookId: Long): List<Long>
 
     @Query("SELECT * FROM chapter WHERE id = :id")
     fun observeById(id: Long): Flow<Chapter?>
@@ -191,9 +221,10 @@ interface ChapterDao {
     suspend fun deleteByBook(bookId: Long)
 
     @Query(
-        "SELECT * FROM chapter WHERE bookId = :bookId AND " +
-            "(title LIKE '%' || :keyword || '%' OR summary LIKE '%' || :keyword || '%' OR content LIKE '%' || :keyword || '%') " +
-            "ORDER BY sortOrder ASC"
+        "SELECT c.* FROM chapter c LEFT JOIN volume v ON v.id = c.volumeId " +
+            "WHERE c.bookId = :bookId AND (c.volumeId IS NULL OR (v.id IS NOT NULL AND v.bookId = c.bookId)) AND " +
+            "(c.title LIKE '%' || :keyword || '%' OR c.summary LIKE '%' || :keyword || '%' OR c.content LIKE '%' || :keyword || '%') " +
+            "ORDER BY c.sortOrder ASC, c.id ASC"
     )
     suspend fun searchInBook(bookId: Long, keyword: String): List<Chapter>
 }

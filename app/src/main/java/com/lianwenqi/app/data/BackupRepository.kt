@@ -266,7 +266,8 @@ class BackupRepository(
                 createdAt = book.createdAt,
                 updatedAt = book.updatedAt,
                 volumes = volumes.map { BackupVolume(it.title, it.sortOrder) },
-                chapters = chapterDao.getByBook(book.id).sortedBy { it.sortOrder }.map { chapter ->
+                // 只导出有效章节：旧版本删分卷留下的孤儿章节不能被带进备份、在恢复后复活
+                chapters = chapterDao.getValidByBook(book.id).sortedBy { it.sortOrder }.map { chapter ->
                     BackupChapter(
                         title = chapter.title,
                         summary = chapter.summary,

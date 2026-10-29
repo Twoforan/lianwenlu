@@ -122,6 +122,11 @@ class MemoryRepositoryTest {
     private class FakeChapterDao(private val chapters: List<Chapter>) : ChapterDao {
         override fun observeByBook(bookId: Long): Flow<List<Chapter>> = error("未使用")
         override suspend fun getByBook(bookId: Long) = chapters.filter { it.bookId == bookId }
+        override fun observeValidByBook(bookId: Long): Flow<List<Chapter>> =
+            flowOf(chapters.filter { it.bookId == bookId })
+        override suspend fun getValidByBook(bookId: Long) = chapters.filter { it.bookId == bookId }
+        override suspend fun validIdsByBook(bookId: Long) =
+            chapters.filter { it.bookId == bookId }.map { it.id }
         override fun observeById(id: Long): Flow<Chapter?> = error("未使用")
         override suspend fun getById(id: Long) = chapters.firstOrNull { it.id == id }
         override suspend fun countByBook(bookId: Long) = chapters.count { it.bookId == bookId }
@@ -141,6 +146,7 @@ class MemoryRepositoryTest {
     private class FakeVolumeDao(private val volumes: List<Volume>) : VolumeDao {
         override fun observeByBook(bookId: Long): Flow<List<Volume>> = error("未使用")
         override suspend fun getByBook(bookId: Long) = volumes.filter { it.bookId == bookId }
+        override suspend fun getById(id: Long) = volumes.firstOrNull { it.id == id }
         override suspend fun insert(volume: Volume) = error("未使用")
         override suspend fun update(volume: Volume) = error("未使用")
         override suspend fun setOrder(id: Long, order: Int) = error("未使用")

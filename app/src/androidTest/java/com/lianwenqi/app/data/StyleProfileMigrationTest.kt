@@ -9,15 +9,16 @@ import com.lianwenqi.app.data.entity.StyleProfile
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * 数据库 v15 → v16 迁移验证：
- * 手工建出 v15 结构的真实数据库并写入各表数据，再用 Room + MIGRATION_15_16 打开，
- * 校验数据保留、旧书 styleId = 0，且迁移后可正常读写文风档案与绑定。
+ * 数据库 v15 → v17 迁移验证：
+ * 手工建出 v15 结构的真实数据库并写入各表数据，再用 Room + MIGRATION_15_16 / MIGRATION_16_17 打开，
+ * 校验数据保留、旧书 styleId = 0、孤儿章节清理不误伤有效章节，且迁移后可正常读写文风档案与绑定。
  */
 @RunWith(AndroidJUnit4::class)
 class StyleProfileMigrationTest {
@@ -37,11 +38,11 @@ class StyleProfileMigrationTest {
     }
 
     @Test
-    fun v15升级到v16后数据保留且旧书未绑定文风() {
+    fun v15升级到v17后数据保留且旧书未绑定文风() {
         createV15Database()
 
         val db = Room.databaseBuilder(context, AppDatabase::class.java, dbName)
-            .addMigrations(AppDatabase.MIGRATION_15_16)
+            .addMigrations(AppDatabase.MIGRATION_15_16, AppDatabase.MIGRATION_16_17)
             .allowMainThreadQueries()
             .build()
 
@@ -60,13 +61,16 @@ class StyleProfileMigrationTest {
                 assertEquals("第一章", chapter.title)
                 assertEquals("旧梗概", chapter.summary)
                 assertEquals("旧正文内容", chapter.content)
+                // v17 迁移清理孤儿章节及其向量块，同时不误伤有效章节
+                assertNull(db.chapterDao().getById(2))
+                assertEquals(listOf(1L), db.chapterDao().getValidByBook(1).map { it.id })
+                assertEquals(1, db.memoryChunkDao().getByBook(1).size)
                 assertEquals(1, db.outlineDao().getByBook(1).size)
                 assertEquals("旧模型", db.aiModelDao().getAll().single().name)
                 assertEquals(1, db.providerDao().getAll().size)
                 assertEquals("旧提示词", db.promptDao().getAll().single().title)
                 assertEquals("旧会话", db.chatDao().getSession(1)!!.title)
                 assertEquals(1, db.chatDao().getMessages(1).size)
-                assertEquals(1, db.memoryChunkDao().getByBook(1).size)
 
                 // 新表可正常读写
                 assertTrue(db.styleProfileDao().getAll().isEmpty())
@@ -121,6 +125,11 @@ class StyleProfileMigrationTest {
                 "INSERT INTO chapter (id, bookId, volumeId, title, summary, content, lastCursor, sortOrder, " +
                     "createdAt, updatedAt) VALUES (1, 1, 1, '第一章', '旧梗概', '旧正文内容', 0, 0, 1, 2)"
             )
+            // 模拟旧版本删分卷留下的孤儿章节：volumeId 指向不存在的分卷
+            db.execSQL(
+                "INSERT INTO chapter (id, bookId, volumeId, title, summary, content, lastCursor, sortOrder, " +
+                    "createdAt, updatedAt) VALUES (2, 1, 99, '孤儿章节', '孤儿梗概', '孤儿正文', 0, 1, 1, 2)"
+            )
             db.execSQL(
                 "INSERT INTO outline_item (id, bookId, category, tag, title, content, sortOrder, updatedAt) " +
                     "VALUES (1, 1, 'STORY', '明线', '主线', '大纲内容', 0, 1)"
@@ -151,6 +160,12 @@ class StyleProfileMigrationTest {
                 "INSERT INTO memory_chunk (id, bookId, volumeId, chapterId, chunkIndex, text, hash, " +
                     "chapterUpdatedAt, dim, vector, createdAt) VALUES " +
                     "(1, 1, 1, 1, 0, '记忆片段', 'hash-1', 2, 4, x'00000000', 2)"
+            )
+            // 孤儿章节的向量块：迁移时必须与孤儿章节一起删除
+            db.execSQL(
+                "INSERT INTO memory_chunk (id, bookId, volumeId, chapterId, chunkIndex, text, hash, " +
+                    "chapterUpdatedAt, dim, vector, createdAt) VALUES " +
+                    "(2, 1, 99, 2, 0, '孤儿记忆片段', 'hash-2', 2, 4, x'00000000', 2)"
             )
 
             db.version = 15
