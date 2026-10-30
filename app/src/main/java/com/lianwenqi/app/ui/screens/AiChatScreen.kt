@@ -504,7 +504,7 @@ fun AiChatScreen(initialBookId: Long?) {
                 // 未配置向量化工具（未选向量模型 / 未启用本地工具）时不可勾选
                 FilterChip(
                     selected = memoryRetrieval,
-                    enabled = memoryToolReady,
+                    enabled = memoryToolReady && memoryVectorizing == null,
                     onClick = { vm.toggleMemoryRetrieval() },
                     label = { Text("记忆检索") }
                 )
@@ -775,7 +775,7 @@ fun AiChatScreen(initialBookId: Long?) {
             val where = listOf(p.volumeTitle, p.chapterTitle).filter { it.isNotBlank() }.joinToString(" ")
             Toast.makeText(
                 toastContext,
-                if (where.isBlank()) "正在向量化本书…" else "正在向量化本书：$where（${p.done}/${p.total}）",
+                if (where.isBlank()) "正在向量化中…" else "正在向量化中：$where（${p.done}/${p.total}）",
                 Toast.LENGTH_SHORT
             ).show()
         }
@@ -1307,7 +1307,7 @@ private fun AiAssistantPanel(
                     outline = outline,
                     previewFor = { vm.previewFor(it) },
                     onEditUser = { vm.beginEditUserMessage(it) },
-                    onRegenerate = { vm.regenerate(it) },
+                    onRegenerate = { vm.regenerate(it, onGeneratedSummary) },
                     onCopy = { clipboard.setText(AnnotatedString(it)) },
                     onDelete = { vm.deleteMessage(it) },
                     onSaveEdit = { id, text -> vm.updateMessage(id, text) },
@@ -1316,6 +1316,7 @@ private fun AiAssistantPanel(
                     onViewLog = { logTarget = it },
                     onViewPrompt = { promptTarget = it },
                     onStop = { if (generationRunning) vm.cancelGeneration() else vm.stopGenerating() },
+                    // 「重新生成」识别出生成轮次时，生成的梗概同样可一键写回本章
                     onWriteToChapter = onWriteToChapter,
                     // 「写入梗概」只对本章的回答生效，避免在别的章节的抽屉里误写到当前章节
                     onWriteSummary = { target -> if (target.chapterId == chapterId) onGeneratedSummary(target.content) }
@@ -1470,7 +1471,7 @@ private fun AiAssistantPanel(
                     "记忆检索",
                     memoryRetrieval,
                     { vm.toggleMemoryRetrieval() },
-                    enabled = memoryToolReady,
+                    enabled = memoryToolReady && memoryVectorizing == null,
                     modifier = Modifier.weight(1.12f)
                 )
                 // 「文风样本」：与「记忆检索」一样的勾选按钮，先占位（勾选状态仅本地保存，暂无实际作用）
@@ -1687,7 +1688,7 @@ private fun AiAssistantPanel(
             val where = listOf(p.volumeTitle, p.chapterTitle).filter { it.isNotBlank() }.joinToString(" ")
             Toast.makeText(
                 panelContext,
-                if (where.isBlank()) "正在向量化本书…" else "正在向量化本书：$where（${p.done}/${p.total}）",
+                if (where.isBlank()) "正在向量化中…" else "正在向量化中：$where（${p.done}/${p.total}）",
                 Toast.LENGTH_SHORT
             ).show()
         }

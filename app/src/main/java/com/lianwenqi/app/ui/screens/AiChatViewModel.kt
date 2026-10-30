@@ -273,8 +273,9 @@ class AiChatViewModel(
     /**
      * 切换记忆检索：
      * - 取消勾选：直接关闭持久勾选；
-     * - 勾选：必须先有书籍（未选书时提示，不勾选）；本书从未向量化时先弹窗询问是否向量化全书，
-     *   向量化完成后再继续；开启「限定范围」时接着让用户从**已向量化的章节**中选择检索范围。
+     * - 勾选：必须先有书籍（未选书时提示，不勾选）；本书从未向量化时先弹窗询问是否向量化全书；
+     *   本书已向量化但正文有更新时，先带进度提示补齐增量向量化，完成后才继续；
+     *   开启「限定范围」时接着让用户从**已向量化的章节**中选择检索范围。
      */
     fun toggleMemoryRetrieval() = viewModelScope.launch {
         if (memoryRetrievalEnabled.value) {
@@ -299,10 +300,33 @@ class AiChatViewModel(
             memoryToast.value = "请先选择书籍，再进行记忆检索"
             return@launch
         }
+        // 已有向量化在进行：忽略这次点击，避免重复触发同一本书的向量化
+        if (memoryVectorizing.value != null) return@launch
         // 本书还没有任何向量化结果：先询问是否向量化，等向量化完成后再选范围 / 勾选
         if (container.memoryRepository.latestVectorizedUpdatedAt(bookId) == null) {
             pendingEmptyVectorizeAsk.value = true
             return@launch
+        }
+        // 已向量化过但正文有更新：先补齐增量向量化（界面显示进度、按钮置灰），完成后再继续
+        if (hasNewerContentThanVectorized(bookId)) {
+            memoryVectorizing.value = VectorizeProgress(bookId, running = true)
+            var failed: String? = null
+            runCatching {
+                container.memoryRepository.vectorize(bookId) { progress ->
+                    if (progress.error != null) failed = progress.error
+                    memoryVectorizing.value = progress
+                }
+            }.onFailure {
+                failed = it.message ?: "向量化失败"
+                Log.w(MEMORY_LOG_TAG, "勾选记忆检索时向量化失败", it)
+            }
+            memoryVectorizing.value = null
+            // 失败或仍有未补齐的正文：不勾选，避免带着旧向量做检索
+            if (failed != null || hasNewerContentThanVectorized(bookId)) {
+                memoryToast.value = "向量化未完成：${failed ?: "请稍后重试"}"
+                return@launch
+            }
+            memoryToast.value = "向量化完成"
         }
         requestMemoryScopeOrEnable(bookId)
     }
@@ -462,15 +486,32 @@ class AiChatViewModel(
      * 不再自动写回本章；由用户在回答操作栏点「写入梗概」决定是否写入。
      */
     fun startGenerateSummary() = launchGeneration { sid ->
+        executeGenerateSummary(sid, input.value, editingUserMessageId.value)
+    }
+
+    /**
+     * 「生成梗概」的实际执行。
+     * [regenerateUserId] > 0 时表示这是对某条「生成梗概」轮次的「重新生成」：
+     * 复用该用户消息、追加新的回答版本，不改写原提示词，也不清空输入框。
+     */
+    private suspend fun executeGenerateSummary(
+        sid: Long,
+        userPrompt: String,
+        editingId: Long,
+        regenerateUserId: Long = 0L
+    ) {
         // 提示词过长：提示后直接放弃本次生成（不截断、不落库）
-        if (input.value.trim().length > MAX_CHAT_MESSAGE_CHARS) {
+        if (userPrompt.trim().length > MAX_CHAT_MESSAGE_CHARS) {
             generationMessage.value = MSG_TOO_LONG
-            return@launchGeneration
+            return
         }
         val chapterId = fixedChapterId
+            ?: regenerateUserId.takeIf { it > 0L }
+                ?.let { chatRepository.getMessage(it)?.chapterId }
+                ?.takeIf { it > 0L }
         if (chapterId == null) {
             noticeThenCancel("请在章节编辑页使用「生成梗概」")
-            return@launchGeneration
+            return
         }
         val chapterTitle = bookRepository.getChapter(chapterId)?.title.orEmpty()
         val plan = GenerationPlan(
@@ -478,7 +519,7 @@ class AiChatViewModel(
             summaryWordRange = prefs.genSummaryWordRange.first(),
             contentWordRange = null,
             selectedOutlineIds = if (prefs.genSummaryLimitScope.first()) {
-                askSummaryOutlines() ?: return@launchGeneration
+                askSummaryOutlines() ?: return
             } else {
                 emptyList()
             },
@@ -490,13 +531,12 @@ class AiChatViewModel(
         if (modelId <= 0L) {
             generationMessage.value = "请先在设置中配置并选择一个模型"
             _generationState.value = FlowState.Failed
-            return@launchGeneration
+            return
         }
         // 生成路径也走 [prepareSessionPrefix]：首次调用把已勾选的大纲 / 上下文冻结成会话前缀，
         // 之后逐轮复用 → 参考资料前缀跨轮逐字节稳定，缓存命中率随轮次提高
         val prefix = prepareSessionPrefix(sid, applyAdaptive = false)
         val ref = buildGenerationReference(prefix, plan.selectedOutlineIds)
-        val userPrompt = input.value
         // 像普通发送一样落一条「用户消息」：输入框提示词 + 「生成梗概」标记；
         // 本轮新增的参考资料随消息落库成为历史的一部分，故上面对选定标签的「已提交」标记语义成立。
         // 若用户点了某条历史提示词的「编辑」后再生成，则改写那一轮并追加新回答版本（见 [openGenerationRound]）
@@ -507,10 +547,12 @@ class AiChatViewModel(
             userPrompt = userPrompt,
             contextSnapshot = currentSnapshot().encode(),
             promptExtra = ref.extra,
-            editingId = editingUserMessageId.value
+            editingId = editingId,
+            regenerateUserId = regenerateUserId
         )
-        // 提示词已随本轮用户消息落库（相当于发送成功），清空输入框，避免下一轮误重复发送
-        input.value = ""
+        // 提示词已随本轮用户消息落库（相当于发送成功），清空输入框，避免下一轮误重复发送。
+        // 「重新生成」不新增用户消息，也不应清空用户当前正在编辑的输入。
+        if (regenerateUserId == 0L) input.value = ""
         // 选定标签的内容已随本轮消息落库，此时记入前缀去重（后续轮次只写「参见大纲『X』」）
         markGenerationOutlines(sid, ref.sessionPrefix, ref.freshOutlineIds)
         // 生成请求：聊天同构前缀块 +（开关开启时）「前情提要」参考资料块 + 生成专用块（指令 + 新增参考资料 + 用户输入）
@@ -558,20 +600,37 @@ class AiChatViewModel(
      * 之后进入 Executing 只读执行；任一弹窗取消即整体终止。
      */
     fun startGenerateContent(onSummary: (String) -> Unit) = launchGeneration { sid ->
+        executeGenerateContent(sid, input.value, editingUserMessageId.value, 0L, onSummary)
+    }
+
+    /**
+     * 「生成正文」的实际执行。
+     * [regenerateUserId] > 0 时表示这是对某条「生成正文」轮次的「重新生成」：
+     * 复用该用户消息、追加新的回答版本，不改写原提示词，也不清空输入框；
+     * 本章梗概等仍按生成流程作为临时 SYSTEM 块提交。
+     */
+    private suspend fun executeGenerateContent(
+        sid: Long,
+        userPrompt: String,
+        editingId: Long,
+        regenerateUserId: Long,
+        onSummary: (String) -> Unit
+    ) {
         // 提示词过长：提示后直接放弃本次生成（不截断、不落库）
-        if (input.value.trim().length > MAX_CHAT_MESSAGE_CHARS) {
+        if (userPrompt.trim().length > MAX_CHAT_MESSAGE_CHARS) {
             generationMessage.value = MSG_TOO_LONG
-            return@launchGeneration
+            return
         }
         val chapterId = fixedChapterId
+            ?: regenerateUserId.takeIf { it > 0L }
+                ?.let { chatRepository.getMessage(it)?.chapterId }
+                ?.takeIf { it > 0L }
         if (chapterId == null) {
             noticeThenCancel("请在章节编辑页使用「生成正文」")
-            return@launchGeneration
+            return
         }
         val chapter = bookRepository.getChapter(chapterId)
         val chapterTitle = chapter?.title.orEmpty()
-        // 先固定本轮提示词：后续弹窗 / 生成期间输入框的变化不再影响本轮实际发送的内容
-        val userPrompt = input.value
         val withSummary = prefs.genContentWithSummary.first()
         val limitScope = prefs.genSummaryLimitScope.first()
         val mode = if (withSummary) {
@@ -579,7 +638,7 @@ class AiChatViewModel(
         } else {
             if (bookRepository.getChapter(chapterId)?.summary.orEmpty().isBlank()) {
                 noticeThenCancel("请先填写本章梗概，或在设置中开启「同时生成梗概」")
-                return@launchGeneration
+                return
             }
             GenerationMode.CONTENT_ONLY
         }
@@ -591,7 +650,7 @@ class AiChatViewModel(
         for (kind in contentDialogOrder(mode, limitScope)) {
             when (kind) {
                 GenerationDialogKind.PICK_SUMMARY_OUTLINES ->
-                    picked = askSummaryOutlines() ?: return@launchGeneration
+                    picked = askSummaryOutlines() ?: return
             }
         }
         // ② 记忆检索已勾选且开启「记忆检索是否限定范围」：直接沿用勾选记忆检索时已选定的范围，
@@ -614,12 +673,12 @@ class AiChatViewModel(
                     val pick = buildMemoryScopePick(memoryBookId, onlyVectorized = true)
                     // 没有任何已向量化章节时不弹范围选择，按全书检索继续生成（结果自然为空）
                     if (pick != null) {
-                        memoryChapterIds = askMemoryScope(pick) ?: return@launchGeneration
+                        memoryChapterIds = askMemoryScope(pick) ?: return
                     }
                 }
             }
         }
-        if (generationCancelled) return@launchGeneration
+        if (generationCancelled) return
         val plan = GenerationPlan(
             mode = mode,
             summaryWordRange = prefs.genSummaryWordRange.first(),
@@ -635,7 +694,7 @@ class AiChatViewModel(
         if (modelId <= 0L) {
             generationMessage.value = "请先在设置中配置并选择一个模型"
             _generationState.value = FlowState.Failed
-            return@launchGeneration
+            return
         }
         val memoryCap = prefs.memoryBlockQuota.first()
         val memoryScope = prefs.memorySearchScope.first()
@@ -652,10 +711,14 @@ class AiChatViewModel(
 
         // 生成请求携带的历史：本轮的用户消息在正文落库前才写入，故此处取到当前全部轮次；
         // 编辑历史提示词后再生成时，历史只取到被编辑的那一轮之前（该轮旧内容不进前情提要）
-        val editingId = editingUserMessageId.value
+        // 历史截止位置：编辑态取被编辑的消息；「重新生成」取被重新生成的那条用户消息
+        // （其旧回答 id 大于该消息，不进入前情提要，避免模型把旧成品当成前情续写）
+        val historyEnd = editingId.takeIf { it > 0L }
+            ?: regenerateUserId.takeIf { it > 0L }
+            ?: Long.MAX_VALUE
         val history =
             if (prefs.genCarryHistory.first()) {
-                generationHistory(sid, editingId.takeIf { it > 0L } ?: Long.MAX_VALUE, modelId)
+                generationHistory(sid, historyEnd, modelId)
             } else {
                 GenerationHistory()
             }
@@ -669,7 +732,7 @@ class AiChatViewModel(
             )
                 ?: run {
                     if (!generationCancelled) _generationState.value = FlowState.Failed
-                    return@launchGeneration
+                    return
                 }
         } else {
             bookRepository.getChapter(chapterId)?.summary.orEmpty()
@@ -722,12 +785,14 @@ class AiChatViewModel(
             userPrompt = userPrompt,
             contextSnapshot = currentSnapshot().encode(),
             promptExtra = listOf(ref.extra, adaptive, memoryRef.text).filter { it.isNotBlank() }.joinToString("\n\n"),
-            editingId = editingId
+            editingId = editingId,
+            regenerateUserId = regenerateUserId
         )
         // 选定标签的内容已随本轮消息落库，此时记入前缀去重（后续轮次只写「参见大纲『X』」）
         markGenerationOutlines(sid, sp, ref.freshOutlineIds)
-        // 提示词即将随请求发出：立刻清空输入框，避免生成期间误以为没发送出去、再次点击重复生成
-        input.value = ""
+        // 提示词即将随请求发出：立刻清空输入框，避免生成期间误以为没发送出去、再次点击重复生成。
+        // 「重新生成」不新增用户消息，也不应清空用户当前正在编辑的输入
+        if (regenerateUserId == 0L) input.value = ""
         // 「同时生成梗概」时梗概子调用保持静默，只把正文输出实时回显到对话中
         beginGenerationStreaming(round.userId)
         val result = configRepository.sendToModel(
@@ -735,17 +800,17 @@ class AiChatViewModel(
             AiRequest(turns = turns, model = "", temperature = 0f, maxTokens = 0),
             onDelta = generationDeltaHandler()
         )
-        if (generationCancelled) return@launchGeneration
+        if (generationCancelled) return
         if (!result.success) {
             generationMessage.value = result.error?.userMessage ?: "生成失败"
             _generationState.value = FlowState.Failed
-            return@launchGeneration
+            return
         }
         val raw = result.content.trim()
         if (raw.isBlank()) {
             generationMessage.value = "模型返回空内容"
             _generationState.value = FlowState.Failed
-            return@launchGeneration
+            return
         }
         val enforced = enforceWordRange(raw, plan.contentWordRange)
         // 落库的是截断 / 校正后的正文：把回显内容同步成最终文本，避免完成后内容突变
@@ -1122,8 +1187,17 @@ class AiChatViewModel(
         userPrompt: String,
         contextSnapshot: String,
         promptExtra: String,
-        editingId: Long
+        editingId: Long,
+        regenerateUserId: Long = 0L
     ): GenRound {
+        // 「重新生成」生成轮次：复用原用户消息，只追加新的回答版本，不改写提示词与上下文
+        if (regenerateUserId > 0L) {
+            return GenRound(
+                userId = regenerateUserId,
+                variantIndex = chatRepository.nextVariantIndex(regenerateUserId),
+                staleIds = emptyList()
+            )
+        }
         val target = editingId.takeIf { it > 0L }?.let { chatRepository.getMessage(it) }
         if (target == null || target.sessionId != sid) {
             val id = chatRepository.addMessage(
@@ -1134,12 +1208,14 @@ class AiChatViewModel(
             )
             return GenRound(id, 0, emptyList())
         }
-        // 编辑态：消费掉编辑状态，改写那条用户消息，并作废其后继对话
+        // 编辑态：消费掉编辑状态，改写那条用户消息，并作废其后继对话。
+        // 必须保留「生成正文 / 生成梗概」标记：否则这一轮会被当成普通聊天，
+        // 后续「重新生成」无法再识别出它该走生成流程（梗概等临时块会丢失）。
         editingUserMessageId.value = 0L
         val staleIds = chatRepository.getMessages(sid)
             .filter { it.id > target.id && !(it.role == ChatRole.ASSISTANT && it.replyToId == target.id) }
             .map { it.id }
-        chatRepository.updateMessageContent(target.id, userPrompt)
+        chatRepository.updateMessageContent(target.id, generationUserContent(label, userPrompt))
         return GenRound(target.id, chatRepository.nextVariantIndex(target.id), staleIds)
     }
 
@@ -2329,7 +2405,10 @@ class AiChatViewModel(
 
     /** 点击编辑某条已发送的消息：恢复它的正文与当时选好的上下文 */
     fun beginEditUserMessage(message: ChatMessage) {
-        input.value = message.content
+        // 生成轮次：编辑框只放原始提示词，不把「生成正文 / 生成梗概」标记当成提示词的一部分；
+        // 生成时由 [openGenerationRound] 按轮次类型补回标记。
+        val kind = generationKindOf(message.content)
+        input.value = if (kind != null) generationPromptOf(message.content, kind) else message.content
         editingUserMessageId.value = message.id
         val snapshot = decodeContextSnapshot(message.contextSnapshot)
         if (!snapshot.isEmpty) restoreContext(snapshot)
@@ -2363,17 +2442,38 @@ class AiChatViewModel(
     /**
      * 重新生成：为某条用户消息追加一个新的回答版本（不重复写入用户消息）。
      * 与 deepseek 一致，可在多个版本间翻阅。
+     *
+     * 若这条用户消息来自「生成正文 / 生成梗概」，重新生成时复用对应的生成流程，
+     * 重新提交本章梗概临时块、记忆检索与字数约束；普通聊天轮次仍走聊天请求。
      */
-    fun regenerate(userMessageId: Long) = launchGenerating {
-        val sid = _sessionId.value ?: return@launchGenerating
+    fun regenerate(userMessageId: Long, onSummary: (String) -> Unit = {}) = viewModelScope.launch {
+        val sid = _sessionId.value ?: return@launch
         val modelId = activeModelId.value
         if (modelId <= 0L) {
             errorMessage.value = "请先在设置中配置并选择一个模型"
-            return@launchGenerating
+            return@launch
         }
-        val target = userMessageId.takeIf { it > 0 } ?: return@launchGenerating
-        val next = chatRepository.nextVariantIndex(target)
-        runGeneration(sid, modelId, "", replyToUserId = target, historyEndId = target, variantIndex = next)
+        val target = userMessageId.takeIf { it > 0 } ?: return@launch
+        val content = chatRepository.getMessage(target)?.content.orEmpty()
+        val kind = generationKindOf(content)
+        if (kind != null) {
+            // 生成轮次：走生成流程，提示词取该轮原始内容（剥掉生成标记），结果作为该轮的新回答版本
+            val prompt = generationPromptOf(content, kind)
+            launchGeneration { genSid ->
+                if (kind == genLabelSummary) {
+                    executeGenerateSummary(genSid, prompt, editingId = 0L, regenerateUserId = target)
+                } else {
+                    executeGenerateContent(
+                        genSid, prompt, editingId = 0L, regenerateUserId = target, onSummary = onSummary
+                    )
+                }
+            }
+            return@launch
+        }
+        launchGenerating {
+            val next = chatRepository.nextVariantIndex(target)
+            runGeneration(sid, modelId, "", replyToUserId = target, historyEndId = target, variantIndex = next)
+        }
     }
 
     /** 保存对话中某条消息的编辑结果 */
@@ -2803,6 +2903,20 @@ class AiChatViewModel(
     /** 生成路径落库的「用户消息」标记：把生成轮次与普通对话区分开 */
     private val genLabelSummary = "生成梗概"
     private val genLabelContent = "生成正文"
+
+    /**
+     * 识别一条用户消息属于哪种生成轮次：内容以「生成正文 / 生成梗概」标记开头时返回该标记，
+     * 普通聊天返回 null。「重新生成」据此决定是否复用生成流程（含本章梗概临时块、记忆检索、字数约束）。
+     */
+    private fun generationKindOf(content: String): String? = when {
+        content == genLabelContent || content.startsWith("$genLabelContent\n") -> genLabelContent
+        content == genLabelSummary || content.startsWith("$genLabelSummary\n") -> genLabelSummary
+        else -> null
+    }
+
+    /** 从生成轮次的用户消息里取出原始提示词（去掉生成标记） */
+    private fun generationPromptOf(content: String, label: String): String =
+        content.removePrefix(label).trimStart('\n')
 
     /**
      * 「＋本章梗概」：勾选时随消息发送但不在气泡显示的附加提示词（含章节名与梗概）。
