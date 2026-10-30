@@ -4,6 +4,7 @@ import com.lianwenqi.app.ai.EmbeddingClient
 import com.lianwenqi.app.ai.EmbeddingGateway
 import com.lianwenqi.app.ai.RemoteEmbeddingGateway
 import com.lianwenqi.app.data.dao.ChapterDao
+import com.lianwenqi.app.data.dao.ChapterVectorTime
 import com.lianwenqi.app.data.dao.ChunkHashRow
 import com.lianwenqi.app.data.dao.MemoryChunkDao
 import com.lianwenqi.app.data.dao.VolumeDao
@@ -108,6 +109,13 @@ class MemoryRepositoryTest {
 
         override suspend fun latestChapterUpdatedAt(bookId: Long) =
             rows.filter { it.bookId == bookId }.maxOfOrNull { it.chapterUpdatedAt }
+
+        override suspend fun vectorTimesByBook(bookId: Long) =
+            rows.filter { it.bookId == bookId }
+                .groupBy { it.chapterId }
+                .map { (chapterId, list) ->
+                    ChapterVectorTime(chapterId, list.maxOf { it.chapterUpdatedAt })
+                }
 
         override suspend fun vectorizedChapterIds(bookId: Long) =
             rows.filter { it.bookId == bookId }.map { it.chapterId }.distinct()

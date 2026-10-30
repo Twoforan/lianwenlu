@@ -59,8 +59,9 @@ object StyleAnalysisEditor {
     )
 
     /** 用原档案的证据与版本构造编辑后的分析结果；证据不做修改，避免凭空改写结论依据 */
-    fun toAnalysis(form: StyleAnalysisForm, template: StyleAnalysis): StyleAnalysis =
-        StyleAnalysis(
+    fun toAnalysis(form: StyleAnalysisForm, template: StyleAnalysis): StyleAnalysis {
+        val guidelines = items(form.writingGuidelines)
+        return StyleAnalysis(
             schemaVersion = template.schemaVersion,
             overview = form.overview.trim(),
             narration = items(form.narration),
@@ -71,10 +72,13 @@ object StyleAnalysisEditor {
             dialogue = items(form.dialogue),
             emotion = items(form.emotion),
             transition = items(form.transition),
-            writingGuidelines = items(form.writingGuidelines),
+            writingGuidelines = guidelines,
             avoidances = items(form.avoidances),
-            evidenceAndConfidence = template.evidenceAndConfidence
+            evidenceAndConfidence = template.evidenceAndConfidence,
+            // 指导正文可被编辑，只保留仍能对应上的可信度信息，避免凭空补造结论依据
+            guidelineConfidence = template.guidelineConfidence.filter { it.rule in guidelines }
         )
+    }
 
     fun update(form: StyleAnalysisForm, field: StyleAnalysisField, value: String): StyleAnalysisForm =
         when (field) {

@@ -78,6 +78,43 @@ class StyleConstraintRendererTest {
     }
 
     @Test
+    fun render_marksWeakV2EvidenceAsLowConfidence() {
+        val analysis = testAnalysis().copy(
+            evidenceAndConfidence = listOf(
+                StyleEvidence(
+                    dimension = "diction",
+                    evidence = "样本中词汇特征出现次数较少",
+                    feature = "动词密度高于形容词",
+                    confidenceInterval = StyleConfidenceInterval(20, 55),
+                    evidenceQuality = StyleEvidenceQuality.WEAK,
+                    sampleCoverage = StyleSampleCoverage.NARROW
+                )
+            )
+        )
+        val block = StyleConstraintRenderer.render(analysis)
+        assertTrue(block.contains("词汇与表达（可信度低，仅作参考）"))
+    }
+
+    @Test
+    fun render_doesNotDowngradeStrongV2Evidence() {
+        val analysis = testAnalysis().copy(
+            evidenceAndConfidence = listOf(
+                StyleEvidence(
+                    dimension = "diction",
+                    evidence = "多个片段动作动词密集而形容词较少",
+                    feature = "动词密度高于形容词",
+                    confidenceInterval = StyleConfidenceInterval(75, 92),
+                    evidenceQuality = StyleEvidenceQuality.STRONG,
+                    sampleCoverage = StyleSampleCoverage.BROAD
+                )
+            )
+        )
+        val block = StyleConstraintRenderer.render(analysis)
+        assertTrue(block.contains("词汇与表达："))
+        assertFalse(block.contains("可信度低"))
+    }
+
+    @Test
     fun render_doesNotInventFieldsThatAreEmpty() {
         val analysis = testAnalysis().copy(
             sentenceRhythm = emptyList(),

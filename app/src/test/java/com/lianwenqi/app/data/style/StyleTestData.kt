@@ -7,6 +7,7 @@ import com.lianwenqi.app.data.entity.StyleProfile
  * [tag] 用来区分不同书籍 / 档案（如「甲」「乙」），便于断言请求里注入的是哪一份。
  */
 internal fun testAnalysis(tag: String = "甲"): StyleAnalysis = StyleAnalysis(
+    schemaVersion = STYLE_ANALYSIS_SCHEMA_VERSION,
     overview = "${tag}书整体风格：冷静克制，以动作与环境细节推进叙事",
     narration = listOf("${tag}书采用第三人称限知视角，叙述距离贴近主角"),
     sentenceRhythm = listOf("${tag}书以短句为主，长句只用于情绪递进处"),
@@ -22,8 +23,56 @@ internal fun testAnalysis(tag: String = "甲"): StyleAnalysis = StyleAnalysis(
     ),
     avoidances = listOf("${tag}书避免华丽排比与长篇抒情独白"),
     evidenceAndConfidence = listOf(
-        StyleEvidence("narration", StyleConfidence.HIGH, "${tag}书样本前 3 章均保持同一视角"),
-        StyleEvidence("sentenceRhythm", StyleConfidence.MEDIUM, "${tag}书样本平均句长明显偏短")
+        StyleEvidence(
+            dimension = "narration",
+            evidence = "${tag}书样本前 3 章均保持同一视角",
+            feature = "${tag}书叙述距离贴近主角",
+            confidenceInterval = StyleConfidenceInterval(75, 92),
+            evidenceQuality = StyleEvidenceQuality.STRONG,
+            sampleCoverage = StyleSampleCoverage.BROAD,
+            applicability = "适用于人物交流与心理描写场景",
+            limitations = ""
+        ),
+        StyleEvidence(
+            dimension = "diction",
+            evidence = "${tag}书样本动作动词密集而形容词较少",
+            feature = "${tag}书动词密度高于形容词",
+            confidenceInterval = StyleConfidenceInterval(60, 85),
+            evidenceQuality = StyleEvidenceQuality.MODERATE,
+            sampleCoverage = StyleSampleCoverage.PARTIAL,
+            applicability = "适用于动作与对话场景",
+            limitations = "抒情段落证据有限"
+        ),
+        StyleEvidence(
+            dimension = "sentenceRhythm",
+            evidence = "${tag}书样本平均句长明显偏短",
+            feature = "${tag}书短句为主",
+            confidenceInterval = StyleConfidenceInterval(70, 90),
+            evidenceQuality = StyleEvidenceQuality.STRONG,
+            sampleCoverage = StyleSampleCoverage.BROAD,
+            applicability = "适用于紧张与转折场景",
+            limitations = ""
+        )
+    ),
+    guidelineConfidence = listOf(
+        StyleGuidelineConfidence(
+            rule = "${tag}书仿写时先写可见动作，再写人物内心",
+            confidenceInterval = StyleConfidenceInterval(70, 90),
+            evidenceQuality = StyleEvidenceQuality.MODERATE,
+            sampleCoverage = StyleSampleCoverage.PARTIAL,
+            evidence = "${tag}书多个片段先写动作再写反应",
+            applicability = "适用于人物交流场景",
+            limitations = ""
+        ),
+        StyleGuidelineConfidence(
+            rule = "${tag}书仿写时用短句收束段落，避免长段议论",
+            confidenceInterval = StyleConfidenceInterval(65, 88),
+            evidenceQuality = StyleEvidenceQuality.MODERATE,
+            sampleCoverage = StyleSampleCoverage.PARTIAL,
+            evidence = "${tag}书段落多以短句收尾",
+            applicability = "适用于段落收束",
+            limitations = ""
+        )
     )
 )
 

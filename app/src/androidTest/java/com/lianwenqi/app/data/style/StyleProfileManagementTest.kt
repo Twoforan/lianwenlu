@@ -147,7 +147,7 @@ class StyleProfileManagementTest {
 
     @Test
     fun 未知版本仅改名时原样保留分析数据() = runBlocking {
-        val oldJson = analysisJson(schemaVersion = "2")
+        val oldJson = analysisJson(schemaVersion = "3")
         val original = createProfile(name = "旧版档案", json = oldJson)
 
         val result = updater.update(original, "旧版档案（改名）", analysis = null)

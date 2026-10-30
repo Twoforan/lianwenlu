@@ -3,6 +3,7 @@ package com.lianwenqi.app.ui.screens
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -74,9 +75,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
-import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerEventPass
@@ -123,6 +122,7 @@ import com.lianwenqi.app.util.TextTool
 import com.lianwenqi.app.util.importedName
 import com.lianwenqi.app.util.importedPath
 import com.lianwenqi.app.util.readerFontFamily
+import com.lianwenqi.app.util.volumeKeyNavDirection
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.SharingStarted
@@ -398,11 +398,16 @@ fun ReaderScreen(bookId: Long, chapterId: Long, onBack: () -> Unit) {
             .focusRequester(focusRequester)
             .onPreviewKeyEvent { event ->
                 if (!settings.volumeKeys) return@onPreviewKeyEvent false
-                val isVolume = event.key == Key.VolumeUp || event.key == Key.VolumeDown
-                if (!isVolume) return@onPreviewKeyEvent false
+                val keyCode = event.nativeKeyEvent.keyCode
+                // 产品口径：音量加键 = 上一页（-1），音量减键 = 下一页（+1）
+                val direction = volumeKeyNavDirection(keyCode) ?: return@onPreviewKeyEvent false
                 if (event.type == KeyEventType.KeyDown && event.nativeKeyEvent.repeatCount == 0) {
-                    navDir = if (event.key == Key.VolumeUp) 1 else -1
+                    navDir = direction
                     navTick++
+                    Log.d(
+                        "ReaderVolumeKeys",
+                        "keyCode=$keyCode -> navDir=$direction (${if (direction > 0) "下一页" else "上一页"})"
+                    )
                 }
                 // 开关键都消费掉，避免系统音量条弹出
                 true

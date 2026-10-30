@@ -60,13 +60,25 @@ class StyleProfileSummaryReaderTest {
     }
 
     @Test
+    fun 旧版档位与新版区间档案都能识别() {
+        val legacy = StyleProfileSummaryReader.read(profile(StyleAnalysisFixtures.validJson()))
+        assertEquals(1, legacy.schemaVersion)
+        assertTrue(legacy.recognizable)
+
+        val v2 = StyleProfileSummaryReader.read(profile(StyleAnalysisFixtures.validV2Json()))
+        assertEquals(2, v2.schemaVersion)
+        assertTrue(v2.recognizable)
+        assertTrue(v2.overview!!.isNotBlank())
+    }
+
+    @Test
     fun 未知版本降级为暂无概述并标记不可识别() {
         val summary = StyleProfileSummaryReader.read(
-            profile(StyleAnalysisFixtures.validJson(schemaVersion = "2"))
+            profile(StyleAnalysisFixtures.validJson(schemaVersion = "3"))
         )
 
         assertNull(summary.overview)
-        assertEquals(2, summary.schemaVersion)
+        assertEquals(3, summary.schemaVersion)
         assertFalse(summary.recognizable)
     }
 

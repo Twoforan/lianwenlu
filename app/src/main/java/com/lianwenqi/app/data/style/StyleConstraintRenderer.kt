@@ -118,13 +118,23 @@ object StyleConstraintRenderer {
             .toList()
     }
 
-    /** 每个维度取最好的一条证据可信度；未标注证据的维度返回 null */
+    /** 每个维度取最好的一条证据可信度；v1 用档位，v2 由 evidenceQuality 映射为同一档位 */
     private fun confidenceByDimension(evidence: List<StyleEvidence>): Map<String, String> {
         if (evidence.isEmpty()) return emptyMap()
         return evidence.groupBy { it.dimension }.mapValues { (_, entries) ->
-            entries.minByOrNull { confidenceRank(it.confidence) }?.confidence ?: StyleConfidence.INSUFFICIENT
+            entries.minByOrNull { confidenceRank(tierOf(it)) }?.let { tierOf(it) }
+                ?: StyleConfidence.INSUFFICIENT
         }
     }
+
+    /** v1 直接使用档位；v2 区间不参与生成，只用证据质量决定「是否标注可信度低」 */
+    private fun tierOf(evidence: StyleEvidence): String =
+        evidence.confidence?.takeIf { it in StyleConfidence.ALL } ?: when (evidence.evidenceQuality) {
+            StyleEvidenceQuality.STRONG -> StyleConfidence.HIGH
+            StyleEvidenceQuality.MODERATE -> StyleConfidence.MEDIUM
+            StyleEvidenceQuality.WEAK -> StyleConfidence.LOW
+            else -> StyleConfidence.INSUFFICIENT
+        }
 
     private fun confidenceRank(confidence: String): Int =
         CONFIDENCE_ORDER.indexOf(confidence).takeIf { it >= 0 } ?: CONFIDENCE_ORDER.size

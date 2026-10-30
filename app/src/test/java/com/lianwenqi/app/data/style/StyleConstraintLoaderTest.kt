@@ -106,7 +106,36 @@ class StyleConstraintLoaderTest {
             writingGuidelines = listOf("证据不足：无法给出仿写指导", "证据不足：无法给出第二条指导"),
             avoidances = listOf("证据不足：无法判断应避免的写法"),
             evidenceAndConfidence = listOf(
-                StyleEvidence("narration", StyleConfidence.INSUFFICIENT, "样本过短，无法观察稳定特征")
+                StyleEvidence(
+                    dimension = "narration",
+                    evidence = "样本过短，无法观察稳定特征",
+                    feature = "叙述视角特征",
+                    confidenceInterval = StyleConfidenceInterval(0, 100),
+                    evidenceQuality = StyleEvidenceQuality.INSUFFICIENT,
+                    sampleCoverage = StyleSampleCoverage.INSUFFICIENT,
+                    applicability = "",
+                    limitations = "样本篇幅过短"
+                ),
+                StyleEvidence(
+                    dimension = "diction",
+                    evidence = "样本过短，无法观察用词倾向",
+                    feature = "用词倾向特征",
+                    confidenceInterval = StyleConfidenceInterval(0, 100),
+                    evidenceQuality = StyleEvidenceQuality.INSUFFICIENT,
+                    sampleCoverage = StyleSampleCoverage.INSUFFICIENT,
+                    applicability = "",
+                    limitations = "样本篇幅过短"
+                ),
+                StyleEvidence(
+                    dimension = "sentenceRhythm",
+                    evidence = "样本过短，无法观察句式节奏",
+                    feature = "句式节奏特征",
+                    confidenceInterval = StyleConfidenceInterval(0, 100),
+                    evidenceQuality = StyleEvidenceQuality.INSUFFICIENT,
+                    sampleCoverage = StyleSampleCoverage.INSUFFICIENT,
+                    applicability = "",
+                    limitations = "样本篇幅过短"
+                )
             )
         )
         val source = FakeStyleSource().apply {

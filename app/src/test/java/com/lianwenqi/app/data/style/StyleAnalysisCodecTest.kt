@@ -2,6 +2,8 @@ package com.lianwenqi.app.data.style
 
 import com.lianwenqi.app.data.entity.StyleProfile
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -121,5 +123,123 @@ class StyleAnalysisCodecTest {
         val success = parseSuccess(StyleAnalysisFixtures.validJson())
         val bytes = success.json.toByteArray(Charsets.UTF_8).size
         assertTrue(bytes <= StyleProfile.MAX_ANALYSIS_JSON_BYTES)
+    }
+
+    // ---------- v2：每条特征各自的可信度区间 ----------
+
+    @Test
+    fun `合法 v2 JSON 解析成功且每条特征各有区间`() {
+        val success = parseSuccess(StyleAnalysisFixtures.validV2Json())
+        val analysis = success.analysis
+        assertEquals(2, analysis.schemaVersion)
+        assertTrue(analysis.evidenceAndConfidence.isNotEmpty())
+        analysis.evidenceAndConfidence.forEach { entry ->
+            assertNotNull(entry.confidenceInterval)
+            assertNull(entry.confidence)
+            assertTrue(entry.feature.isNotBlank())
+            assertTrue(entry.evidenceQuality in StyleEvidenceQuality.ALL)
+            assertTrue(entry.sampleCoverage in StyleSampleCoverage.ALL)
+        }
+        // 仿写指导的可信度按 rule 一一对应，没有丢失
+        assertEquals(analysis.writingGuidelines.size, analysis.guidelineConfidence.size)
+        assertTrue(analysis.writingGuidelines.containsAll(analysis.guidelineConfidence.map { it.rule }))
+        assertTrue(success.json.contains("\"schemaVersion\":2"))
+    }
+
+    @Test
+    fun `同一维度多个特征不会被合并成一条`() {
+        val analysis = parseSuccess(StyleAnalysisFixtures.validV2Json()).analysis
+        val narration = analysis.evidenceAndConfidence.filter { it.dimension == "narration" }
+        assertEquals(2, narration.size)
+        // 两个特征保留各自区间，不取平均、不合并为单一结论
+        assertEquals(setOf(80 to 95, 35 to 65), narration.mapNotNull { it.confidenceInterval }
+            .map { it.lower to it.upper }.toSet())
+        assertTrue(narration.any { it.evidenceQuality == StyleEvidenceQuality.STRONG })
+        assertTrue(narration.any { it.evidenceQuality == StyleEvidenceQuality.WEAK })
+    }
+
+    @Test
+    fun `证据不足特征可以保留为高度不确定的区间`() {
+        val analysis = parseSuccess(StyleAnalysisFixtures.validV2Json()).analysis
+        val dialogue = analysis.evidenceAndConfidence.single { it.dimension == "dialogue" }
+        assertEquals(StyleEvidenceQuality.INSUFFICIENT, dialogue.evidenceQuality)
+        assertEquals(StyleSampleCoverage.INSUFFICIENT, dialogue.sampleCoverage)
+        assertEquals(StyleConfidenceInterval(0, 100), dialogue.confidenceInterval)
+    }
+
+    @Test
+    fun `可信度区间上下界非法时被拒绝`() {
+        val cases = mapOf(
+            "\"lower\":90,\"upper\":60" to "可信度区间",
+            "\"lower\":80,\"upper\":120" to "可信度区间",
+            "\"lower\":-5,\"upper\":95" to "可信度区间",
+            "\"lower\":80.5,\"upper\":95" to "必须是整数"
+        )
+        cases.forEach { (bad, expected) ->
+            val raw = StyleAnalysisFixtures.validV2Json()
+                .replaceFirst("\"lower\":80,\"upper\":95", bad)
+            val message = parseFailure(raw)
+            assertTrue("$bad -> $message", message.contains(expected))
+        }
+    }
+
+    @Test
+    fun `缺少可信度区间时被拒绝`() {
+        val raw = StyleAnalysisFixtures.validV2Json()
+            .replaceFirst("\"confidenceInterval\":{\"lower\":80,\"upper\":95},", "")
+        val message = parseFailure(raw)
+        assertTrue(message.contains("confidenceInterval"))
+    }
+
+    @Test
+    fun `证据质量或覆盖度取值非法时被拒绝`() {
+        val badQuality = StyleAnalysisFixtures.validV2Json()
+            .replaceFirst("\"evidenceQuality\":\"strong\"", "\"evidenceQuality\":\"certain\"")
+        assertTrue(parseFailure(badQuality).contains("evidenceQuality"))
+
+        val badCoverage = StyleAnalysisFixtures.validV2Json()
+            .replaceFirst("\"sampleCoverage\":\"broad\"", "\"sampleCoverage\":\"unknown\"")
+        assertTrue(parseFailure(badCoverage).contains("sampleCoverage"))
+    }
+
+    @Test
+    fun `v2 缺少必备证据维度时被拒绝`() {
+        val raw = StyleAnalysisFixtures.validV2Json(
+            evidence = """[{"dimension":"narration","feature":"叙述距离贴近主角","confidenceInterval":{"lower":80,"upper":95},"evidenceQuality":"strong","sampleCoverage":"broad","evidence":"多个片段先写动作停顿"},{"dimension":"diction","feature":"动词密度高于形容词","confidenceInterval":{"lower":70,"upper":90},"evidenceQuality":"moderate","sampleCoverage":"partial","evidence":"动作动词密集而形容词较少"}]"""
+        )
+        val message = parseFailure(raw)
+        assertTrue(message.contains("sentenceRhythm"))
+    }
+
+    @Test
+    fun `v2 仿写指导使用字符串数组时仍可解析且无区间信息`() {
+        val raw = StyleAnalysisFixtures.validV2Json(
+            writingGuidelines = """["写迟疑时先写动作停顿，再用短句收尾","场景转换前用一个具体物件作为落点"]"""
+        )
+        val analysis = parseSuccess(raw).analysis
+        assertEquals(2, analysis.writingGuidelines.size)
+        assertTrue(analysis.guidelineConfidence.isEmpty())
+    }
+
+    @Test
+    fun `v2 规范化编码后再次解析保留指导可信度`() {
+        val first = parseSuccess(StyleAnalysisFixtures.validV2Json()).analysis
+        val again = parseSuccess(StyleAnalysisCodec.encode(first)).analysis
+        assertEquals(first, again)
+        assertEquals(first.guidelineConfidence, again.guidelineConfidence)
+    }
+
+    @Test
+    fun `v1 旧数据保留原始档位且不换算成区间`() {
+        val analysis = parseSuccess(StyleAnalysisFixtures.validJson()).analysis
+        assertEquals(1, analysis.schemaVersion)
+        assertEquals("high", analysis.evidenceAndConfidence.first().confidence)
+        analysis.evidenceAndConfidence.forEach { entry ->
+            assertNull(entry.confidenceInterval)
+            assertEquals("", entry.feature)
+            assertNull(entry.evidenceQuality)
+            assertNull(entry.sampleCoverage)
+        }
+        assertTrue(analysis.guidelineConfidence.isEmpty())
     }
 }

@@ -61,7 +61,7 @@ import com.lianwenqi.app.data.style.StyleAnalysisParseResult
 import com.lianwenqi.app.data.style.StyleProfileSummary
 import com.lianwenqi.app.data.style.StyleProfileSummaryReader
 import com.lianwenqi.app.data.style.StyleUpdateResult
-import com.lianwenqi.app.data.style.STYLE_ANALYSIS_SCHEMA_VERSION
+import com.lianwenqi.app.data.style.SUPPORTED_STYLE_ANALYSIS_VERSIONS
 import com.lianwenqi.app.ui.appViewModel
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -550,7 +550,7 @@ private fun StyleProfileCompatibilityNotice(summary: StyleProfileSummary) {
             Text(
                 when {
                     summary.schemaVersion == null -> "无法识别该档案的分析结果"
-                    summary.schemaVersion != STYLE_ANALYSIS_SCHEMA_VERSION ->
+                    summary.schemaVersion !in SUPPORTED_STYLE_ANALYSIS_VERSIONS ->
                         "分析结果版本 ${summary.schemaVersion} 暂不支持"
                     else -> "分析结果不完整或格式不受支持"
                 },
@@ -633,7 +633,7 @@ private fun StyleProfileReadonlyContent(loaded: StyleProfileDetailState.Loaded) 
         title = "证据与可信度",
         items = analysis.evidenceAndConfidence.map { evidence ->
             "${analysisDimensionLabel(evidence.dimension)}｜" +
-                "${analysisConfidenceLabel(evidence.confidence)}：${evidence.evidence}"
+                "${analysisEvidenceConfidenceLabel(evidence)}：${evidence.evidence}"
         }
     )
 

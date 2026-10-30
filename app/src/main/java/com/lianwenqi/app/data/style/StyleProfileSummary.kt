@@ -60,7 +60,8 @@ object StyleProfileSummaryReader {
         "transition",
         "writingGuidelines",
         "avoidances",
-        "evidenceAndConfidence"
+        "evidenceAndConfidence",
+        "guidelineConfidence"
     )
 
     private const val MAX_SAMPLE_NAMES = 5
@@ -70,7 +71,7 @@ object StyleProfileSummaryReader {
             json.parseToJsonElement(profile.analysisJson) as? JsonObject
         }.getOrNull()
         val version = (analysisObj?.get("schemaVersion") as? JsonPrimitive)?.intOrNull
-        val recognized = version == STYLE_ANALYSIS_SCHEMA_VERSION &&
+        val recognized = version in SUPPORTED_STYLE_ANALYSIS_VERSIONS &&
             StyleAnalysisCodec.parse(profile.analysisJson) is StyleAnalysisParseResult.Success
 
         val overview = if (recognized) {

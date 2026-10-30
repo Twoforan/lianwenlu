@@ -75,11 +75,19 @@ data class BookMemoryProgress(
     /** 最后已向量化章节所在的卷标题（无卷时为空） */
     val lastVolumeTitle: String,
     /** 最后已向量化章节的标题 */
-    val lastChapterTitle: String
+    val lastChapterTitle: String,
+    /** 正文改动后尚未重新向量化的章节数 */
+    val outdatedChapters: Int = 0
 )
 
 /** 详情页里单个章节的向量化状态 */
-data class ChapterMemoryStatus(val id: Long, val title: String, val vectorized: Boolean)
+data class ChapterMemoryStatus(
+    val id: Long,
+    val title: String,
+    val vectorized: Boolean,
+    /** 已有向量但正文已改动，需要重新向量化 */
+    val outdated: Boolean = false
+)
 
 /** 详情页里的一卷（[volumeId] 为 null 表示未分卷章节） */
 data class VolumeMemoryStatus(val volumeId: Long?, val title: String, val chapters: List<ChapterMemoryStatus>)
@@ -164,23 +172,40 @@ class MemoryProgressViewModel(private val container: AppContainer) : ViewModel()
     private suspend fun compute(): List<BookMemoryProgress> = books.value.map { book ->
         val chapters = bookRepo.getChapters(book.id)
         val volumeTitles = bookRepo.getVolumes(book.id).associate { it.id to it.title }
-        val done = memory.vectorizedChapterIds(book.id).toSet()
-        val last = chapters.lastOrNull { it.id in done }
+        // 「已向量化」以向量块记录的正文时间为准：正文改动后旧块仍在，但必须显示为未完成，
+        // 否则用户会以为自动更新生效了，实际检索仍命中旧正文
+        val times = memory.vectorizedTimes(book.id)
+        fun upToDate(ch: com.lianwenqi.app.data.entity.Chapter) =
+            ch.content.isNotBlank() && (times[ch.id] ?: 0L) >= ch.updatedAt
+        val done = chapters.filter(::upToDate)
+        val outdated = chapters.count { ch ->
+            ch.content.isNotBlank() && (times[ch.id] ?: 0L) > 0L && (times[ch.id] ?: 0L) < ch.updatedAt
+        }
+        val last = done.lastOrNull()
         BookMemoryProgress(
             book = book,
             totalChapters = chapters.size,
-            doneChapters = chapters.count { it.id in done },
+            doneChapters = done.size,
             lastVolumeTitle = last?.volumeId?.let { volumeTitles[it] } ?: "",
-            lastChapterTitle = last?.title ?: ""
+            lastChapterTitle = last?.title ?: "",
+            outdatedChapters = outdated
         )
     }
 
     private suspend fun computeDetail(bookId: Long): BookMemoryDetail? {
         val book = books.value.firstOrNull { it.id == bookId } ?: return null
         val chapters = bookRepo.getChapters(bookId)
-        val done = memory.vectorizedChapterIds(bookId).toSet()
-        fun status(ch: com.lianwenqi.app.data.entity.Chapter) =
-            ChapterMemoryStatus(ch.id, ch.title, ch.id in done)
+        val times = memory.vectorizedTimes(bookId)
+        fun status(ch: com.lianwenqi.app.data.entity.Chapter): ChapterMemoryStatus {
+            val vectorizedAt = times[ch.id]
+            val hasContent = ch.content.isNotBlank()
+            return ChapterMemoryStatus(
+                id = ch.id,
+                title = ch.title,
+                vectorized = hasContent && vectorizedAt != null,
+                outdated = hasContent && vectorizedAt != null && vectorizedAt < ch.updatedAt
+            )
+        }
         val sections = ArrayList<VolumeMemoryStatus>()
         bookRepo.getVolumes(bookId).forEach { v ->
             sections += VolumeMemoryStatus(v.id, v.title, chapters.filter { it.volumeId == v.id }.map(::status))
@@ -408,7 +433,7 @@ private fun MemoryDetailPage(
 ) {
     var askChapter by remember { mutableStateOf<ChapterMemoryStatus?>(null) }
     val total = detail.volumes.sumOf { it.chapters.size }
-    val done = detail.volumes.sumOf { s -> s.chapters.count { it.vectorized } }
+    val done = detail.volumes.sumOf { s -> s.chapters.count { it.vectorized && !it.outdated } }
 
     Scaffold(
         topBar = {
@@ -473,11 +498,19 @@ private fun MemoryDetailPage(
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
+                                val statusLabel = when {
+                                    !chapter.vectorized -> "未向量化"
+                                    chapter.outdated -> "需要更新"
+                                    else -> "已向量化"
+                                }
                                 Text(
-                                    if (chapter.vectorized) "已向量化" else "未向量化",
+                                    statusLabel,
                                     style = MaterialTheme.typography.labelMedium,
-                                    color = if (chapter.vectorized) MaterialTheme.colorScheme.primary
-                                    else MaterialTheme.colorScheme.onSurfaceVariant
+                                    color = when {
+                                        !chapter.vectorized -> MaterialTheme.colorScheme.onSurfaceVariant
+                                        chapter.outdated -> MaterialTheme.colorScheme.tertiary
+                                        else -> MaterialTheme.colorScheme.primary
+                                    }
                                 )
                             }
                             HorizontalDivider()
@@ -568,7 +601,8 @@ private fun filterLabel(selectedGroupId: Long?, groups: List<BookGroup>): String
 }
 
 private fun progressLine(p: BookMemoryProgress): String {
-    if (p.doneChapters == 0) return "尚未向量化 / 共 ${p.totalChapters} 章"
+    val stale = if (p.outdatedChapters > 0) "，${p.outdatedChapters} 章需要更新" else ""
+    if (p.doneChapters == 0) return "尚未向量化 / 共 ${p.totalChapters} 章$stale"
     val at = listOf(p.lastVolumeTitle, p.lastChapterTitle).filter { it.isNotBlank() }.joinToString(" ")
-    return "已向量化至 $at / 共 ${p.totalChapters} 章（已向量化 ${p.doneChapters} 章）"
+    return "已向量化至 $at / 共 ${p.totalChapters} 章（已向量化 ${p.doneChapters} 章$stale）"
 }

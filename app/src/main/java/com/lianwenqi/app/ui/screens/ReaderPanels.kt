@@ -254,7 +254,7 @@ fun ReaderSettingsPanel(
             onChange = onImmersive
         )
         ReaderSwitchRow(
-            label = "音量键翻页（加键下一页 / 减键上一页）",
+            label = "音量键翻页（音量 + 上一页 / 音量 − 下一页）",
             checked = reader.volumeKeys,
             onChange = { on -> onReader { it.copy(volumeKeys = on) } }
         )

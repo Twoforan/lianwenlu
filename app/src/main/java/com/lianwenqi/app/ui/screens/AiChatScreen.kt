@@ -1111,7 +1111,6 @@ private fun AiAssistantPanel(
     val selContent by vm.contentChapterIds.collectAsState()
     val selOutline by vm.selectedOutlineIds.collectAsState()
     val pinnedCats by vm.pinnedOutlineCategories.collectAsState()
-    val summaryOn by vm.currentSummaryOn.collectAsState()
     val chapterAll by vm.chapterAllSelected.collectAsState()
     val summaryAll by vm.summaryAllSelected.collectAsState()
     val contentAll by vm.contentAllSelected.collectAsState()
@@ -1527,7 +1526,7 @@ private fun AiAssistantPanel(
                 preview = { vm.contextPreview() }
             )
 
-            // 底部操作行：＋本章梗概（仅图标）· 快捷提示词（仅图标）· 梗概 / 正文（图标 + 纸飞机）· 发送（仅纸飞机）
+            // 底部操作行：快捷提示词（仅图标）· 梗概 / 正文（图标 + 纸飞机）· 发送（仅纸飞机）
             Row(
                 Modifier
                     .fillMaxWidth()
@@ -1537,14 +1536,6 @@ private fun AiAssistantPanel(
                     .padding(horizontal = 4.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // 本章梗概：切换是否把本章梗概纳入本次请求（仅图标，用梗概图标代替原来的＋号）
-                AssistantBarAction(
-                    modifier = Modifier.weight(1f),
-                    selected = summaryOn,
-                    onClick = { vm.toggleCurrentSummary() },
-                    icon = SummarizeIcon,
-                    contentDescription = "本章梗概"
-                )
                 // 快捷提示词：展开 / 收起快捷提示词面板（仅图标）
                 AssistantBarAction(
                     modifier = Modifier.weight(1f),
@@ -2097,7 +2088,10 @@ private fun ChapterSwitchArrow(icon: ImageVector, desc: String, onClick: () -> U
     }
 }
 
-/** 面板顶部的紧凑筛选标签 */
+/**
+ * 紧凑勾选按钮：自绘容器代替 FilterChip，避免默认内边距在窄屏 / 大字体下把
+ * 「记忆检索」「文风样本」四个字裁掉。文字保持单行，宽度按可用权重分配后仍能完整显示。
+ */
 @Composable
 private fun SmallChip(
     label: String,
@@ -2106,20 +2100,34 @@ private fun SmallChip(
     enabled: Boolean = true,
     modifier: Modifier = Modifier
 ) {
-    FilterChip(
-        selected = selected,
-        enabled = enabled,
-        onClick = onClick,
-        modifier = modifier.height(30.dp),
-        label = {
-            Text(
-                label,
-                style = MaterialTheme.typography.labelMedium,
-                maxLines = 1,
-                softWrap = false
-            )
-        }
-    )
+    val container = if (selected) {
+        MaterialTheme.colorScheme.secondaryContainer
+    } else {
+        MaterialTheme.colorScheme.surface
+    }
+    val content = if (selected) {
+        MaterialTheme.colorScheme.onSecondaryContainer
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    Box(
+        modifier = modifier
+            .height(30.dp)
+            .clip(RoundedCornerShape(15.dp))
+            .background(if (enabled) container else container.copy(alpha = 0.4f))
+            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(15.dp))
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 4.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelMedium,
+            color = if (enabled) content else content.copy(alpha = 0.38f),
+            maxLines = 1,
+            softWrap = false
+        )
+    }
 }
 
 // ── 选择面板 / 弹窗配色（对齐四份设计稿：纸白底 + 淡紫点缀） ──

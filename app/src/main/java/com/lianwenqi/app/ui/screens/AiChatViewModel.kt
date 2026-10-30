@@ -1,5 +1,7 @@
 package com.lianwenqi.app.ui.screens
 
+import android.util.Log
+
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lianwenqi.app.AppContainer
@@ -88,6 +90,9 @@ import kotlinx.coroutines.launch
 
 /** 消息超长的统一提示：只提示、不提交，也不做任何截断 */
 private const val MSG_TOO_LONG = "消息过长，请缩短后重试"
+
+/** 记忆检索自动向量化的日志 tag：失败不打断发送，但必须能在 logcat 里定位原因 */
+private const val MEMORY_LOG_TAG = "MemoryAutoVectorize"
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class AiChatViewModel(
@@ -2179,8 +2184,8 @@ class AiChatViewModel(
 
     /**
      * 勾选记忆检索时的自动向量化前置处理：
-     * A3 开启 → 仅在正文确实比已向量化进度更新时才后台静默续跑（无变化则完全不启动，
-     *   避免每轮发送都空跑一遍全书向量化、连带刷出一串「正在向量化本书」提示）；
+     * A3 开启 → 仅在正文确实比已向量化进度更新时静默续跑，并等增量完成后再发送
+     *   （无变化则完全不启动，避免每轮发送都空跑一遍全书向量化、连带刷出一串「正在向量化本书」提示）；
      * A3 关闭 → 若正文比已向量化进度更新，返回 true 交由 UI 弹窗询问。
      */
     private suspend fun shouldAskMemoryVectorize(): Boolean {
@@ -2188,9 +2193,14 @@ class AiChatViewModel(
         val bookId = currentMemoryBookId() ?: return false
         if (!hasNewerContentThanVectorized(bookId)) return false
         if (prefs.memoryAutoVectorize.first()) {
-            // 后台静默续跑：不写 memoryVectorizing，界面上不出现任何「正在向量化」提示
-            // （约定：向量化 / 检索 / 组装参考资料对用户全部不可见，用户只看得到写文模型的回答）
-            container.appScope.launch { container.memoryRepository.vectorize(bookId) { } }
+            // 静默续跑：不写 memoryVectorizing，界面上不出现任何「正在向量化」提示。
+            // 必须等本次增量完成后再进入生成：生成阶段的记忆检索若与向量化并发，
+            // 会先读到该章的旧向量块，表现为「改了正文仍召回旧片段 / 新关键词召回不到」。
+            var lastError: String? = null
+            runCatching {
+                container.memoryRepository.vectorize(bookId) { if (it.error != null) lastError = it.error }
+            }.onFailure { Log.w(MEMORY_LOG_TAG, "自动向量化失败", it) }
+            lastError?.let { Log.w(MEMORY_LOG_TAG, "自动向量化未完成：$it") }
             return false
         }
         return hasNewerContentThanVectorized(bookId)

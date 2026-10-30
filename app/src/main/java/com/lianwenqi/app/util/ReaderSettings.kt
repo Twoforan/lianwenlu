@@ -8,6 +8,7 @@ import android.graphics.Canvas
 import android.graphics.Color as AndroidColor
 import android.net.Uri
 import android.provider.OpenableColumns
+import android.view.KeyEvent
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import com.lianwenqi.app.R
@@ -67,6 +68,17 @@ data class ReaderSettings(
     /** 已导入背景图，元素格式 "显示名|绝对路径" */
     val importedImages: Set<String> = emptySet()
 )
+
+/**
+ * 音量键 → 翻页方向：+1 下一页、-1 上一页，非音量键返回 null。
+ * 产品口径（已确认）：音量加键上一页、音量减键下一页。
+ * UI 文案「上一页 / 下一页」与返回值一一对应，不依赖任何可能反直觉的内部枚举名。
+ */
+fun volumeKeyNavDirection(keyCode: Int): Int? = when (keyCode) {
+    KeyEvent.KEYCODE_VOLUME_UP -> -1
+    KeyEvent.KEYCODE_VOLUME_DOWN -> 1
+    else -> null
+}
 
 /** 预设背景图片（与 res/drawable-nodpi 中的文件一一对应） */
 data class ReaderBackgroundPreset(val key: String, val label: String, val resId: Int)

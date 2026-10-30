@@ -75,4 +75,34 @@ class StyleAnalysisEditorTest {
         assertEquals(form.narration, updated.narration)
         assertEquals(form.avoidances, updated.avoidances)
     }
+
+    // ---------- v2：编辑后保留每条特征的可信度区间 ----------
+
+    private val v2Analysis: StyleAnalysis =
+        (StyleAnalysisCodec.parse(StyleAnalysisFixtures.validV2Json())
+            as StyleAnalysisParseResult.Success).analysis
+
+    @Test
+    fun v2表单往返保留特征区间与指导可信度() {
+        val form = StyleAnalysisEditor.toForm(v2Analysis)
+        val restored = StyleAnalysisEditor.toAnalysis(form, v2Analysis)
+
+        assertEquals(v2Analysis, restored)
+        assertNull(StyleAnalysisCodec.validate(restored))
+        assertEquals(v2Analysis.evidenceAndConfidence, restored.evidenceAndConfidence)
+        assertEquals(v2Analysis.guidelineConfidence, restored.guidelineConfidence)
+    }
+
+    @Test
+    fun v2修改指导正文后只保留仍能对应的可信度() {
+        val form = StyleAnalysisEditor.toForm(v2Analysis).copy(
+            writingGuidelines = v2Analysis.writingGuidelines.first() + "\n全新的第二条仿写指导"
+        )
+        val edited = StyleAnalysisEditor.toAnalysis(form, v2Analysis)
+
+        assertEquals(2, edited.writingGuidelines.size)
+        assertEquals(1, edited.guidelineConfidence.size)
+        assertEquals(v2Analysis.writingGuidelines.first(), edited.guidelineConfidence.single().rule)
+        assertNull(StyleAnalysisCodec.validate(edited))
+    }
 }

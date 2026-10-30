@@ -117,7 +117,7 @@ class StyleConstraintLoader(
             ?: return BookStyleSnapshot.Unavailable(
                 bookId, styleId, profile.name, StyleLoadError.INVALID_JSON
             )
-        if (version != STYLE_ANALYSIS_SCHEMA_VERSION) {
+        if (version !in SUPPORTED_STYLE_ANALYSIS_VERSIONS) {
             return BookStyleSnapshot.Unavailable(
                 bookId, styleId, profile.name, StyleLoadError.UNSUPPORTED_VERSION
             )

@@ -121,6 +121,10 @@ class MemoryRepository(
     /** 某书已向量化的章节 id 快照（进度页计算「到第X卷第Y章」用） */
     suspend fun vectorizedChapterIds(bookId: Long): List<Long> = chunkDao.vectorizedChapterIds(bookId)
 
+    /** 本书各章已存向量对应的正文更新时间；进度页据此区分「已向量化 / 需要更新」 */
+    suspend fun vectorizedTimes(bookId: Long): Map<Long, Long> =
+        chunkDao.vectorTimesByBook(bookId).associate { it.chapterId to it.chapterUpdatedAt }
+
     override suspend fun latestVectorizedUpdatedAt(bookId: Long): Long? =
         chunkDao.latestChapterUpdatedAt(bookId)
 

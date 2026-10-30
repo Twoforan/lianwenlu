@@ -64,6 +64,7 @@ import com.lianwenqi.app.data.entity.StyleProfile
 import com.lianwenqi.app.data.style.StyleAnalysis
 import com.lianwenqi.app.data.style.StyleAnalysisDraft
 import com.lianwenqi.app.data.style.StyleAnalysisOutcome
+import com.lianwenqi.app.data.style.StyleEvidence
 import com.lianwenqi.app.data.style.StyleExtractResult
 import com.lianwenqi.app.data.style.StyleLibraryState
 import com.lianwenqi.app.data.style.StyleProfileRow
@@ -1088,7 +1089,7 @@ private fun StyleAnalysisDetailDialog(analysis: StyleAnalysis, onDismiss: () -> 
                 analysis.evidenceAndConfidence.forEach { evidence ->
                     Text(
                         "· ${analysisDimensionLabel(evidence.dimension)}｜" +
-                            "${analysisConfidenceLabel(evidence.confidence)}：${evidence.evidence}",
+                            "${analysisEvidenceConfidenceLabel(evidence)}：${evidence.evidence}",
                         style = MaterialTheme.typography.bodySmall
                     )
                 }
@@ -1133,6 +1134,29 @@ internal fun analysisConfidenceLabel(confidence: String): String = when (confide
     "low" -> "低可信"
     "insufficient" -> "证据不足"
     else -> confidence
+}
+
+/** v2 展示可信度区间与证据质量；v1 只展示原档位，不把档位换算成区间 */
+internal fun analysisEvidenceConfidenceLabel(evidence: StyleEvidence): String {
+    val tier = evidence.confidence?.let { analysisConfidenceLabel(it) }
+    val interval = evidence.confidenceInterval
+        ?.let { "${it.lower}–${it.upper}%" }
+    val quality = evidence.evidenceQuality?.let { quality ->
+        when (quality) {
+            "strong" -> "证据强"
+            "moderate" -> "证据中等"
+            "weak" -> "证据弱"
+            "insufficient" -> "证据不足"
+            else -> quality
+        }
+    }
+    return when {
+        tier != null -> "$tier（旧版档位，无区间）"
+        interval != null && quality != null -> "$interval（$quality）"
+        interval != null -> interval
+        quality != null -> quality
+        else -> "可信度信息缺失"
+    }
 }
 
 /** 顶部统计与解析进度 */

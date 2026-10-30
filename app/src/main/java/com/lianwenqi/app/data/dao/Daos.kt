@@ -267,6 +267,9 @@ interface OutlineDao {
 /** 某章已向量化块的哈希与生成时的章节更新时间，用于增量判定 */
 data class ChunkHashRow(val hash: String, val chapterUpdatedAt: Long)
 
+/** 某章已向量化块对应的最新正文更新时间；进度页据此区分「已向量化 / 需要更新」 */
+data class ChapterVectorTime(val chapterId: Long, val chapterUpdatedAt: Long)
+
 /** 长期记忆：书籍正文向量块的读写 */
 @Dao
 interface MemoryChunkDao {
@@ -290,6 +293,13 @@ interface MemoryChunkDao {
 
     @Query("SELECT MAX(chapterUpdatedAt) FROM memory_chunk WHERE bookId = :bookId")
     suspend fun latestChapterUpdatedAt(bookId: Long): Long?
+
+    /** 本书各章已存向量的正文更新时间（每章取最大），用于进度页判断「需要更新」 */
+    @Query(
+        "SELECT chapterId, MAX(chapterUpdatedAt) AS chapterUpdatedAt FROM memory_chunk " +
+            "WHERE bookId = :bookId GROUP BY chapterId"
+    )
+    suspend fun vectorTimesByBook(bookId: Long): List<ChapterVectorTime>
 
     @Query("SELECT DISTINCT chapterId FROM memory_chunk WHERE bookId = :bookId")
     suspend fun vectorizedChapterIds(bookId: Long): List<Long>
