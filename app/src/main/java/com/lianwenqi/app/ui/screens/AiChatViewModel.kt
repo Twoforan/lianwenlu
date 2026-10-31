@@ -728,6 +728,7 @@ class AiChatViewModel(
                 assembleGenerationTurns(
                     prefix, ref, history, buildSummaryTurns(userPrompt, plan.summaryWordRange, ref.extra, chapterTitle)
                 ),
+                chapterId,
                 onSummary
             )
                 ?: run {
@@ -868,7 +869,11 @@ class AiChatViewModel(
      */
     fun cancelGeneration() {
         val state = _generationState.value
-        if (state != FlowState.CollectingConfig && state != FlowState.Executing) return
+        // 状态已到终态但协程仍在跑（例如弹窗选择后被降级、旧任务收尾未完成）时也必须能取消，
+        // 否则「停止」点不动，界面会一直停在生成中。
+        if (state != FlowState.CollectingConfig && state != FlowState.Executing &&
+            generationJob?.isActive != true
+        ) return
         generationCancelled = true
         generationOutlinePick?.complete(null)
         generationOutlinePick = null
@@ -890,20 +895,24 @@ class AiChatViewModel(
      * 被停止 / 被新任务接管的旧任务不会覆盖新任务的生成态，从根本上避免「一直正在生成中」。
      */
     private fun launchGeneration(block: suspend (Long) -> Unit) {
-        // 执行阶段重复点击：明确提示，不再静默忽略（静默会让人误以为「卡在正在生成中」）
-        if (_generationState.value == FlowState.Executing) {
-            generationMessage.value = "当前正在生成中，请先点击「停止」后再重新发起"
-            return
-        }
+        // 判据必须是「任务是否真的还在跑」，而不是只看状态值：状态可能因为弹窗流程 / 旧任务收尾
+        // 停在 Executing，此时若直接把点击拦下，界面就会一直停在「生成中」，再点「重新生成」也没反应。
         if (generationJob?.isActive == true) {
-            // 收集阶段但已没有任何弹窗在等结果 → 陈旧任务永远等不到结果，直接接管；
-            // 弹窗还在时则让用户先在弹窗里取消，避免两个任务的弹窗互相覆盖
-            if (_generationState.value == FlowState.CollectingConfig && _generationDialog.value == null) {
-                cancelGeneration()
-            } else {
+            // 真的在执行：明确提示，不再静默忽略
+            if (_generationState.value == FlowState.Executing) {
+                generationMessage.value = "当前正在生成中，请先点击「停止」后再重新发起"
+                return
+            }
+            // 收集阶段且弹窗仍在等用户选择：让用户先完成或取消，避免两个任务的弹窗互相覆盖
+            if (_generationState.value == FlowState.CollectingConfig && _generationDialog.value != null) {
                 generationMessage.value = "请先完成或取消当前的生成设置后再试"
                 return
             }
+            // 收集阶段却没有任何弹窗在等结果 → 这个任务永远等不到结果，直接接管
+            cancelGeneration()
+        } else {
+            // 已无在途任务却残留了生成态 / 弹窗 / 「正在生成」回显：先自愈，否则新一轮会被陈旧状态卡住
+            resetGenerationResidue()
         }
         val token = ++generationSeq
         generationCancelled = false
@@ -940,6 +949,25 @@ class AiChatViewModel(
                 }
             }
         }
+    }
+
+    /**
+     * 清掉上一次生成留下的「陈旧残留」：没有在途任务，却还挂着生成态 / 弹窗 / 等待中的选择 /
+     * 「正在生成」回显。不清就会让下一次点击被误判为「正在生成中」而永久发不出去。
+     */
+    private fun resetGenerationResidue() {
+        generationJob = null
+        generationOutlinePick?.complete(null)
+        generationOutlinePick = null
+        generationMemoryScopeAsk?.complete(null)
+        generationMemoryScopeAsk = null
+        generationSummaryFailed?.complete(SummaryFailureChoice.CANCEL)
+        generationSummaryFailed = null
+        _generationDialog.value = null
+        _generationPlan.value = null
+        _generationState.value = FlowState.Idle
+        generationCancelled = false
+        endGenerationStreaming()
     }
 
     /** 把生成请求的流式增量回显到本轮对话的回答位置 */
@@ -1081,9 +1109,9 @@ class AiChatViewModel(
     private suspend fun awaitSummaryWithRetry(
         plan: GenerationPlan,
         turns: List<ChatTurn>,
+        chapterId: Long,
         onSummary: (String) -> Unit
     ): String? {
-        val chapterId = fixedChapterId ?: return null
         while (true) {
             when (val r = runSummaryCall(plan, turns)) {
                 is SummaryCall.Ok -> {
@@ -1095,7 +1123,13 @@ class AiChatViewModel(
                     while (true) {
                         val existing = bookRepository.getChapter(chapterId)?.summary.orEmpty()
                         when (askSummaryFailure(hasExisting = existing.isNotBlank())) {
-                            SummaryFailureChoice.RETRY -> break
+                            SummaryFailureChoice.RETRY -> {
+                                // 弹窗把状态降级成了收集阶段；重试时立即恢复「执行中」，
+                                // 否则梗概重试 + 正文生成的整段时间里界面既没有「生成中」也没有停止入口，
+                                // 生成按钮反而可用，用户容易误点而打断本次生成。
+                                _generationState.value = FlowState.Executing
+                                break
+                            }
                             SummaryFailureChoice.USE_EXISTING -> {
                                 if (existing.isNotBlank()) return existing
                                 // 本章没有可用梗概：留在弹窗继续选择
@@ -1133,6 +1167,8 @@ class AiChatViewModel(
         val query = buildRetrievalQuery(summary, heads)
         if (query.isBlank()) return MemoryRef()
         memorySearchState.value = MemorySearchState.SEARCHING
+        // 必须用 finally 收尾：中途停止（CancellationException）也要让「搜索中」立即结束，
+        // 否则界面会一直停在搜索态；取消异常必须原样抛回，协程才能真正停下来。
         val hits = try {
             container.memoryRepository.retrieveScored(
                 bookId = bookId,
@@ -1142,10 +1178,13 @@ class AiChatViewModel(
                 scope = scope,
                 chapterIds = plan.memoryChapterIds
             )
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Throwable) {
             emptyList()
+        } finally {
+            memorySearchState.value = MemorySearchState.DONE
         }
-        memorySearchState.value = MemorySearchState.DONE
         if (hits.isEmpty()) return MemoryRef()
         val fresh = sp.freshMemoryHits(hits)
         if (fresh.isEmpty()) return MemoryRef()
@@ -2230,6 +2269,19 @@ class AiChatViewModel(
         job?.cancel()
         // 立即清除生成态，避免被取消的旧任务回调稍后才到、导致界面卡在「正在生成」
         resetGeneratingState()
+    }
+
+    /**
+     * 「停止响应 / 停止生成」统一入口：根据当前实际在跑的是哪条流程来选择取消方式。
+     * 界面不能凭组合期的状态快照判断 —— 快照可能已经过期，走错分支时
+     * 「生成正文 / 生成梗概」并不会被取消，界面就会一直停在生成中。
+     */
+    fun stopCurrentWork() {
+        val generationActive = generationJob?.isActive == true ||
+            _generationState.value == FlowState.CollectingConfig ||
+            _generationState.value == FlowState.Executing
+        if (generationActive) cancelGeneration()
+        if (generateJob?.isActive == true || sending.value) stopGenerating()
     }
 
     fun send(overrideText: String? = null, systemPrompt: String = "") = viewModelScope.launch {

@@ -358,7 +358,7 @@ fun AiChatScreen(initialBookId: Long?) {
                     onSwitchVariant = { uid, mid -> vm.switchVariant(uid, mid) },
                     onViewLog = { logTarget = it },
                     onViewPrompt = { promptTarget = it },
-                    onStop = { vm.stopGenerating() },
+                    onStop = { vm.stopCurrentWork() },
                     onManualImport = if (importOutlineOn || importChapterOn) {
                         { manualImportTarget = it }
                     } else null
@@ -811,6 +811,9 @@ fun AiChatScreen(initialBookId: Long?) {
             vm.clearMemoryToast()
         }
     }
+    // 生成流程的选择型弹窗 + 生成提示：会话里含「生成正文 / 生成梗概」轮次时，
+    // 在这里点「重新生成」同样需要弹窗（限定梗概范围 / 记忆范围 / 梗概失败 / 提示），缺了会一直卡在收集阶段
+    GenerationDialogHost(vm = vm, outline = outline, pinnedCategories = pinnedCats)
     if (showSessions) {
         var search by remember { mutableStateOf("") }
         // 分组筛选：null=全部，-1=未分组，其余为分组 id
@@ -1126,9 +1129,7 @@ private fun AiAssistantPanel(
     val memoryVectorizing by vm.memoryVectorizing.collectAsState()
     val memorySearch by vm.memorySearchState.collectAsState()
     val memoryToolReady by vm.memoryToolConfigured.collectAsState()
-    val generationDialog by vm.generationDialog.collectAsState()
     val generationRunning by vm.generationRunning.collectAsState()
-    val generationMessage by vm.generationMessage.collectAsState()
     // 对话分组的展开状态：默认全部收起，用户点开 / 收起后记住，下次进入沿用
     val expandedGroups by vm.expandedChatGroups.collectAsState()
 
@@ -1315,7 +1316,7 @@ private fun AiAssistantPanel(
                     onSwitchVariant = { uid, mid -> vm.switchVariant(uid, mid) },
                     onViewLog = { logTarget = it },
                     onViewPrompt = { promptTarget = it },
-                    onStop = { if (generationRunning) vm.cancelGeneration() else vm.stopGenerating() },
+                    onStop = { vm.stopCurrentWork() },
                     // 「重新生成」识别出生成轮次时，生成的梗概同样可一键写回本章
                     onWriteToChapter = onWriteToChapter,
                     // 「写入梗概」只对本章的回答生效，避免在别的章节的抽屉里误写到当前章节
@@ -1694,73 +1695,8 @@ private fun AiAssistantPanel(
         }
     }
 
-    // 生成相关提示（已生成 / 超上限已截断 / 略短 / 失败等）
-    LaunchedEffect(generationMessage) {
-        generationMessage?.let {
-            Toast.makeText(panelContext, it, Toast.LENGTH_SHORT).show()
-            vm.clearGenerationMessage()
-        }
-    }
-
-    // 生成流程的选择型弹窗：全部在收集阶段弹完，任一取消（含点遮罩 / 返回键）即终止整个流程
-    when (val dialog = generationDialog) {
-        GenerationDialog.PickSummaryOutlines -> {
-            var picked by remember { mutableStateOf(emptySet<Long>()) }
-            OutlinePickerDialog(
-                items = outline,
-                selected = picked,
-                pinnedCategories = pinnedCats,
-                onToggle = { id -> picked = if (id in picked) picked - id else picked + id },
-                onToggleAll = { ids -> picked = if (ids.all { it in picked }) picked - ids else picked + ids },
-                onDismiss = { vm.cancelGeneration() },
-                confirmText = "确定",
-                onConfirm = { vm.confirmSummaryOutlines(picked.toList()) },
-                showCancel = true
-            )
-        }
-
-        is GenerationDialog.PickMemoryScope -> MemoryScopePickerDialog(
-            pick = dialog.pick,
-            onDismiss = { vm.cancelGeneration() },
-            onConfirm = { ids -> vm.confirmGenerationMemoryScope(ids) }
-        )
-
-        is GenerationDialog.SummaryFailed -> AlertDialog(
-            onDismissRequest = { vm.resolveSummaryFailed(SummaryFailureChoice.CANCEL) },
-            title = { Text("梗概生成失败") },
-            text = {
-                Text(
-                    if (dialog.hasExisting) {
-                        "本章梗概未能生成。可以重试，或直接使用本章已有的梗概继续生成正文。"
-                    } else {
-                        "本章梗概未能生成，且本章暂无可用梗概。请重试，或取消本次生成。"
-                    }
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = { vm.resolveSummaryFailed(SummaryFailureChoice.RETRY) }) { Text("重试梗概") }
-            },
-            dismissButton = {
-                Row {
-                    if (dialog.hasExisting) {
-                        TextButton(onClick = {
-                            vm.resolveSummaryFailed(SummaryFailureChoice.USE_EXISTING)
-                        }) { Text("使用已有梗概") }
-                    }
-                    TextButton(onClick = { vm.resolveSummaryFailed(SummaryFailureChoice.CANCEL) }) { Text("取消") }
-                }
-            }
-        )
-
-        is GenerationDialog.Notice -> AlertDialog(
-            onDismissRequest = { vm.cancelGeneration() },
-            title = { Text("无法生成") },
-            text = { Text(dialog.text) },
-            confirmButton = { TextButton(onClick = { vm.cancelGeneration() }) { Text("确定") } }
-        )
-
-        null -> Unit
-    }
+    // 生成流程的选择型弹窗 + 生成提示（导航栏 AI 与侧边 AI 助手共用同一份实现）
+    GenerationDialogHost(vm = vm, outline = outline, pinnedCategories = pinnedCats)
 
     // 「查看日志」：分「预设 / 上下文 / 本轮」三部分回显本轮发送时的提示词（默认收起，逐层展开）
     logTarget?.let { msg ->
@@ -2710,6 +2646,88 @@ private fun buildChatEntries(messages: List<ChatMessage>): List<ChatEntry> {
         }
     }
     return entries
+}
+
+/**
+ * 生成流程的选择型弹窗 + 生成提示（导航栏 AI 与侧边 AI 助手共用）。
+ * 收集阶段的每个决策（限定梗概范围 / 记忆范围 / 梗概失败 / 纯提示）都在这里弹完，
+ * 任一取消（含点遮罩 / 返回键）即终止整个流程。两个界面都必须渲染它：
+ * 少一处，那里的「重新生成」遇到弹窗就会永远停在收集阶段。
+ */
+@Composable
+private fun GenerationDialogHost(
+    vm: AiChatViewModel,
+    outline: List<OutlineItem>,
+    pinnedCategories: Set<String>
+) {
+    val dialog by vm.generationDialog.collectAsState()
+    // 生成相关提示（超上限已截断 / 略短 / 失败 / 正在生成中 等）
+    val message by vm.generationMessage.collectAsState()
+    val context = LocalContext.current
+    LaunchedEffect(message) {
+        message?.let {
+            Toast.makeText(context, it, Toast.LENGTH_SHORT).show()
+            vm.clearGenerationMessage()
+        }
+    }
+    when (val d = dialog) {
+        GenerationDialog.PickSummaryOutlines -> {
+            var picked by remember { mutableStateOf(emptySet<Long>()) }
+            OutlinePickerDialog(
+                items = outline,
+                selected = picked,
+                pinnedCategories = pinnedCategories,
+                onToggle = { id -> picked = if (id in picked) picked - id else picked + id },
+                onToggleAll = { ids -> picked = if (ids.all { it in picked }) picked - ids else picked + ids },
+                onDismiss = { vm.cancelGeneration() },
+                confirmText = "确定",
+                onConfirm = { vm.confirmSummaryOutlines(picked.toList()) },
+                showCancel = true
+            )
+        }
+
+        is GenerationDialog.PickMemoryScope -> MemoryScopePickerDialog(
+            pick = d.pick,
+            onDismiss = { vm.cancelGeneration() },
+            onConfirm = { ids -> vm.confirmGenerationMemoryScope(ids) }
+        )
+
+        is GenerationDialog.SummaryFailed -> AlertDialog(
+            onDismissRequest = { vm.resolveSummaryFailed(SummaryFailureChoice.CANCEL) },
+            title = { Text("梗概生成失败") },
+            text = {
+                Text(
+                    if (d.hasExisting) {
+                        "本章梗概未能生成。可以重试，或直接使用本章已有的梗概继续生成正文。"
+                    } else {
+                        "本章梗概未能生成，且本章暂无可用梗概。请重试，或取消本次生成。"
+                    }
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { vm.resolveSummaryFailed(SummaryFailureChoice.RETRY) }) { Text("重试梗概") }
+            },
+            dismissButton = {
+                Row {
+                    if (d.hasExisting) {
+                        TextButton(onClick = {
+                            vm.resolveSummaryFailed(SummaryFailureChoice.USE_EXISTING)
+                        }) { Text("使用已有梗概") }
+                    }
+                    TextButton(onClick = { vm.resolveSummaryFailed(SummaryFailureChoice.CANCEL) }) { Text("取消") }
+                }
+            }
+        )
+
+        is GenerationDialog.Notice -> AlertDialog(
+            onDismissRequest = { vm.cancelGeneration() },
+            title = { Text("无法生成") },
+            text = { Text(d.text) },
+            confirmButton = { TextButton(onClick = { vm.cancelGeneration() }) { Text("确定") } }
+        )
+
+        null -> Unit
+    }
 }
 
 /** 对话展示项所属的消息 id（用于生成稳定分组键） */
