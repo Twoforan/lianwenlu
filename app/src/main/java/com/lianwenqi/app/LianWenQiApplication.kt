@@ -101,9 +101,8 @@ class AppContainer(val app: Application) {
 
     val memoryRepository: MemoryRepository = MemoryRepository(database, memoryEmbeddingGateway)
 
-    /** 正文生成前的文风样本检索：复用同一套向量网关，硬性按 styleProfileId 过滤 */
-    val styleSampleRetriever: StyleSampleRetriever =
-        StyleSampleRetriever(styleTagRepository) { texts -> memoryEmbeddingGateway.embed(texts) }
+    /** 正文生成前的文风样本抽样：只按标签权重随机抽，硬性按 styleProfileId 过滤 */
+    val styleSampleRetriever: StyleSampleRetriever = StyleSampleRetriever(styleTagRepository)
 }
 
 class LianWenQiApplication : Application() {

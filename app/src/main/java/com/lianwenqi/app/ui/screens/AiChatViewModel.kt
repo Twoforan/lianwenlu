@@ -586,11 +586,10 @@ class AiChatViewModel(
         // 生成请求：聊天同构前缀块 +（开关开启时）「前情提要」参考资料块 + 生成专用块（指令 + 新增参考资料 + 用户输入）
         val history =
             if (prefs.genCarryHistory.first()) generationHistory(sid, round.userId, modelId) else GenerationHistory()
-        // 「文风样式」勾选才打标：读取当前书籍绑定的唯一档案标签；未勾选 / 未绑定 / 无标签时只生成梗概
+        // 「文风样式」勾选才打标：读取用户全局标签 + 当前书籍绑定的档案标签；都为空时只生成梗概
         val withTags = prefs.genStyleEnabled.first()
-        // 只读取当前书籍绑定档案的已有标签；未绑定 / 无标签时正常生成梗概
         val tagProfileId = styleProfileIdOfChapter(chapterId)
-        val tagProfileTags = summaryTaggingProfileTags(tagProfileId, withTags)
+        val tagProfileTags = summaryTaggingTags(tagProfileId, withTags)
         val turns = assembleGenerationTurns(
             prefix, ref, history,
             buildSummaryTurns(userPrompt, plan.summaryWordRange, ref.extra, chapterTitle, withTags, tagProfileTags)
@@ -758,10 +757,12 @@ class AiChatViewModel(
             }
         val summaryTagsEnabled = prefs.genStyleEnabled.first()
         val summaryTagProfileTags = if (summaryTagsEnabled) {
-            summaryTaggingProfileTags(styleProfileIdOfChapter(chapterId), true)
+            summaryTaggingTags(styleProfileIdOfChapter(chapterId), true)
         } else {
             emptyList()
         }
+        // 阶段提示：让「生成梗概 + 文风样本」这类长流程有明确的进度反馈
+        generationStage.value = if (mode == GenerationMode.CONTENT_WITH_SUMMARY) "生成梗概中" else null
         val summary = if (mode == GenerationMode.CONTENT_WITH_SUMMARY) {
             awaitSummaryWithRetry(
                 plan,
@@ -802,6 +803,7 @@ class AiChatViewModel(
         }
 
         val memoryRef = if (plan.memoryRetrieval == RetrievalMode.ON) {
+            generationStage.value = "记忆检索中"
             buildMemoryBlock(plan, chapterId, summary, memoryCap, memoryScope, sp)
         } else {
             MemoryRef()
@@ -815,47 +817,48 @@ class AiChatViewModel(
         // 未勾选时不分析、不抽样、不注入句子参考块，正文按原流程生成
         val styleProfileId = styleProfileIdOfChapter(chapterId)
         val chapterTags = if (summaryTagsEnabled) {
+            generationStage.value = "分析梗概中"
             ensureSummaryTags(chapterId, summary, modelId)
         } else {
             emptyList()
         }
-        // 文风样本 RAG：未勾选「文风样式」时完全不检索；勾选后只检索当前书籍绑定档案的已绑定片段。
-        // 检索失败 / 无结果继续正常生成
-        val styleRetrieval = if (summaryTagsEnabled && styleProfileId > 0L && summary.isNotBlank()) {
+        // 文风样本抽样：未勾选「文风样式」时完全不抽；勾选后只从当前书籍绑定档案里按标签权重随机抽样。
+        // 抽样失败 / 无结果继续正常生成
+        val stylePick = if (summaryTagsEnabled && styleProfileId > 0L && summary.isNotBlank()) {
             try {
-                // 句子关联会让同一标签出现多次，检索前按标签去重，避免重复加分
-                container.styleSampleRetriever.retrieve(
-                    styleProfileId,
-                    summary,
-                    chapterTags.distinctBy { it.category + "\u0000" + it.name }
+                // 传入未去重的句段标签：标签出现次数也参与权重计算
+                container.styleSampleRetriever.pick(
+                    profileId = styleProfileId,
+                    chapterTags = chapterTags
                 )
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
-                Log.w(TAG, "文风样本检索失败：${e.message}")
+                Log.w(TAG, "文风样本抽样失败：${e.message}")
                 null
             }
         } else {
             null
         }
-        // 本章当前梗概中随机抽样 1～3 个带档案标签的句段，仅本次请求临时使用
+        // 本章当前梗概中随机抽样 1～3 个带标签的句段，仅本次请求临时使用
         val sentenceSamples = if (summaryTagsEnabled) {
             sampleSummarySentences(chapterTags, summary, styleProfileId)
         } else {
             emptyList()
         }
         val summarySentenceBlock = buildSummarySentenceTagBlock(sentenceSamples)
-        val styleSamplesBlock = buildStyleSampleBlock(styleRetrieval?.hits.orEmpty())
-        // 只记录检索摘要（不打印完整样本与提示词），遵循现有日志规范
+        val styleSamplesBlock = buildStyleSampleBlock(stylePick?.hits.orEmpty())
+        // 只记录抽样摘要（不打印完整样本与提示词），遵循现有日志规范
         Log.d(
             TAG,
-            "style-rag book=$chapterId profile=$styleProfileId summaryHash=${shortHash(summary)} " +
+            "style-sample book=$chapterId profile=$styleProfileId summaryHash=${shortHash(summary)} " +
                 "tags=${chapterTags.joinToString(",") { "${it.category}:${it.name}" }} " +
                 // 句子参考块只记数量与字数，不打印原句
                 "sentenceSamples=${sentenceSamples.size}/${sentenceSamples.sumOf { it.text.length }}chars " +
-                "chunks=${styleRetrieval?.candidateChunks} hits=${styleRetrieval?.hits?.map { it.chunkId }}" +
-                " vector=${styleRetrieval?.vectorUsed} injected=${styleRetrieval?.hits?.size ?: 0}" +
-                (styleRetrieval?.reason?.takeIf { it.isNotBlank() }?.let { " reason=$it" } ?: "")
+                "chunks=${stylePick?.candidateChunks} matched=${stylePick?.matchedChunks}" +
+                " hits=${stylePick?.hits?.map { it.chunkId }}" +
+                " injected=${stylePick?.hits?.size ?: 0}" +
+                (stylePick?.reason?.takeIf { it.isNotBlank() }?.let { " reason=$it" } ?: "")
         )
         // 正文专用块：文风约束已冻结在会话前缀首块（见 [prepareSessionPrefix]），这里不再重复注入
         val contentTurns = buildContentTurns(
@@ -889,6 +892,7 @@ class AiChatViewModel(
         // 「重新生成」不新增用户消息，也不应清空用户当前正在编辑的输入
         if (regenerateUserId == 0L) input.value = ""
         // 「同时生成梗概」时梗概子调用保持静默，只把正文输出实时回显到对话中
+        generationStage.value = "生成文本中"
         beginGenerationStreaming(round.userId)
         val result = configRepository.sendToModel(
             modelId,
@@ -933,7 +937,9 @@ class AiChatViewModel(
                 memory = memoryRef.text,
                 autoOutline = listOf(ref.autoOutlineLog, adaptive).filter { it.isNotBlank() }.joinToString("\n\n"),
                 userPrompt = userPrompt,
-                fullPrompt = userPrompt.trim().ifBlank { CONTENT_FALLBACK_INPUT }
+                fullPrompt = userPrompt.trim().ifBlank { CONTENT_FALLBACK_INPUT },
+                styleSamples = styleSamplesBlock,
+                sentenceSamples = summarySentenceBlock
             ).encode()
         )
         _generationState.value = FlowState.Done
@@ -1082,6 +1088,7 @@ class AiChatViewModel(
             pendingReplyToId.value = 0L
             streamingContent.value = ""
             streamingReasoning.value = ""
+            generationStage.value = null
         }
     }
 
@@ -1280,20 +1287,32 @@ class AiChatViewModel(
         return bookRepository.getBook(bookId)?.styleId ?: 0L
     }
 
-    /** 生成梗概时的打标标签：只读取当前绑定档案；开关关闭 / 未绑定 / 无标签时返回空 */
-    private suspend fun summaryTaggingProfileTags(profileId: Long, withTags: Boolean): List<StyleTag> {
-        if (!withTags || profileId <= 0L) return emptyList()
-        return try {
-            container.styleTagRepository.profileTags(profileId)
+    /** 生成梗概时的打标标签：用户全局标签 + 当前绑定档案标签；开关关闭或两套都为空时返回空 */
+    private suspend fun summaryTaggingTags(profileId: Long, withTags: Boolean): List<StyleTag> {
+        if (!withTags) return emptyList()
+        val globalTags = try {
+            container.styleTagRepository.userTags()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Throwable) {
             emptyList()
         }
+        val profileTags = if (profileId <= 0L) {
+            emptyList()
+        } else {
+            try {
+                container.styleTagRepository.profileTags(profileId)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                emptyList()
+            }
+        }
+        return globalTags + profileTags
     }
 
     /**
-     * 正文生成时的句子抽样：实时读取本章当前梗概与最新绑定档案的标签，
+     * 正文生成时的句子抽样：实时读取本章当前梗概与「全局 + 当前档案」标签，
      * 只在本次请求中临时使用，不写入任何长期数据。
      */
     private suspend fun sampleSummarySentences(
@@ -1301,13 +1320,14 @@ class AiChatViewModel(
         summary: String,
         profileId: Long
     ): List<SummarySentenceSample> {
-        if (profileId <= 0L || summary.isBlank()) return emptyList()
+        if (summary.isBlank()) return emptyList()
         return try {
-            val profileTags = container.styleTagRepository.profileTags(profileId)
+            val allowedTags = container.styleTagRepository.userTags() +
+                if (profileId > 0L) container.styleTagRepository.profileTags(profileId) else emptyList()
             SummarySentenceSampler.sample(
                 tags = tags,
                 summary = summary,
-                profileTagIds = profileTags.map { it.id }.toSet()
+                tagIds = allowedTags.map { it.id }.toSet()
             )
         } catch (e: CancellationException) {
             throw e
@@ -1318,9 +1338,10 @@ class AiChatViewModel(
 
     /**
      * 正文生成前的梗概标签检查（仅勾选「文风样式」时调用）：
-     * - 关联未过期、带句子定位、且标签仍属于当前绑定档案：直接复用，不重复请求模型；
-     * - 关联缺失 / 已过期 / 属于旧档案：重新分析当前最终梗概并保存（保留用户手动标签）；
-     * - 未绑定档案 / 档案没有标签：不分析、不打标，正文照常生成；
+     * - 每个句段都已有标签（包括用户手动多选）：直接复用，不请求分析模型；
+     * - 关联未过期、带句段定位、且标签仍存在于「全局 + 当前档案」：直接复用；
+     * - 关联缺失 / 已过期 / 标签已删除：重新分析当前最终梗概并保存（保留用户手动标签）；
+     * - 两套标签库都为空：不分析、不打标，正文照常生成；
      * - 分析失败：最多保留手动标签，绝不阻断正文生成。
      */
     private suspend fun ensureSummaryTags(
@@ -1331,9 +1352,15 @@ class AiChatViewModel(
         val text = summary.trim()
         if (text.isBlank() || modelId <= 0L) return emptyList()
         val profileId = styleProfileIdOfChapter(chapterId)
-        // 自动打标只允许使用当前绑定档案的已有标签
-        val profileTags = try {
-            if (profileId <= 0L) emptyList() else container.styleTagRepository.profileTags(profileId)
+        // 打标可用标签 = 用户全局标签 + 当前绑定档案标签
+        val allowedTags = try {
+            val globalTags = container.styleTagRepository.userTags()
+            val profileTags = if (profileId <= 0L) {
+                emptyList()
+            } else {
+                container.styleTagRepository.profileTags(profileId)
+            }
+            globalTags + profileTags
         } catch (e: CancellationException) {
             throw e
         } catch (e: Throwable) {
@@ -1346,15 +1373,19 @@ class AiChatViewModel(
         } catch (e: Throwable) {
             emptyList()
         }
-        // 未绑定档案 / 档案没有标签：不自动打标，手动标签继续保留
-        if (profileTags.isEmpty()) return existing.filter { it.manual }
+        // 两套标签库都为空：不自动打标，旧手动标签继续保留
+        if (allowedTags.isEmpty()) return existing.filter { it.manual }
         val hash = shortHash(text)
-        val profileTagIds = profileTags.map { it.id }.toSet()
+        val tagIds = allowedTags.map { it.id }.toSet()
         // 打标粒度是「每 3 句一段」：旧版逐句关联不算有效，需要按当前粒度重新分析一次
         val segments = SummarySentenceSegmenter.segment(text, SummarySentenceSplitter.split(text))
-        // 复用只看自动标签：手动标签没有句段关联、也不参与抽样，其过期 hash 不应触发重复分析。
-        // 旧版本自动标签没有句段定位、或标签不属于当前档案，都不能复用：需要重新分析一次。
-        if (SummaryTagValidity.isReusable(existing, hash, profileTagIds, segments)) return existing
+        // 每个句段都已有标签（自动关联或用户手动多选）→ 不再调用分析模型，直接抓取库中样本
+        if (SummaryTagValidity.isCovered(existing, hash, tagIds, segments)) {
+            return existing.filter { SummaryTagValidity.isValidSegmentTag(it, hash, tagIds, segments) }
+        }
+        // 复用只看自动标签：手动标签不参与自动分析结果，其过期 hash 不应触发重复分析。
+        // 旧版本自动标签没有句段定位、或标签不属于当前可用标签，都不能复用：需要重新分析一次。
+        if (SummaryTagValidity.isReusable(existing, hash, tagIds, segments)) return existing
         val fresh = try {
             when (val outcome = container.styleTaggingService.analyzeSummary(modelId, text, profileId)) {
                 is SummaryTaggingOutcome.Success -> {
@@ -1366,7 +1397,7 @@ class AiChatViewModel(
                     )
                     // 确认落库的自动关联与本次最终梗概一致，否则不参与抽样
                     container.styleTagRepository.summaryTags(chapterId).filter {
-                        it.manual || SummaryTagValidity.isValidAuto(it, hash, profileTagIds, segments)
+                        it.manual || SummaryTagValidity.isValidAuto(it, hash, tagIds, segments)
                     }
                 }
                 else -> null
@@ -1687,7 +1718,11 @@ class AiChatViewModel(
         memory: String,
         autoOutline: String,
         userPrompt: String,
-        fullPrompt: String
+        fullPrompt: String,
+        /** 本轮提交给模型的文风样本：只在当轮日志回显，不做前缀冻结 */
+        styleSamples: String = "",
+        /** 本轮提交的「本章梗概·文风标签句例」：同样只在当轮日志回显 */
+        sentenceSamples: String = ""
     ): PromptLog = PromptLog(
         // 实际生效的预设提示词：模型配置里的 systemPrompt（真正随请求发出）
         systemPrompt = configRepository.getModel(modelId)?.systemPrompt.orEmpty(),
@@ -1699,7 +1734,9 @@ class AiChatViewModel(
         autoOutline = autoOutline,
         userPrompt = userPrompt,
         fullPrompt = fullPrompt,
-        genKind = genKind
+        genKind = genKind,
+        styleSamples = styleSamples,
+        sentenceSamples = sentenceSamples
     )
 
     // ---------------- AI 工具 ----------------
@@ -1919,6 +1956,12 @@ class AiChatViewModel(
 
     /** 正在生成的深度思考内容（流式增量累积） */
     val streamingReasoning = MutableStateFlow("")
+
+    /**
+     * 生成正文的阶段提示：生成梗概中 / 分析梗概中 / 记忆检索中（开启记忆检索时）/ 生成文本中。
+     * 为空表示没有可展示的阶段（普通对话 / 生成已结束）。
+     */
+    val generationStage = MutableStateFlow<String?>(null)
 
     /** 在途生成任务，供「停止响应」取消 */
     private var generateJob: Job? = null
@@ -2492,6 +2535,7 @@ class AiChatViewModel(
         pendingReplyToId.value = 0L
         streamingContent.value = ""
         streamingReasoning.value = ""
+        generationStage.value = null
     }
 
     /** 停止在途生成：取消协程，进而中断正在等待的 HTTP 请求 */

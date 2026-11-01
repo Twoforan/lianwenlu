@@ -356,7 +356,8 @@ class StyleTagRepository(private val db: AppDatabase) {
     }
 
     /**
-     * 导入并切分样本。新样本必须指定归属档案（[profileId] > 0）。
+     * 导入并切分样本。[profileId] 为 0 时样本默认未绑定（不参与任何档案的 RAG 检索），
+     * 之后可在样本管理里再绑定档案；大于 0 时直接归属该档案。
      * 切片使用文风专用的 [chunkStyleSample]：默认约 100 字、按自然段与句末标点切分、不重叠。
      * 向量化由调用方注入现有 [com.lianwenqi.app.ai.EmbeddingGateway]，
      * 失败时片段照常保存（vector = null），不阻断导入。
@@ -368,12 +369,16 @@ class StyleTagRepository(private val db: AppDatabase) {
         text: String,
         embed: suspend (List<String>) -> Result<List<FloatArray>> = { Result.success(emptyList()) }
     ): Long {
-        require(profileId > 0L && profileDao.getById(profileId) != null) { "请先选择文风档案" }
+        val normalizedProfileId = profileId.takeIf { it > 0L }
+        if (normalizedProfileId != null) {
+            require(profileDao.getById(normalizedProfileId) != null) { "文风档案不存在" }
+        }
         val body = text.trim()
         require(body.isNotBlank()) { "样本内容为空" }
+        val scope = normalizedProfileId ?: GLOBAL_STYLE_TAG_SCOPE
         val sampleId = tagDao.insertSample(
             StyleSampleRecord(
-                styleProfileId = profileId,
+                styleProfileId = normalizedProfileId,
                 fileName = fileName,
                 format = format,
                 charCount = body.length,
@@ -384,7 +389,7 @@ class StyleTagRepository(private val db: AppDatabase) {
         val rows = pieces.map { chunk ->
             StyleSampleChunk(
                 sampleId = sampleId,
-                styleProfileId = profileId,
+                styleProfileId = scope,
                 chunkIndex = chunk.index,
                 text = chunk.text,
                 hash = chunk.hash
@@ -501,29 +506,41 @@ class StyleTagRepository(private val db: AppDatabase) {
     suspend fun deleteSummaryTag(id: Long) = summaryTagDao.deleteById(id)
 
     /**
-     * 用户主动更换某条句子关联上的标签：保留原句定位与哈希，只换标签；
-     * 换后仍是「档案标签」自动关联（展示与正文抽样同权），同段同标签不重复插入。
+     * 用户为「本章某一个句段」多选标签后保存：先删除该梗概版本下这一句段的全部旧关联，
+     * 再按本次多选重建（manual = true，带完整句段定位，来源按标签归属记为全局或档案）。
+     * 保存后这些标签与自动关联同权，可直接参与正文抽样。
      */
-    suspend fun replaceSummaryTag(tag: ChapterSummaryTag, newTag: StyleTag) = db.withTransaction {
-        summaryTagDao.deleteById(tag.id)
-        val exists = summaryTagDao.get(tag.chapterId).any {
-            it.tagId == newTag.id &&
-                it.summaryHash == tag.summaryHash &&
-                it.sentenceStart == tag.sentenceStart &&
-                it.sentenceEnd == tag.sentenceEnd
-        }
-        if (!exists) {
+    suspend fun replaceSegmentSummaryTags(
+        chapterId: Long,
+        summaryHash: String,
+        sentenceIndex: Int,
+        sentenceStart: Int,
+        sentenceEnd: Int,
+        sentenceText: String,
+        tags: List<StyleTag>
+    ) = db.withTransaction {
+        summaryTagDao.deleteBySegment(chapterId, summaryHash, sentenceIndex)
+        if (tags.isNotEmpty()) {
             summaryTagDao.insertAll(
-                listOf(
-                    tag.copy(
-                        id = 0L,
-                        category = newTag.category,
-                        name = newTag.name,
-                        tagId = newTag.id,
-                        source = com.lianwenqi.app.data.entity.SummaryTagSource.PROFILE,
-                        manual = false
+                tags.distinctBy { it.id }.map { tag ->
+                    ChapterSummaryTag(
+                        chapterId = chapterId,
+                        category = tag.category,
+                        name = tag.name,
+                        tagId = tag.id,
+                        source = if (tag.styleProfileId == GLOBAL_STYLE_TAG_SCOPE) {
+                            com.lianwenqi.app.data.entity.SummaryTagSource.USER_GLOBAL
+                        } else {
+                            com.lianwenqi.app.data.entity.SummaryTagSource.PROFILE
+                        },
+                        summaryHash = summaryHash,
+                        manual = true,
+                        sentenceIndex = sentenceIndex,
+                        sentenceStart = sentenceStart,
+                        sentenceEnd = sentenceEnd,
+                        sentenceText = sentenceText
                     )
-                )
+                }
             )
         }
     }

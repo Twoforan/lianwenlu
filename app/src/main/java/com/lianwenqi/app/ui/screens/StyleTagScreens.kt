@@ -3,6 +3,7 @@ package com.lianwenqi.app.ui.screens
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -11,7 +12,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -62,6 +63,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -81,6 +83,7 @@ import com.lianwenqi.app.data.style.StyleExtractResult
 import com.lianwenqi.app.data.style.StyleTagAnalysisCodec
 import com.lianwenqi.app.data.style.StyleTaggingOutcome
 import com.lianwenqi.app.data.style.StyleTextExtractor
+import com.lianwenqi.app.data.style.SummarySentence
 import com.lianwenqi.app.data.style.SummaryTagValidity
 import com.lianwenqi.app.data.style.SummarySentenceSegmenter
 import com.lianwenqi.app.data.style.SummarySentenceSplitter
@@ -768,7 +771,7 @@ fun StyleSampleManageScreen(
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState())) {
             Text(
-                "样本必须归属一个文风档案；解绑后保留原文、片段、向量与标签，但不再参与任何文风检索。",
+                "样本可以绑定某个文风档案；未绑定或解绑后保留原文、片段、向量与标签，但不参与任何文风检索。本页导入的样本会自动绑定到当前档案。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(16.dp)
@@ -862,7 +865,7 @@ fun StyleSampleManageScreen(
             AnalyzeSampleDialog(
                 userTags = userTags,
                 profileTags = profileTags,
-                models = models.map { it.id to it.name },
+                models = models.map { it.id to it.displayName },
                 defaultModelId = activeModelId,
                 busy = busy,
                 onDismiss = { analyzeSampleId = null },
@@ -1005,7 +1008,7 @@ private fun SampleCard(
 }
 
 @Composable
-private fun ImportSampleDialog(
+internal fun ImportSampleDialog(
     busy: Boolean,
     onPickFile: () -> Unit,
     onPaste: (String, String) -> Unit,
@@ -1020,7 +1023,9 @@ private fun ImportSampleDialog(
         text = {
             Column(Modifier.heightIn(max = 460.dp).verticalScroll(rememberScrollState())) {
                 Text(
-                    "样本会归属到当前文风档案，并按约 100 字、优先句末标点的规则切片，同时生成片段向量。",
+                    "选择 txt 文件或直接粘贴文本即可，不强制绑定文风档案。" +
+                        "样本会按约 100 字、优先句末标点的规则切片并生成片段向量，" +
+                        "导入后显示为「未绑定 / 未分析」，可稍后再绑定档案。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -1268,44 +1273,42 @@ private fun SampleDetailDialog(
  * 编辑器里的章节标签区：展示与手动编辑，不在梗概正文里拼接标签。
  *
  * 整块可单独收起（默认收起，状态由调用方持久化），收起后只看梗概、不看标签。
- * 自动标签按「梗概句段」分组展示：打标时每 3 句合并为一段，只展示与当前梗概一致、
- * 带句段定位、且标签仍属于当前绑定文风档案的有效关联；句段序号 / 起止位置 / 原文
- * 都来自已保存的关联，不按标签名反推。梗概修改或更换档案后，旧关联不再展示为有效结果。
- * 手动标签没有句段关联，单列「手动标签」区，不虚构句段、也不参与正文抽样。
- * 点击句段下的标签可从当前档案标签中主动更换，换后仍参与正文抽样。
+ * 梗概按「每 3 句一个句段」切片，每个句段都平铺展示：点击句段文字即可多选标签，
+ * 保存后该句段的自动关联与旧选择一起被本次多选替换（带完整句段定位）。
+ * 候选标签包含用户全局标签与当前绑定文风档案标签；两者同权参与展示与正文抽样。
+ * 旧版没有句段定位的手动标签单列展示，只保留与删除，不参与抽样。
  */
 @OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun ChapterSummaryTagsSection(
     tags: List<ChapterSummaryTag>,
     summary: String,
-    profileTags: List<StyleTag>,
+    candidates: List<StyleTag>,
     expanded: Boolean,
     onToggleExpanded: () -> Unit,
     onDelete: (id: Long) -> Unit,
-    onReplaceTag: (ChapterSummaryTag, StyleTag) -> Unit
+    onSaveSegmentTags: (String, SummarySentence, List<StyleTag>) -> Unit
 ) {
-    var editing by remember { mutableStateOf<ChapterSummaryTag?>(null) }
+    var editing by remember { mutableStateOf<SummarySentence?>(null) }
     val currentHash = remember(summary) { shortHash(summary.trim()) }
-    val profileTagIds = remember(profileTags) { profileTags.map { it.id }.toSet() }
-    // 打标粒度是每 3 句一段：旧版逐句关联即便 hash 与档案都对得上，也不再算有效
+    val candidateIds = remember(candidates) { candidates.map { it.id }.toSet() }
+    // 打标粒度是每 3 句一段：按当前梗概重新切片，逐段展示（没有标签的段也显示）
     val segments = remember(summary) {
         val text = summary.trim()
         SummarySentenceSegmenter.segment(text, SummarySentenceSplitter.split(text))
     }
-    // 有效自动关联：匹配当前梗概 + 带句段定位 + 标签属于当前绑定档案；按句段序号升序展示
-    val sentenceGroups = remember(tags, currentHash, profileTagIds, segments) {
-        tags.filter { SummaryTagValidity.isValidAuto(it, currentHash, profileTagIds, segments) }
+    // 有效句段标签：哈希一致 + 带句段定位 + 标签仍存在（自动关联与手动多选同权）
+    val segmentTags = remember(tags, currentHash, candidateIds, segments) {
+        tags.filter { SummaryTagValidity.isValidSegmentTag(it, currentHash, candidateIds, segments) }
             .groupBy { it.sentenceIndex }
-            .toSortedMap()
     }
-    // 手动标签：没有句段关联，单独展示，不参与抽样
-    val manualTags = remember(tags) { tags.filter { it.manual } }
-    // 梗概已修改 / 已更换档案的旧自动关联：不展示、不参与正文参考，仅提示失效
-    val hasStaleAuto = remember(tags, currentHash, profileTagIds, segments) {
-        tags.any { !it.manual && !SummaryTagValidity.isValidAuto(it, currentHash, profileTagIds, segments) }
+    // 旧版无句段定位的手动标签：单独展示，只保留与删除，不参与抽样
+    val legacyManualTags = remember(tags) { tags.filter { it.manual && !it.hasSentence } }
+    // 梗概已修改 / 标签已删除的旧关联：不展示、不参与正文参考，仅提示失效
+    val hasStaleAuto = remember(tags, currentHash, candidateIds, segments) {
+        tags.any { !it.manual && !SummaryTagValidity.isValidSegmentTag(it, currentHash, candidateIds, segments) }
     }
-    val validTagCount = sentenceGroups.values.sumOf { rows -> rows.map { it.name }.distinct().size }
+    val taggedSegments = segments.count { segmentTags[it.index]?.isNotEmpty() == true }
 
     Column(Modifier.fillMaxWidth()) {
         Row(
@@ -1318,54 +1321,76 @@ fun ChapterSummaryTagsSection(
                 tint = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Text("本章标签", style = MaterialTheme.typography.labelLarge)
-            if (!expanded && sentenceGroups.isNotEmpty()) {
+            if (!expanded && segments.isNotEmpty()) {
                 Spacer(Modifier.width(6.dp))
                 Text(
-                    "${sentenceGroups.size} 段 · $validTagCount 个标签",
+                    "$taggedSegments/${segments.size} 段已标注",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }
         if (expanded) {
-            if (sentenceGroups.isEmpty() && manualTags.isEmpty() && !hasStaleAuto) {
+            if (segments.isEmpty()) {
                 Text(
-                    "还没有标签。勾选「文风样式」后，生成梗概会按当前文风档案的标签给句段打标。",
+                    "梗概为空，暂无可标注的句段。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                Text(
+                    if (taggedSegments == segments.size) {
+                        "已为全部 ${segments.size} 个句段选择标签；生成正文时不再重新分析标签。"
+                    } else {
+                        "点击任意句段文字，为它多选标签（每 3 句一段）。"
+                    },
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            // 梗概句段 → 该段的全部标签（同一段下同一标签只显示一次）
-            sentenceGroups.values.forEach { rows ->
-                Column(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
-                    Text(rows.first().sentenceText, style = MaterialTheme.typography.bodySmall)
+            // 每个句段平铺展示：点击文字打开多选标签弹窗
+            segments.forEach { segment ->
+                val rows = segmentTags[segment.index].orEmpty()
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable { editing = segment }
+                        .padding(vertical = 4.dp)
+                ) {
+                    Text(segment.text, style = MaterialTheme.typography.bodySmall)
                     Spacer(Modifier.height(2.dp))
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        rows.distinctBy { it.name }.forEach { row ->
-                            val replaceable = profileTags.isNotEmpty()
-                            Surface(
-                                onClick = { if (replaceable) editing = row },
-                                shape = RoundedCornerShape(4.dp),
-                                color = MaterialTheme.colorScheme.tertiaryContainer
-                            ) {
-                                Text(
-                                    row.name,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                )
+                        if (rows.isEmpty()) {
+                            Text(
+                                "未选择标签",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        } else {
+                            rows.distinctBy { it.name }.forEach { row ->
+                                Surface(
+                                    shape = RoundedCornerShape(4.dp),
+                                    color = MaterialTheme.colorScheme.tertiaryContainer
+                                ) {
+                                    Text(
+                                        row.name,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
                             }
                         }
                     }
                 }
             }
-            if (manualTags.isNotEmpty()) {
+            if (legacyManualTags.isNotEmpty()) {
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    "手动标签",
+                    "旧版手动标签",
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                manualTags.forEach { tag ->
+                legacyManualTags.forEach { tag ->
                     Row(
                         Modifier.fillMaxWidth().padding(vertical = 2.dp),
                         verticalAlignment = Alignment.CenterVertically
@@ -1391,7 +1416,7 @@ fun ChapterSummaryTagsSection(
             }
             if (hasStaleAuto) {
                 Text(
-                    "梗概已修改或文风档案已更换，旧句子关联已失效：不再展示，也不会作为正文参考；你手动添加的标签会保留。",
+                    "梗概已修改或标签已删除，旧句段关联已失效：不再展示，也不会作为正文参考。",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.error
                 )
@@ -1399,84 +1424,131 @@ fun ChapterSummaryTagsSection(
         }
     }
 
-    editing?.let { row ->
-        ReplaceSummaryTagDialog(
-            current = row,
-            candidates = profileTags,
+    editing?.let { segment ->
+        SummarySegmentTagDialog(
+            segment = segment,
+            candidates = candidates,
+            selectedTagIds = segmentTags[segment.index]?.map { it.tagId }?.toSet().orEmpty(),
             onDismiss = { editing = null },
-            onPick = { picked ->
+            onSave = { picked ->
                 editing = null
-                onReplaceTag(row, picked)
+                onSaveSegmentTags(currentHash, segment, picked)
             }
         )
     }
 }
 
-/** 点击句段下的标签：从当前绑定档案的已有标签中主动更换（圆形标签横排选择） */
+/**
+ * 点击句段文字后的多选标签弹窗：候选包含全局标签与当前档案标签。
+ * 「保存」把当前勾选结果整体写回该句段（不选任何标签即清空该段）。
+ */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun ReplaceSummaryTagDialog(
-    current: ChapterSummaryTag,
+private fun SummarySegmentTagDialog(
+    segment: SummarySentence,
     candidates: List<StyleTag>,
+    selectedTagIds: Set<Long>,
     onDismiss: () -> Unit,
-    onPick: (StyleTag) -> Unit
+    onSave: (List<StyleTag>) -> Unit
 ) {
+    var selected by remember(segment.index, selectedTagIds) { mutableStateOf(selectedTagIds) }
+
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("更换标签") },
+        title = { Text("选择标签") },
         text = {
             Column {
                 Text(
-                    current.sentenceText,
+                    segment.text,
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 3,
                     overflow = TextOverflow.Ellipsis
                 )
                 Spacer(Modifier.height(8.dp))
-                Text(
-                    "当前：${current.name}",
-                    style = MaterialTheme.typography.labelSmall
-                )
-                Spacer(Modifier.height(8.dp))
                 if (candidates.isEmpty()) {
                     Text(
-                        "当前书籍未绑定文风档案，或档案里没有标签。",
+                        "全局标签库与当前文风档案都没有标签，请先在文风设置里创建标签。",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 } else {
-                    Column(Modifier.heightIn(max = 300.dp).verticalScroll(rememberScrollState())) {
-                        FlowRow(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            candidates.forEach { tag ->
-                                val isCurrent = tag.id == current.tagId
-                                Surface(
-                                    onClick = { if (!isCurrent) onPick(tag) },
-                                    shape = CircleShape,
-                                    color = if (isCurrent) MaterialTheme.colorScheme.secondaryContainer
-                                    else MaterialTheme.colorScheme.surfaceVariant,
-                                    contentColor = if (isCurrent) MaterialTheme.colorScheme.onSecondaryContainer
-                                    else MaterialTheme.colorScheme.onSurfaceVariant
-                                ) {
-                                    Text(
-                                        tag.name,
-                                        style = MaterialTheme.typography.labelLarge,
-                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
-                                    )
-                                }
+                    val globalTags = candidates.filter { it.styleProfileId == GLOBAL_STYLE_TAG_SCOPE }
+                    val profileTags = candidates.filter { it.styleProfileId != GLOBAL_STYLE_TAG_SCOPE }
+                    Column(Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState())) {
+                        TagChipGroup(
+                            label = "全局标签",
+                            tags = globalTags,
+                            selectedIds = selected,
+                            onToggle = { id ->
+                                selected = if (id in selected) selected - id else selected + id
                             }
+                        )
+                        if (globalTags.isNotEmpty() && profileTags.isNotEmpty()) {
+                            Spacer(Modifier.height(12.dp))
                         }
+                        TagChipGroup(
+                            label = "档案标签",
+                            tags = profileTags,
+                            selectedIds = selected,
+                            onToggle = { id ->
+                                selected = if (id in selected) selected - id else selected + id
+                            }
+                        )
                     }
                 }
             }
         },
-        confirmButton = {},
+        confirmButton = {
+            TextButton(onClick = { onSave(candidates.filter { it.id in selected }) }) {
+                Text("保存")
+            }
+        },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
     )
+}
+
+/** 标签选择用的胶囊按钮组：选中实心、未选中空心描边，横排自动换行 */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun TagChipGroup(
+    label: String,
+    tags: List<StyleTag>,
+    selectedIds: Set<Long>,
+    onToggle: (Long) -> Unit
+) {
+    if (tags.isEmpty()) return
+    Text(
+        label,
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+    Spacer(Modifier.height(6.dp))
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        tags.forEach { tag ->
+            val selected = tag.id in selectedIds
+            Surface(
+                shape = CircleShape,
+                color = if (selected) MaterialTheme.colorScheme.primary else Color.Transparent,
+                border = if (selected) null else BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                modifier = Modifier.clickable { onToggle(tag.id) }
+            ) {
+                Text(
+                    tag.name,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (selected) {
+                        MaterialTheme.colorScheme.onPrimary
+                    } else {
+                        MaterialTheme.colorScheme.onSurface
+                    },
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                )
+            }
+        }
+    }
 }
 
 private fun tagSourceLabel(tag: ChapterSummaryTag): String = when (tag.source) {

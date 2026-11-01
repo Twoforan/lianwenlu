@@ -437,7 +437,7 @@ private enum class StyleTab(val label: String) {
 }
 
 /** 样本导入与管理共用同一个档案选择弹窗 */
-private enum class StyleProfileAction { Import, Manage }
+private enum class StyleProfileAction { Manage }
 
 /**
  * 文风中心：档案 / 样本 / 标签三个页签。
@@ -454,8 +454,7 @@ fun StyleSettingsScreen(
     onOpenProfileStyle: (Long) -> Unit,
     onOpenSampleStyle: (Long) -> Unit,
     onOpenGlobalTags: () -> Unit,
-    onOpenSamples: (Long) -> Unit,
-    onImportSample: (Long) -> Unit
+    onOpenSamples: (Long) -> Unit
 ) {
     val libraryVm = appViewModel { StyleLibraryViewModel(it) }
     val stylesVm = appViewModel { StyleStylesViewModel(it) }
@@ -464,11 +463,25 @@ fun StyleSettingsScreen(
     val samples by stylesVm.samples.collectAsState()
     val profileStats by stylesVm.profileStats.collectAsState()
     val sampleStats by stylesVm.sampleStats.collectAsState()
+    val busy by stylesVm.busy.collectAsState()
+    val message by stylesVm.message.collectAsState()
 
     var selectedTab by rememberSaveable { mutableStateOf(StyleTab.Profiles.ordinal) }
     var profileAction by remember { mutableStateOf<StyleProfileAction?>(null) }
+    var showImport by remember { mutableStateOf(false) }
+    var bindingSample by remember { mutableStateOf<StyleSampleRecord?>(null) }
+
+    // 导入样本不再强制先选档案：直接选文件或粘贴，导入后默认未绑定
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) stylesVm.importFromUri(uri)
+    }
 
     LaunchedEffect(profiles, samples) { stylesVm.refresh(profiles, samples) }
+
+    // 选择文件导入成功后自动关闭导入弹窗（粘贴路径在点击时已关闭），失败时保留弹窗方便重试
+    LaunchedEffect(message) {
+        if (message?.startsWith("已导入样本") == true) showImport = false
+    }
 
     Scaffold(
         topBar = {
@@ -513,9 +526,10 @@ fun StyleSettingsScreen(
                     profiles = profiles,
                     samples = samples,
                     sampleStats = sampleStats,
-                    onImport = { profileAction = StyleProfileAction.Import },
+                    onImport = { showImport = true },
                     onManage = { profileAction = StyleProfileAction.Manage },
-                    onOpenSampleStyle = onOpenSampleStyle
+                    onOpenSampleStyle = onOpenSampleStyle,
+                    onBindSample = { bindingSample = it }
                 )
 
                 StyleTab.Tags -> StyleTagsTab(
@@ -528,21 +542,46 @@ fun StyleSettingsScreen(
         }
     }
 
+    if (showImport) {
+        ImportSampleDialog(
+            busy = busy,
+            onPickFile = { picker.launch(arrayOf("*/*")) },
+            onPaste = { name, text -> stylesVm.importText(name, text) },
+            onDismiss = { showImport = false }
+        )
+    }
+
+    message?.let {
+        AlertDialog(
+            onDismissRequest = stylesVm::dismissMessage,
+            title = { Text("操作提示") },
+            text = { Text(it) },
+            confirmButton = { TextButton(onClick = stylesVm::dismissMessage) { Text("知道了") } }
+        )
+    }
+
     profileAction?.let { action ->
         StyleProfileActionDialog(
-            title = if (action == StyleProfileAction.Import) "导入样本到档案" else "管理档案样本",
-            subtitle = if (action == StyleProfileAction.Import) {
-                "样本会归属到所选档案，导入后按约 100 字切片并生成向量。"
-            } else {
-                "进入所选档案的样本管理：导入、绑定 / 解绑、标签分析与片段预览。"
-            },
+            title = "管理档案样本",
+            subtitle = "进入所选档案的样本管理：导入、绑定 / 解绑、标签分析与片段预览。",
             profiles = profiles,
             onPick = { profileId ->
                 profileAction = null
-                if (action == StyleProfileAction.Import) onImportSample(profileId)
-                else onOpenSamples(profileId)
+                onOpenSamples(profileId)
             },
             onDismiss = { profileAction = null }
+        )
+    }
+
+    bindingSample?.let { sample ->
+        StyleBindProfileDialog(
+            profiles = profiles,
+            currentProfileId = sample.styleProfileId,
+            onPick = { profileId ->
+                bindingSample = null
+                stylesVm.bindSample(sample.id, profileId)
+            },
+            onDismiss = { bindingSample = null }
         )
     }
 }
@@ -650,7 +689,8 @@ private fun StyleSamplesTab(
     sampleStats: Map<Long, StyleSampleStyleStats>,
     onImport: () -> Unit,
     onManage: () -> Unit,
-    onOpenSampleStyle: (Long) -> Unit
+    onOpenSampleStyle: (Long) -> Unit,
+    onBindSample: (StyleSampleRecord) -> Unit
 ) {
     val profileNames = remember(profiles) { profiles.associate { it.id to it.name } }
 
@@ -663,16 +703,14 @@ private fun StyleSamplesTab(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
-        Button(onClick = onImport, enabled = profiles.isNotEmpty()) { Text("导入样本") }
+        Button(onClick = onImport) { Text("导入样本") }
     }
-    if (profiles.isEmpty()) {
-        Spacer(Modifier.height(6.dp))
-        Text(
-            "请先在「档案」页签新建文风档案，再导入样本。",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.error
-        )
-    }
+    Spacer(Modifier.height(6.dp))
+    Text(
+        "导入时不强制绑定文风档案：选择 txt 或直接粘贴即可，导入后显示为「未绑定 / 未分析」。",
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
     Spacer(Modifier.height(12.dp))
 
     if (samples.isEmpty()) {
@@ -683,7 +721,8 @@ private fun StyleSamplesTab(
                 sample = sample,
                 profileName = sample.styleProfileId?.let { profileNames[it] },
                 stats = sampleStats[sample.id],
-                onClick = { onOpenSampleStyle(sample.id) }
+                onClick = { onOpenSampleStyle(sample.id) },
+                onBindClick = { onBindSample(sample) }
             )
             Spacer(Modifier.height(8.dp))
         }

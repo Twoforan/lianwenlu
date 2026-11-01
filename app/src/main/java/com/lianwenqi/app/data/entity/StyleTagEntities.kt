@@ -55,7 +55,7 @@ data class StyleTag(
     val createdAt: Long = System.currentTimeMillis()
 )
 
-/** 文风样本：必须归属一个文风档案，但允许解绑（styleProfileId = null） */
+/** 文风样本：可绑定一个文风档案（styleProfileId = null 表示未绑定） */
 @Entity(tableName = "style_sample", indices = [Index("styleProfileId")])
 data class StyleSampleRecord(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,

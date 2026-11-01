@@ -2,6 +2,7 @@ package com.lianwenqi.app.data.style
 
 import com.lianwenqi.app.data.StyleTagRules
 import com.lianwenqi.app.data.entity.ChapterSummaryTag
+import com.lianwenqi.app.data.entity.GLOBAL_STYLE_TAG_SCOPE
 import com.lianwenqi.app.data.entity.StyleTag
 import com.lianwenqi.app.data.entity.SummaryTagSource
 import com.lianwenqi.app.util.shortHash
@@ -113,9 +114,10 @@ object SummarySentenceTagCodec {
 /**
  * 纯逻辑：把模型返回的句子标签收敛为可落库记录。
  *
- * 权限边界：只接受当前绑定文风档案里真实存在的标签（按 id 或名称匹配），
- * 全局标签、其他档案标签与模型自造标签一律丢弃；条目文本必须能在最终梗概中
- * 精确映射到一个完整句段，否则整条丢弃。
+ * 权限边界：只接受「用户全局标签 + 当前绑定文风档案标签」里真实存在的标签（按 id 或名称匹配），
+ * 其他档案标签与模型自造标签一律丢弃；条目文本必须能在最终梗概中
+ * 精确映射到一个完整句段，否则整条丢弃。命中全局标签时来源记为 USER_GLOBAL，
+ * 命中档案标签时记为 PROFILE。
  *
  * 打标粒度是句段（见 [SummarySentenceSegmenter]）：条目文本可以是整段原文，
  * 也可以是段内若干整句，最终都吸附到它所属的那 3 句段上。
@@ -126,16 +128,16 @@ object SummarySentenceTagResolver {
         summary: String,
         sentences: List<SummarySentence>,
         segments: List<SummarySentence>,
-        profileTags: List<StyleTag>,
+        tags: List<StyleTag>,
         summaryHash: String
     ): List<ChapterSummaryTag> {
-        if (profileTags.isEmpty() || segments.isEmpty()) return emptyList()
+        if (tags.isEmpty() || segments.isEmpty()) return emptyList()
         val result = mutableListOf<ChapterSummaryTag>()
         val seen = mutableSetOf<String>()
         items.forEach { item ->
             val segment = mapSegment(item, summary, sentences, segments) ?: return@forEach
             item.tags.forEach tagLoop@{ candidate ->
-                val tag = matchProfileTag(candidate, profileTags) ?: return@tagLoop
+                val tag = matchTag(candidate, tags) ?: return@tagLoop
                 val key = segment.index.toString() + "\u0000" + tag.id
                 if (!seen.add(key)) return@tagLoop
                 result += ChapterSummaryTag(
@@ -143,7 +145,11 @@ object SummarySentenceTagResolver {
                     category = tag.category,
                     name = tag.name,
                     tagId = tag.id,
-                    source = SummaryTagSource.PROFILE,
+                    source = if (tag.styleProfileId == GLOBAL_STYLE_TAG_SCOPE) {
+                        SummaryTagSource.USER_GLOBAL
+                    } else {
+                        SummaryTagSource.PROFILE
+                    },
                     summaryHash = summaryHash,
                     sentenceIndex = segment.index,
                     sentenceStart = segment.start,
@@ -177,19 +183,20 @@ object SummarySentenceTagResolver {
         return segments.firstOrNull { it.start <= first.start && last.end <= it.end }
     }
 
-    /** 只允许档案内已有标签；id 优先，其次按名称匹配 */
-    private fun matchProfileTag(item: SummaryTagItem, profileTags: List<StyleTag>): StyleTag? {
-        item.id?.let { id -> profileTags.firstOrNull { it.id == id } }?.let { return it }
+    /** 只允许全局标签或档案内已有标签；id 优先，其次按名称匹配 */
+    private fun matchTag(item: SummaryTagItem, tags: List<StyleTag>): StyleTag? {
+        item.id?.let { id -> tags.firstOrNull { it.id == id } }?.let { return it }
         val name = item.name.trim()
         if (name.isBlank()) return null
-        return profileTags.firstOrNull { StyleTagRules.sameName(it.name, name) }
+        return tags.firstOrNull { StyleTagRules.sameName(it.name, name) }
     }
 }
 
 /**
- * 自动关联的有效性判断（展示与正文复用共用同一套规则）：
- * 必须匹配当前最终梗概、带完整句子定位、且标签仍属于当前绑定文风档案。
- * 手动标签没有句子关联，不参与该判断。
+ * 句段标签的有效性判断（展示、正文复用与「无需再分析」共用同一套规则）：
+ * 必须匹配当前最终梗概、带完整句段定位、且标签 id 仍存在于「全局标签 + 当前档案标签」。
+ * 自动标签（[SummaryTagSource.PROFILE] / [SummaryTagSource.USER_GLOBAL]）与
+ * 用户手动选择的句段标签同样参与；旧版无句段定位的手动标签不参与。
  */
 object SummaryTagValidity {
     fun isValidAuto(
@@ -232,15 +239,50 @@ object SummaryTagValidity {
         val auto = tags.filter { !it.manual }
         return auto.isNotEmpty() && auto.all { isValidAuto(it, summaryHash, profileTagIds, segments) }
     }
+
+    /** 展示与抽样用：手动选择的句段标签与自动关联同权，只要有句段定位且标签仍然存在 */
+    fun isValidSegmentTag(
+        tag: ChapterSummaryTag,
+        summaryHash: String,
+        tagIds: Set<Long>
+    ): Boolean = tag.hasSentence &&
+        tag.summaryHash == summaryHash &&
+        tag.tagId > 0L &&
+        tag.tagId in tagIds
+
+    fun isValidSegmentTag(
+        tag: ChapterSummaryTag,
+        summaryHash: String,
+        tagIds: Set<Long>,
+        segments: List<SummarySentence>
+    ): Boolean = isValidSegmentTag(tag, summaryHash, tagIds) && isSegmentAligned(tag, segments)
+
+    /** 每个句段都至少有一个可用标签（自动或用户手动选择）时，正文生成前无需再分析 */
+    fun isCovered(
+        tags: List<ChapterSummaryTag>,
+        summaryHash: String,
+        tagIds: Set<Long>,
+        segments: List<SummarySentence>
+    ): Boolean {
+        if (segments.isEmpty()) return false
+        return segments.all { segment ->
+            tags.any {
+                it.summaryHash == summaryHash &&
+                    it.sentenceStart == segment.start &&
+                    it.sentenceEnd == segment.end &&
+                    isValidSegmentTag(it, summaryHash, tagIds)
+            }
+        }
+    }
 }
 
-/** 梗概句段打标提示词：只允许引用当前绑定文风档案的已有标签 */
+/** 梗概句段打标提示词：只允许引用「用户全局标签 + 当前绑定文风档案标签」中已有的标签 */
 object SummarySentenceTagPrompt {
     val SYSTEM: String = """
-你是章节梗概句段标注助手。输入中的梗概已按顺序每 3 句合并为一个句段。请只使用【当前文风档案标签】中已有的标签，判断哪些句段符合标签含义。
+你是章节梗概句段标注助手。输入中的梗概已按顺序每 3 句合并为一个句段。请只使用【用户全局标签】与【当前文风档案标签】中已有的标签，判断哪些句段符合标签含义。
 
 规则：
-1. 只能引用【当前文风档案标签】里列出的 id，不得输出新标签，也不得使用用户全局标签或其他档案的标签。
+1. 只能引用【用户全局标签】或【当前文风档案标签】里列出的 id，不得输出新标签，也不得使用其他档案的标签。
 2. 一个句段可以对应多个标签，一个标签也可以对应多个句段。
 3. 只给真正符合标签含义的句段打标；没有合适的句段或标签时输出空数组，禁止强行凑标签。
 4. text 必须从【本章梗概句段】中原样复制整段（含段内标点与换行，不要拆分或改写）；无法确认的句段不要输出。
@@ -250,26 +292,36 @@ object SummarySentenceTagPrompt {
 {"sentences":[{"text":"句段原文","tags":[{"id":12}]}]}
 """.trim()
 
-    fun userContent(segments: List<SummarySentence>, profileTags: List<StyleTag>): String =
+    fun userContent(
+        segments: List<SummarySentence>,
+        userTags: List<StyleTag>,
+        profileTags: List<StyleTag>
+    ): String =
         buildString {
             append("【本章梗概句段】\n")
             segments.forEach { segment ->
                 append(segment.index).append(". ").append(segment.text).append('\n')
             }
+            append("\n【用户全局标签】\n")
+            appendTagLines(userTags)
             append("\n【当前文风档案标签】\n")
-            if (profileTags.isEmpty()) {
-                append("（暂无）\n")
-            } else {
-                profileTags.forEach { tag ->
-                    append("- id=").append(tag.id)
-                        .append(" 分类=").append(tag.category)
-                        .append(" 名称=").append(tag.name)
-                    if (tag.description.isNotBlank()) append(" 说明=").append(tag.description)
-                    append('\n')
-                }
-            }
+            appendTagLines(profileTags)
             append("\n请输出 JSON。")
         }
+
+    private fun StringBuilder.appendTagLines(tags: List<StyleTag>) {
+        if (tags.isEmpty()) {
+            append("（暂无）\n")
+            return
+        }
+        tags.forEach { tag ->
+            append("- id=").append(tag.id)
+                .append(" 分类=").append(tag.category)
+                .append(" 名称=").append(tag.name)
+            if (tag.description.isNotBlank()) append(" 说明=").append(tag.description)
+            append('\n')
+        }
+    }
 }
 
 /** 本次正文请求临时抽中的一句梗概原文及其命中的标签名 */
@@ -277,9 +329,10 @@ data class SummarySentenceSample(val text: String, val tagNames: List<String>)
 
 /**
  * 正文生成前的句子抽样：
- * - 只取「当前梗概哈希一致、带句子定位、标签属于当前绑定档案」的关联；
+ * - 只取「当前梗概哈希一致、带句段定位、标签属于全局标签或当前绑定档案」的关联；
+ * - 用户手动选择的句段标签与自动关联同权参与抽样；
  * - 每次最多 [MAX_SENTENCES] 句，总字数不超过 [MAX_CHARS]；
- * - 同一句只出现一次，手动标签与无句子定位的旧标签不参与；
+ * - 同一句只出现一次，无句段定位的旧标签不参与；
  * - 纯函数，随机源可注入，抽样结果不会持久化。
  */
 object SummarySentenceSampler {
@@ -289,20 +342,19 @@ object SummarySentenceSampler {
     fun sample(
         tags: List<ChapterSummaryTag>,
         summary: String,
-        profileTagIds: Set<Long>,
+        tagIds: Set<Long>,
         random: Random = Random.Default,
         maxSentences: Int = MAX_SENTENCES,
         maxChars: Int = MAX_CHARS
     ): List<SummarySentenceSample> {
-        if (summary.isBlank() || profileTagIds.isEmpty() || maxSentences <= 0 || maxChars <= 0) {
+        if (summary.isBlank() || tagIds.isEmpty() || maxSentences <= 0 || maxChars <= 0) {
             return emptyList()
         }
         val hash = shortHash(summary.trim())
         val candidates = tags
             .asSequence()
             .filter { it.summaryHash == hash }
-            .filter { !it.manual }
-            .filter { it.source == SummaryTagSource.PROFILE && it.tagId > 0L && it.tagId in profileTagIds }
+            .filter { it.source != SummaryTagSource.CHAPTER_AI && it.tagId > 0L && it.tagId in tagIds }
             .filter { it.hasSentence }
             .filter {
                 val start = it.sentenceStart

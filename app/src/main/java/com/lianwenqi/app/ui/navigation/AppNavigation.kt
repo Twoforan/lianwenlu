@@ -131,10 +131,7 @@ fun RootNavHost() {
                     rootNav.navigate(Routes.styleSampleStyle(sampleId))
                 },
                 onOpenGlobalTags = { rootNav.navigate(Routes.STYLE_TAGS) },
-                onOpenSamples = { profileId -> rootNav.navigate(Routes.styleSamples(profileId)) },
-                onImportSample = { profileId ->
-                    rootNav.navigate(Routes.styleSamplesImport(profileId))
-                }
+                onOpenSamples = { profileId -> rootNav.navigate(Routes.styleSamples(profileId)) }
             )
         }
 

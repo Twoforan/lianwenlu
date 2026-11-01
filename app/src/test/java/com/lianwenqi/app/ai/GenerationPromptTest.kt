@@ -75,9 +75,7 @@ class GenerationPromptTest {
                 chunkIndex = 0,
                 text = "他把杯子放下，没有抬头。",
                 tagLabels = listOf("表达方式：潜台词"),
-                tagScore = 4.5,
-                vectorScore = 0.6f,
-                score = 5.1
+                weight = 4.5
             )
         )
         val sentenceBlock = buildSummarySentenceTagBlock(

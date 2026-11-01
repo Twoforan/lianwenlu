@@ -223,6 +223,13 @@ interface ChapterSummaryTagDao {
     @Query("DELETE FROM chapter_summary_tag WHERE id = :id")
     suspend fun deleteById(id: Long)
 
+    /** 删除某梗概版本下某个句段的全部标签（自动关联与用户手动选择一起替换） */
+    @Query(
+        "DELETE FROM chapter_summary_tag WHERE chapterId = :chapterId " +
+            "AND summaryHash = :summaryHash AND sentenceIndex = :sentenceIndex"
+    )
+    suspend fun deleteBySegment(chapterId: Long, summaryHash: String, sentenceIndex: Int)
+
     @Query("UPDATE chapter_summary_tag SET summaryHash = :hash WHERE chapterId = :chapterId")
     suspend fun updateHash(chapterId: Long, hash: String)
 }

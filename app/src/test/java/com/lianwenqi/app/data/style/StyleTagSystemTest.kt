@@ -8,8 +8,8 @@ import com.lianwenqi.app.data.entity.StyleSampleChunk
 import com.lianwenqi.app.data.entity.StyleTag
 import com.lianwenqi.app.data.entity.StyleTagSource
 import com.lianwenqi.app.data.entity.SummaryTagSource
-import com.lianwenqi.app.util.encodeVector
 import com.lianwenqi.app.util.shortHash
+import kotlin.random.Random
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -230,18 +230,16 @@ class SummaryTagTest {
     }
 }
 
-/** 正文生成前的文风样本检索：档案硬过滤、标签加权、向量排序、不足不补足、失败降级 */
+/** 正文生成前的文风样本抽样：档案硬过滤、标签权重加权、无命中退化为全库随机、失败降级 */
 class StyleSampleRetrieverTest {
-    private fun chunk(id: Long, profileId: Long, text: String, vector: FloatArray? = null) =
+    private fun chunk(id: Long, profileId: Long, text: String) =
         StyleSampleChunk(
             id = id,
             sampleId = 10L + id,
             styleProfileId = profileId,
             chunkIndex = id.toInt(),
             text = text,
-            hash = "h$id",
-            dim = vector?.size ?: 0,
-            vector = vector?.let { encodeVector(it) }
+            hash = "h$id"
         )
 
     private fun row(chunkId: Long, name: String, category: String = "场景类型") =
@@ -253,100 +251,95 @@ class StyleSampleRetrieverTest {
     private fun retriever(
         chunks: List<StyleSampleChunk>,
         rows: Map<Long, List<StyleChunkTagRow>>,
-        embed: suspend (List<String>) -> Result<List<FloatArray>>
+        random: Random = Random(0)
     ) = StyleSampleRetriever(
         loadChunks = { pid -> chunks.filter { it.styleProfileId == pid } },
         loadTagRows = { rows },
-        embed = embed
+        random = random
     )
 
-    private val queryVector = floatArrayOf(1f, 0f)
-
     @Test
-    fun `未绑定档案时不检索`() = runTest {
-        val result = retriever(emptyList(), emptyMap()) { Result.success(listOf(queryVector)) }
-            .retrieve(profileId = 0L, summary = "梗概", chapterTags = emptyList())
+    fun `未绑定档案时不抽样`() = runTest {
+        val result = retriever(emptyList(), emptyMap())
+            .pick(profileId = 0L, chapterTags = emptyList())
         assertEquals(0, result.hits.size)
         assertTrue(result.reason.contains("未绑定"))
     }
 
     @Test
-    fun `标签加权可以压过稍高的向量相似度`() = runTest {
-        val tagged = chunk(1, 7L, "带标签片段", floatArrayOf(1f, 0f))
-        val untagged = chunk(2, 7L, "无标签片段", floatArrayOf(1f, 0f))
-        val result = retriever(listOf(tagged, untagged), mapOf(1L to listOf(row(1, "人物对话")))) {
-            Result.success(listOf(queryVector))
-        }.retrieve(profileId = 7L, summary = "本章梗概", chapterTags = listOf(chapterTag("人物对话")))
+    fun `只在标签命中的片段里随机抽`() = runTest {
+        val tagged = chunk(1, 7L, "带标签片段")
+        val untagged = chunk(2, 7L, "无标签片段")
+        val result = retriever(listOf(tagged, untagged), mapOf(1L to listOf(row(1, "人物对话")))
+        ).pick(profileId = 7L, chapterTags = listOf(chapterTag("人物对话")), limit = 2)
 
-        assertEquals(2, result.hits.size)
-        assertEquals(1L, result.hits.first().chunkId)
-        assertTrue(result.hits.first().tagScore > 0.0)
+        assertEquals(listOf(1L), result.hits.map { it.chunkId })
+        assertEquals(1, result.matchedChunks)
+        assertTrue(result.hits.single().weight > 0.0)
     }
 
     @Test
-    fun `没有标签命中时按向量相似度排序`() = runTest {
-        val close = chunk(1, 7L, "接近", floatArrayOf(1f, 0f))
-        val far = chunk(2, 7L, "不相关", floatArrayOf(0f, 1f))
-        val result = retriever(listOf(far, close), emptyMap()) {
-            Result.success(listOf(queryVector))
-        }.retrieve(profileId = 7L, summary = "本章梗概", chapterTags = emptyList())
+    fun `本章标签全部未命中时在整个档案随机抽`() = runTest {
+        val first = chunk(1, 7L, "片段一")
+        val second = chunk(2, 7L, "片段二")
+        val result = retriever(listOf(first, second), emptyMap())
+            .pick(profileId = 7L, chapterTags = listOf(chapterTag("人物对话")), limit = 2)
 
-        assertTrue(result.hits.size >= 1)
-        assertEquals(1L, result.hits.first().chunkId)
-        assertTrue(result.vectorUsed)
+        assertEquals(setOf(1L, 2L), result.hits.map { it.chunkId }.toSet())
+        assertEquals(0, result.matchedChunks)
+        assertTrue(result.hits.all { it.weight == 0.0 })
     }
 
     @Test
-    fun `不要求全部标签匹配也能命中`() = runTest {
-        val onlyOne = chunk(1, 7L, "只匹配一个标签", floatArrayOf(1f, 0f))
-        val result = retriever(listOf(onlyOne), mapOf(1L to listOf(row(1, "人物对话")))) {
-            Result.success(listOf(queryVector))
-        }.retrieve(
-            profileId = 7L,
-            summary = "本章梗概",
-            chapterTags = listOf(chapterTag("人物对话"), chapterTag("压抑", "情绪氛围"), chapterTag("动作表现心理", "描写方式"))
+    fun `标签出现次数越多被抽中的概率越大`() = runTest {
+        val scene = chunk(1, 7L, "场景片段")
+        val mood = chunk(2, 7L, "情绪片段")
+        val rows = mapOf(
+            1L to listOf(row(1, "雨夜", "场景类型")),
+            2L to listOf(row(2, "压抑", "情绪氛围"))
         )
-        assertTrue(result.hits.isNotEmpty())
+        // 同一标签在多个句段重复出现时，出现次数同样计入权重
+        val tags = listOf(chapterTag("雨夜"), chapterTag("雨夜"), chapterTag("雨夜")) +
+            chapterTag("压抑", "情绪氛围")
+        val sampler = retriever(listOf(scene, mood), rows)
+
+        var sceneCount = 0
+        repeat(200) {
+            val hit = sampler.pick(profileId = 7L, chapterTags = tags, limit = 1).hits.single()
+            if (hit.chunkId == 1L) sceneCount++
+        }
+        assertTrue("场景片段应明显多于情绪片段：$sceneCount/200", sceneCount > 100)
     }
 
     @Test
-    fun `候选不足时只返回现有数量`() = runTest {
-        val only = chunk(1, 7L, "只有一个", floatArrayOf(1f, 0f))
-        val result = retriever(listOf(only), emptyMap()) {
-            Result.success(listOf(queryVector))
-        }.retrieve(profileId = 7L, summary = "本章梗概", chapterTags = emptyList(), limit = 2)
+    fun `候选不足时只返回现有数量且不重复`() = runTest {
+        val only = chunk(1, 7L, "只有一个")
+        val result = retriever(listOf(only), emptyMap())
+            .pick(profileId = 7L, chapterTags = emptyList(), limit = 2)
         assertEquals(1, result.hits.size)
-    }
-
-    @Test
-    fun `向量不可用时仍可依靠标签命中`() = runTest {
-        val tagged = chunk(1, 7L, "带标签片段", floatArrayOf(1f, 0f))
-        val result = retriever(listOf(tagged), mapOf(1L to listOf(row(1, "人物对话")))) {
-            Result.failure(RuntimeException("embedding offline"))
-        }.retrieve(profileId = 7L, summary = "本章梗概", chapterTags = listOf(chapterTag("人物对话")))
-
-        assertTrue(result.hits.isNotEmpty())
-        assertFalse(result.vectorUsed)
-    }
-
-    @Test
-    fun `无标签且向量不可用时不强行返回结果`() = runTest {
-        val chunk = chunk(1, 7L, "片段")
-        val result = retriever(listOf(chunk), emptyMap()) {
-            Result.failure(RuntimeException("embedding offline"))
-        }.retrieve(profileId = 7L, summary = "本章梗概", chapterTags = emptyList())
-        assertEquals(0, result.hits.size)
+        assertEquals(1, result.hits.map { it.chunkId }.distinct().size)
     }
 
     @Test
     fun `只会加载当前档案的片段`() = runTest {
-        val mine = chunk(1, 7L, "本档案", floatArrayOf(1f, 0f))
-        val other = chunk(2, 8L, "其他档案", floatArrayOf(1f, 0f))
-        val result = retriever(listOf(mine, other), emptyMap()) {
-            Result.success(listOf(queryVector))
-        }.retrieve(profileId = 7L, summary = "本章梗概", chapterTags = emptyList())
+        val mine = chunk(1, 7L, "本档案")
+        val other = chunk(2, 8L, "其他档案")
+        val result = retriever(listOf(mine, other), emptyMap())
+            .pick(profileId = 7L, chapterTags = emptyList())
 
         assertEquals(listOf(1L), result.hits.map { it.chunkId })
+    }
+
+    @Test
+    fun `读取片段失败时返回空结果不抛出`() = runTest {
+        val result = StyleSampleRetriever(
+            loadChunks = { throw RuntimeException("db offline") },
+            loadTagRows = { emptyMap() },
+            random = Random(0)
+        ).pick(profileId = 7L, chapterTags = emptyList())
+
+        assertEquals(0, result.hits.size)
+        assertTrue(result.reason.contains("读取档案片段失败"))
     }
 }
 

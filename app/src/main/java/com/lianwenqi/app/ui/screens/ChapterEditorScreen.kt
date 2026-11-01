@@ -136,6 +136,7 @@ fun ChapterEditorScreen(
     val summaryTagFlow = remember(currentId) { vm.observeSummaryTags(currentId) }
     val summaryTags by summaryTagFlow.collectAsState(initial = emptyList())
     val profileTags by vm.summaryTagProfileTags.collectAsState()
+    val userTags by vm.summaryTagUserTags.collectAsState()
     val summaryTagsExpanded by vm.summaryTagsExpanded.collectAsState()
     var title by remember(currentId) { mutableStateOf("") }
     var summary by remember(currentId) { mutableStateOf("") }
@@ -631,11 +632,13 @@ fun ChapterEditorScreen(
                 ChapterSummaryTagsSection(
                     tags = summaryTags,
                     summary = summary,
-                    profileTags = profileTags,
+                    candidates = userTags + profileTags,
                     expanded = summaryTagsExpanded,
                     onToggleExpanded = { vm.toggleSummaryTagsExpanded() },
                     onDelete = { id -> vm.deleteSummaryTag(id) },
-                    onReplaceTag = { tag, newTag -> vm.replaceSummaryTag(tag, newTag) }
+                    onSaveSegmentTags = { hash, segment, picked ->
+                        vm.saveSegmentSummaryTags(hash, segment, picked)
+                    }
                 )
             }
             Spacer(Modifier.height(10.dp))

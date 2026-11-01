@@ -59,6 +59,10 @@ data class PromptLog(
     val memory: String = "",
     /** 本轮「适配性筛选」新命中的大纲参考资料 */
     val autoOutline: String = "",
+    /** 本轮提交给模型的文风样本（仅当轮日志回显，不做前缀冻结） */
+    val styleSamples: String = "",
+    /** 本轮提交的「本章梗概·文风标签句例」（仅当轮日志回显） */
+    val sentenceSamples: String = "",
     /** 本轮用户输入的提示词 */
     val userPrompt: String = "",
     /** 本轮实际发送的完整提示词（按角色顺序拼接） */

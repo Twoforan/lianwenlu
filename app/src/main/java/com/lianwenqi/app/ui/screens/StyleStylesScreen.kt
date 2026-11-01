@@ -1,5 +1,6 @@
 package com.lianwenqi.app.ui.screens
 
+import android.net.Uri
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -22,6 +23,9 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.Label
 import androidx.compose.material.icons.automirrored.filled.MenuBook
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -56,11 +60,16 @@ import com.lianwenqi.app.data.StyleSampleStyleStats
 import com.lianwenqi.app.data.entity.StyleProfile
 import com.lianwenqi.app.data.entity.StyleSampleChunk
 import com.lianwenqi.app.data.entity.StyleSampleRecord
+import com.lianwenqi.app.data.entity.GLOBAL_STYLE_TAG_SCOPE
 import com.lianwenqi.app.data.entity.StyleTag
 import com.lianwenqi.app.data.entity.StyleTagSource
+import com.lianwenqi.app.data.style.StyleExtractResult
+import com.lianwenqi.app.data.style.StyleTaggingOutcome
+import com.lianwenqi.app.data.style.StyleTextExtractor
 import com.lianwenqi.app.data.style.StyleProfileSummary
 import com.lianwenqi.app.data.style.StyleProfileSummaryReader
 import com.lianwenqi.app.ui.appViewModel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -76,6 +85,8 @@ import java.util.Locale
 class StyleStylesViewModel(container: AppContainer) : ViewModel() {
     private val repository = container.styleTagRepository
     private val styleRepository = container.styleRepository
+    private val extractor = StyleTextExtractor(container.context)
+    private val emb = container.memoryEmbeddingGateway
 
     val profiles: StateFlow<List<StyleProfile>> =
         styleRepository.observeProfiles().stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
@@ -87,6 +98,91 @@ class StyleStylesViewModel(container: AppContainer) : ViewModel() {
 
     private val _sampleStats = MutableStateFlow<Map<Long, StyleSampleStyleStats>>(emptyMap())
     val sampleStats: StateFlow<Map<Long, StyleSampleStyleStats>> = _sampleStats.asStateFlow()
+
+    private val _busy = MutableStateFlow(false)
+    val busy: StateFlow<Boolean> = _busy.asStateFlow()
+
+    private val _message = MutableStateFlow<String?>(null)
+    val message: StateFlow<String?> = _message.asStateFlow()
+
+    fun dismissMessage() { _message.value = null }
+
+    /**
+     * 导入样本：默认不绑定文风档案，先切片入库并显示在样本列表里，
+     * 之后用户可在样本样式页再次绑定到某个档案。
+     */
+    fun importFromUri(uri: Uri) {
+        if (_busy.value) return
+        viewModelScope.launch {
+            _busy.value = true
+            try {
+                val name = extractor.displayName(uri)
+                when (val result = extractor.extract(uri, name)) {
+                    is StyleExtractResult.Success -> {
+                        repository.importSample(
+                            profileId = GLOBAL_STYLE_TAG_SCOPE,
+                            fileName = name,
+                            format = result.format.label,
+                            text = result.text
+                        ) { texts -> emb.embed(texts) }
+                        _message.value = "已导入样本「$name」：当前未绑定文风档案、未分析标签。"
+                    }
+                    is StyleExtractResult.Failure -> _message.value = result.message
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                _message.value = "导入失败：${e.message ?: "未知错误"}"
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
+
+    fun importText(fileName: String, text: String) {
+        if (_busy.value) return
+        val name = fileName.trim().ifBlank { "粘贴文本" }
+        viewModelScope.launch {
+            _busy.value = true
+            try {
+                repository.importSample(
+                    profileId = GLOBAL_STYLE_TAG_SCOPE,
+                    fileName = name,
+                    format = "文本",
+                    text = text
+                ) { texts -> emb.embed(texts) }
+                _message.value = "已导入样本「$name」：当前未绑定文风档案、未分析标签。"
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                _message.value = "导入失败：${e.message ?: "未知错误"}"
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
+
+    /** 绑定 / 解绑样本所属档案；null 表示设为未绑定 */
+    fun bindSample(sampleId: Long, profileId: Long?) {
+        viewModelScope.launch {
+            try {
+                if (profileId == null || profileId <= 0L) {
+                    repository.unbindSample(sampleId)
+                } else {
+                    repository.bindSample(sampleId, profileId)
+                }
+                _message.value = if (profileId == null || profileId <= 0L) {
+                    "已设为未绑定：原文、片段、向量与标签均保留，但不再参与任何文风检索。"
+                } else {
+                    "已绑定到所选文风档案。"
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                _message.value = "绑定失败：${e.message ?: "未知错误"}"
+            }
+        }
+    }
 
     /** 重新计算真实统计；标签/样本变化后由页面再次调用 */
     fun refresh(profiles: List<StyleProfile>, samples: List<StyleSampleRecord>) {
@@ -200,7 +296,8 @@ internal fun StyleSampleStyleCard(
     sample: StyleSampleRecord,
     profileName: String?,
     stats: StyleSampleStyleStats?,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onBindClick: () -> Unit
 ) {
     Surface(
         modifier = Modifier
@@ -214,20 +311,12 @@ internal fun StyleSampleStyleCard(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        sample.fileName,
-                        style = MaterialTheme.typography.bodyMedium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f)
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    StyleBindingBadge(
-                        text = profileName ?: "未绑定",
-                        bound = profileName != null
-                    )
-                }
+                Text(
+                    sample.fileName,
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
                 Text(
                     if (stats == null) "${sample.format} · ${sample.charCount} 字符 · 统计读取中…"
                     else "${sample.format} · ${sample.charCount} 字符 · ${stats.chunkCount} 个片段 · 已标记 ${stats.markedChunkCount} · 标签 ${stats.tagCount}",
@@ -236,14 +325,27 @@ internal fun StyleSampleStyleCard(
                 )
                 if (stats != null) {
                     Text(
-                        if (stats.markedChunkCount == 0) "标签分析状态：未标记"
-                        else "标签分析状态：已标记 ${stats.markedChunkCount}/${stats.chunkCount} 段",
+                        if (stats.markedChunkCount == 0) "标签分析状态：未分析"
+                        else "标签分析状态：已分析 ${stats.markedChunkCount}/${stats.chunkCount} 段",
                         style = MaterialTheme.typography.labelSmall,
                         color = if (stats.markedChunkCount == 0) {
                             MaterialTheme.colorScheme.error
                         } else {
                             MaterialTheme.colorScheme.onSurfaceVariant
                         }
+                    )
+                }
+                Spacer(Modifier.height(4.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "所属档案：",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    StyleBindingBadge(
+                        text = profileName ?: "未绑定",
+                        bound = profileName != null,
+                        onClick = onBindClick
                     )
                 }
             }
@@ -256,20 +358,37 @@ internal fun StyleSampleStyleCard(
     }
 }
 
+/** 所属档案徽标；传入 [onClick] 时整块可点，并显示下拉箭头提示可选择档案 */
 @Composable
-private fun StyleBindingBadge(text: String, bound: Boolean) {
+private fun StyleBindingBadge(
+    text: String,
+    bound: Boolean,
+    onClick: (() -> Unit)? = null
+) {
     Surface(
-        shape = RoundedCornerShape(4.dp),
+        shape = RoundedCornerShape(50),
         color = if (bound) MaterialTheme.colorScheme.secondaryContainer
-        else MaterialTheme.colorScheme.errorContainer
+        else MaterialTheme.colorScheme.errorContainer,
+        modifier = if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier
     ) {
-        Text(
-            text,
-            style = MaterialTheme.typography.labelSmall,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
-        )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(start = 8.dp, end = if (onClick != null) 4.dp else 8.dp, top = 2.dp, bottom = 2.dp)
+        ) {
+            Text(
+                text,
+                style = MaterialTheme.typography.labelSmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            if (onClick != null) {
+                Icon(
+                    Icons.Filled.KeyboardArrowDown,
+                    contentDescription = "选择所属档案",
+                    modifier = Modifier.size(14.dp)
+                )
+            }
+        }
     }
 }
 
@@ -385,6 +504,14 @@ data class StyleSampleStyleDetail(
 class StyleSampleStyleViewModel(container: AppContainer, private val sampleId: Long) : ViewModel() {
     private val repository = container.styleTagRepository
     private val styleRepository = container.styleRepository
+    private val taggingService = container.styleTaggingService
+
+    val profiles: StateFlow<List<StyleProfile>> =
+        styleRepository.observeProfiles().stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    val models = container.configRepository.observeModels()
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    val activeModelId: StateFlow<Long> = container.prefs.activeModelId
+        .stateIn(viewModelScope, SharingStarted.Eagerly, 0L)
 
     private val _detail = MutableStateFlow<StyleSampleStyleDetail?>(null)
     val detail: StateFlow<StyleSampleStyleDetail?> = _detail.asStateFlow()
@@ -394,6 +521,14 @@ class StyleSampleStyleViewModel(container: AppContainer, private val sampleId: L
 
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
+
+    private val _busy = MutableStateFlow(false)
+    val busy: StateFlow<Boolean> = _busy.asStateFlow()
+
+    private val _message = MutableStateFlow<String?>(null)
+    val message: StateFlow<String?> = _message.asStateFlow()
+
+    fun dismissMessage() { _message.value = null }
 
     fun refresh() {
         viewModelScope.launch {
@@ -418,6 +553,61 @@ class StyleSampleStyleViewModel(container: AppContainer, private val sampleId: L
             _loading.value = false
         }
     }
+
+    /** null 表示设为未绑定 */
+    fun bindTo(profileId: Long?) {
+        viewModelScope.launch {
+            runCatching {
+                if (profileId == null || profileId <= 0L) {
+                    repository.unbindSample(sampleId)
+                } else {
+                    repository.bindSample(sampleId, profileId)
+                }
+            }.onSuccess {
+                _message.value = if (profileId == null || profileId <= 0L) {
+                    "已设为未绑定：原文、片段、向量与标签均保留，但不再参与任何文风检索。"
+                } else {
+                    "已绑定到所选文风档案，可以开始标签分析。"
+                }
+                refresh()
+            }.onFailure {
+                _message.value = "绑定失败：${it.message ?: "未知错误"}"
+            }
+        }
+    }
+
+    /** 用当前模型（未设置时取第一个模型）分析样本片段标签，完成后刷新状态 */
+    fun analyze() {
+        if (_busy.value) return
+        viewModelScope.launch {
+            val modelId = activeModelId.value.takeIf { it > 0L }
+                ?: models.value.firstOrNull()?.id
+                ?: 0L
+            if (modelId <= 0L) {
+                _message.value = "请先在 设置 → 模型 中添加并选择文本生成模型。"
+                return@launch
+            }
+            _busy.value = true
+            runCatching { taggingService.analyzeSample(modelId, sampleId) }
+                .onSuccess { outcome ->
+                    _message.value = when (outcome) {
+                        is StyleTaggingOutcome.Success -> buildString {
+                            append("分析完成：已标记 ${outcome.analyzedChunks} 段")
+                            if (outcome.createdTagIds.isNotEmpty()) {
+                                append("，新增 ${outcome.createdTagIds.size} 个标签")
+                            }
+                        }
+                        is StyleTaggingOutcome.Failed -> outcome.message
+                        is StyleTaggingOutcome.InvalidResult -> "分析结果无法解析：${outcome.message}"
+                    }
+                    refresh()
+                }
+                .onFailure {
+                    _message.value = "分析失败：${it.message ?: "未知错误"}"
+                }
+            _busy.value = false
+        }
+    }
 }
 
 /** 文风样本样式详情：样本信息、整体标签概览、片段级真实标签 */
@@ -434,11 +624,15 @@ fun StyleSampleStyleScreen(
     val detail by vm.detail.collectAsState()
     val loading by vm.loading.collectAsState()
     val error by vm.error.collectAsState()
+    val profiles by vm.profiles.collectAsState()
+    val busy by vm.busy.collectAsState()
+    val message by vm.message.collectAsState()
 
     LaunchedEffect(sampleId) { vm.refresh() }
 
     var expandedChunks by remember { mutableStateOf<Set<Long>>(emptySet()) }
     var selectedTagId by remember(sampleId) { mutableStateOf<Long?>(null) }
+    var showBindDialog by remember(sampleId) { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -506,8 +700,20 @@ fun StyleSampleStyleScreen(
                             Text(sample.fileName, style = MaterialTheme.typography.titleMedium)
                             Spacer(Modifier.height(6.dp))
                             Text(
-                                "标签分析进度：已标记 $markedCount / ${current.chunks.size} 段 · " +
-                                    "使用标签 ${usageTags.size} 个",
+                                if (markedCount == 0) {
+                                    "标签分析状态：未分析"
+                                } else {
+                                    "标签分析状态：已分析 $markedCount / ${current.chunks.size} 段"
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (markedCount == 0) {
+                                    MaterialTheme.colorScheme.error
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                }
+                            )
+                            Text(
+                                "已标记 $markedCount / ${current.chunks.size} 段 · 使用标签 ${usageTags.size} 个",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -525,7 +731,8 @@ fun StyleSampleStyleScreen(
                                 )
                                 StyleBindingBadge(
                                     text = current.profileName ?: "未绑定",
-                                    bound = current.profileName != null
+                                    bound = current.profileName != null,
+                                    onClick = { showBindDialog = true }
                                 )
                                 Spacer(Modifier.width(8.dp))
                                 Text(
@@ -538,12 +745,50 @@ fun StyleSampleStyleScreen(
                             if (current.profileName == null) {
                                 Spacer(Modifier.height(8.dp))
                                 Text(
-                                    "未绑定样本不参与任何文风档案的 RAG 检索；原文、片段、向量与标签均保留。",
+                                    "点击所属档案可绑定；未绑定样本不参与任何文风档案的 RAG 检索，原文、片段、向量与标签均保留。",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.error
                                 )
                             }
                         }
+                    }
+
+                    // B. 未分析时的分析入口；已分析时状态显示在上方信息卡
+                    if (markedCount == 0) {
+                        Spacer(Modifier.height(10.dp))
+                        if (current.profileName == null) {
+                            Text(
+                                "绑定文风档案后才能开始标签分析。",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        } else {
+                            Button(
+                                onClick = vm::analyze,
+                                enabled = !busy,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                if (busy) {
+                                    CircularProgressIndicator(
+                                        Modifier.size(16.dp),
+                                        strokeWidth = 2.dp,
+                                        color = MaterialTheme.colorScheme.onPrimary
+                                    )
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("正在分析…")
+                                } else {
+                                    Text("开始分析")
+                                }
+                            }
+                        }
+                    }
+                    message?.let {
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            it,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
 
                     Spacer(Modifier.height(20.dp))
@@ -655,6 +900,92 @@ fun StyleSampleStyleScreen(
                 }
             }
             Spacer(Modifier.height(32.dp))
+        }
+    }
+
+    if (showBindDialog) {
+        StyleBindProfileDialog(
+            profiles = profiles,
+            currentProfileId = detail?.sample?.styleProfileId,
+            onPick = { profileId ->
+                showBindDialog = false
+                vm.bindTo(profileId)
+            },
+            onDismiss = { showBindDialog = false }
+        )
+    }
+}
+
+/**
+ * 选择样本所属档案：可选「未绑定」或任意现有档案。
+ * 文风样本页的样本卡片与样本详情页共用此弹窗。
+ */
+@Composable
+internal fun StyleBindProfileDialog(
+    profiles: List<StyleProfile>,
+    currentProfileId: Long?,
+    onPick: (Long?) -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("选择所属档案") },
+        text = {
+            Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState())) {
+                StyleBindOptionRow(
+                    title = "未绑定",
+                    subtitle = "保留原文、片段、向量与标签，但不参与任何文风检索",
+                    selected = currentProfileId == null,
+                    onClick = { onPick(null) }
+                )
+                HorizontalDivider()
+                if (profiles.isEmpty()) {
+                    StyleStylesEmptyHint("还没有文风档案，请先在「档案」页签新建。")
+                } else {
+                    profiles.forEach { profile ->
+                        StyleBindOptionRow(
+                            title = profile.name,
+                            subtitle = "绑定后可使用该档案的标签与样本检索",
+                            selected = currentProfileId == profile.id,
+                            onClick = { onPick(profile.id) }
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
+}
+
+@Composable
+private fun StyleBindOptionRow(
+    title: String,
+    subtitle: String,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyMedium)
+            Text(
+                subtitle,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        if (selected) {
+            Icon(
+                Icons.Filled.Check,
+                contentDescription = "当前所属档案",
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(18.dp)
+            )
         }
     }
 }

@@ -86,7 +86,8 @@ private fun hasLowerBound(range: IntRange?): Boolean =
  * [input] 为空时给一句兜底指令，避免空 user 轮次。
  *
  * [withTags] 为 true 且 [profileTags] 非空时，一次结构化输出 synopsis + 句段标签
- * （每 3 句为一段）：标签只允许引用当前绑定文风档案的 id，模型必须原样复制句段作为 text。
+ * （每 3 句为一段）：[profileTags] 传入「用户全局标签 + 当前绑定档案标签」，
+ * 模型只能引用这些 id，并且必须原样复制句段作为 text。
  */
 fun buildSummaryTurns(
     input: String,
@@ -95,7 +96,7 @@ fun buildSummaryTurns(
     chapterTitle: String = "",
     /** true：一次结构化输出梗概 + 梗概句子标签；字数约束只作用于 synopsis */
     withTags: Boolean = false,
-    /** 当前书籍绑定文风档案的已有标签；为空时不要求打标 */
+    /** 可用的打标标签（用户全局标签 + 当前绑定档案标签）；为空时不要求打标 */
     profileTags: List<StyleTag> = emptyList()
 ): List<ChatTurn> {
     val tagging = withTags && profileTags.isNotEmpty()
@@ -125,10 +126,10 @@ fun buildSummaryTurns(
             append("\n句段标签要求：\n")
             append("- synopsis 必须是上面字数约束下的最终梗概整段文字；\n")
             append("- sentences 只收录需要打标的句段，text 必须从 synopsis 中原样复制整个句段（连续的 1～3 句，含标点，不要拆分或改写）；\n")
-            append("- 每个句段的 tags 只能引用下面【当前文风档案标签】中的 id，不得发明新标签；\n")
+            append("- 每个句段的 tags 只能引用下面【可用标签（用户全局标签 + 当前文风档案标签）】中的 id，不得发明新标签；\n")
             append("- 一个句段可以对应多个标签，一个标签也可以对应多个句段；\n")
             append("- 没有符合标签含义的句段时输出空数组，不要为了凑标签而强行标注。\n")
-            append("\n【当前文风档案标签】\n")
+            append("\n【可用标签（用户全局标签 + 当前文风档案标签）】\n")
             profileTags.forEach { tag ->
                 append("- id=").append(tag.id)
                     .append(" 分类=").append(tag.category)

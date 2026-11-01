@@ -7,13 +7,13 @@ import com.lianwenqi.app.ai.AiRequest
 import com.lianwenqi.app.ai.ChatTurn
 import com.lianwenqi.app.data.entity.Book
 import com.lianwenqi.app.data.entity.Chapter
-import com.lianwenqi.app.data.entity.ChapterSummaryTag
 import com.lianwenqi.app.data.entity.ChatRole
 import com.lianwenqi.app.data.entity.OutlineCategory
 import com.lianwenqi.app.data.entity.OutlineItem
 import com.lianwenqi.app.data.entity.Prompt
 import com.lianwenqi.app.data.entity.StyleTag
 import com.lianwenqi.app.data.entity.Volume
+import com.lianwenqi.app.data.style.SummarySentence
 import com.lianwenqi.app.util.FormatSettings
 import com.lianwenqi.app.util.StyleSettings
 import com.lianwenqi.app.util.TextTool
@@ -86,7 +86,7 @@ class ChapterEditorViewModel(
 
     /**
      * 当前书籍绑定文风档案的已有标签。
-     * 章节标签区用它做两件事：过滤有效自动关联（档案隔离）与「点击标签更换」的候选列表。
+     * 章节标签区用它过滤有效句段关联、判定「每段都有标签」以及作为选择候选。
      */
     val summaryTagProfileTags: StateFlow<List<StyleTag>> =
         book.map { it?.styleId ?: 0L }
@@ -95,6 +95,11 @@ class ChapterEditorViewModel(
                 if (styleId <= 0L) flowOf(emptyList())
                 else container.styleTagRepository.observeProfileTags(styleId)
             }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    /** 用户全局标签：与档案标签一起作为句段标签的展示与多选候选 */
+    val summaryTagUserTags: StateFlow<List<StyleTag>> =
+        container.styleTagRepository.observeUserTags()
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     /** 「本章标签」区展开状态（默认收起，记住上次选择） */
@@ -106,11 +111,25 @@ class ChapterEditorViewModel(
     }
 
     /**
-     * 用户主动更换某条句子关联上的档案标签：
-     * 保留原句定位与梗概哈希，替换标签后仍算有效自动关联（可展示、可参与正文抽样）。
+     * 用户为某个梗概句段多选标签后保存：该句段原有的自动关联与旧选择一起被本次多选替换，
+     * 新关联带完整句段定位，可直接参与正文抽样。
      */
-    fun replaceSummaryTag(tag: ChapterSummaryTag, newTag: StyleTag) = viewModelScope.launch {
-        runCatching { container.styleTagRepository.replaceSummaryTag(tag, newTag) }
+    fun saveSegmentSummaryTags(
+        summaryHash: String,
+        segment: SummarySentence,
+        tags: List<StyleTag>
+    ) = viewModelScope.launch {
+        runCatching {
+            container.styleTagRepository.replaceSegmentSummaryTags(
+                chapterId = currentChapterId,
+                summaryHash = summaryHash,
+                sentenceIndex = segment.index,
+                sentenceStart = segment.start,
+                sentenceEnd = segment.end,
+                sentenceText = segment.text,
+                tags = tags
+            )
+        }
     }
 
     fun deleteSummaryTag(id: Long) = viewModelScope.launch {

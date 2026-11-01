@@ -189,9 +189,9 @@ class StyleTaggingService(
         planBatchesOf(chunks, budget)
 
     /**
-     * 梗概句子标签分析：只使用当前绑定文风档案的已有标签，返回可直接落库的句子关联。
+     * 梗概句段标签分析：使用「用户全局标签 + 当前绑定文风档案标签」，返回可直接落库的句段关联。
      *
-     * 未绑定档案 / 档案没有标签 / 梗概没有可切分句子时不调用模型，直接返回空标签；
+     * 未绑定档案且没有全局标签 / 两套标签都为空 / 梗概没有可切分句子时不调用模型，直接返回空标签；
      * 自动打标失败只影响标签，不影响已经生成的梗概。
      */
     suspend fun analyzeSummary(
@@ -202,9 +202,11 @@ class StyleTaggingService(
         val text = summary.trim()
         val hash = shortHash(text)
         if (text.isBlank()) return SummaryTaggingOutcome.Failed("梗概为空，无法分析标签")
-        if (profileId <= 0L) return SummaryTaggingOutcome.Success(emptyList(), hash, "")
-        val profileTags = repository.profileTags(profileId)
-        if (profileTags.isEmpty()) return SummaryTaggingOutcome.Success(emptyList(), hash, "")
+        val userTags = repository.userTags()
+        val profileTags = if (profileId > 0L) repository.profileTags(profileId) else emptyList()
+        if (userTags.isEmpty() && profileTags.isEmpty()) {
+            return SummaryTaggingOutcome.Success(emptyList(), hash, "")
+        }
         val sentences = SummarySentenceSplitter.split(text)
         if (sentences.isEmpty()) return SummaryTaggingOutcome.Success(emptyList(), hash, "")
         // 打标粒度是句段：每 3 句合并为一段，模型只对段输出标签
@@ -220,7 +222,12 @@ class StyleTaggingService(
         val result = try {
             chat(
                 requestEndpoint,
-                listOf(ChatTurn(ChatRole.USER, SummarySentenceTagPrompt.userContent(segments, profileTags)))
+                listOf(
+                    ChatTurn(
+                        ChatRole.USER,
+                        SummarySentenceTagPrompt.userContent(segments, userTags, profileTags)
+                    )
+                )
             )
         } catch (e: CancellationException) {
             throw e
@@ -235,7 +242,14 @@ class StyleTaggingService(
         val parsed = SummarySentenceTagCodec.parse(raw)
             ?: return SummaryTaggingOutcome.InvalidResult("返回内容不是合法的句子标签 JSON")
 
-        val tags = SummarySentenceTagResolver.resolve(parsed, text, sentences, segments, profileTags, hash)
+        val tags = SummarySentenceTagResolver.resolve(
+            parsed,
+            text,
+            sentences,
+            segments,
+            userTags + profileTags,
+            hash
+        )
         return SummaryTaggingOutcome.Success(tags, hash, raw)
     }
 

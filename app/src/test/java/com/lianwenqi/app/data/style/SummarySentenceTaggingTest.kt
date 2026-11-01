@@ -1,6 +1,7 @@
 package com.lianwenqi.app.data.style
 
 import com.lianwenqi.app.data.entity.ChapterSummaryTag
+import com.lianwenqi.app.data.entity.GLOBAL_STYLE_TAG_SCOPE
 import com.lianwenqi.app.data.entity.StyleTag
 import com.lianwenqi.app.data.entity.StyleTagSource
 import com.lianwenqi.app.data.entity.SummaryTagSource
@@ -75,6 +76,10 @@ class SummarySentenceTagResolverTest {
         StyleTag(id = 12, styleProfileId = 7L, category = "情绪氛围", name = "压抑", source = StyleTagSource.AI)
     )
 
+    private val globalTags = listOf(
+        StyleTag(id = 1, styleProfileId = GLOBAL_STYLE_TAG_SCOPE, category = "全局分类", name = "全局标签", source = StyleTagSource.USER)
+    )
+
     private val summary = "他把杯子放下，没有抬头。她终于开口问了一句。风从窗口灌进来，灯灭了。"
     private val sentences = SummarySentenceSplitter.split(summary)
     private val segments = SummarySentenceSegmenter.segment(summary, sentences)
@@ -87,26 +92,29 @@ class SummarySentenceTagResolverTest {
     )
 
     @Test
-    fun `只接受当前档案标签并丢弃全局与其他档案标签`() {
+    fun `全局标签与当前档案标签都接受且其他档案标签被丢弃`() {
         val items = listOf(
             SummarySentenceTagItem(
                 index = 0,
                 text = segments[0].text,
                 tags = listOf(
                     SummaryTagItem(11, "", ""),
-                    SummaryTagItem(1, "", ""),   // 全局标签 id
+                    SummaryTagItem(1, "", ""),   // 全局用户标签 id
                     SummaryTagItem(21, "", ""),  // 其他档案标签 id
                     SummaryTagItem(null, "", "不存在的标签")
                 )
             )
         )
-        val result = resolve(items)
-        assertEquals(listOf(11L), result.map { it.tagId })
-        assertEquals(SummaryTagSource.PROFILE, result.single().source)
-        assertEquals(0, result.single().sentenceIndex)
-        assertEquals(segments[0].text, result.single().sentenceText)
-        assertEquals(segments[0].start, result.single().sentenceStart)
-        assertEquals(segments[0].end, result.single().sentenceEnd)
+        val result = resolve(items, profileTags + globalTags)
+        assertEquals(listOf(11L, 1L), result.map { it.tagId })
+        assertEquals(
+            listOf(SummaryTagSource.PROFILE, SummaryTagSource.USER_GLOBAL),
+            result.map { it.source }
+        )
+        assertEquals(listOf(0, 0), result.map { it.sentenceIndex })
+        assertEquals(segments[0].text, result[0].sentenceText)
+        assertEquals(segments[0].start, result[0].sentenceStart)
+        assertEquals(segments[0].end, result[0].sentenceEnd)
     }
 
     @Test
@@ -139,7 +147,7 @@ class SummarySentenceTagResolverTest {
     }
 
     @Test
-    fun `档案没有标签时不产生任何关联`() {
+    fun `没有任何可用标签时不产生任何关联`() {
         val items = listOf(
             SummarySentenceTagItem(0, segments[0].text, listOf(SummaryTagItem(1, "", ""), SummaryTagItem(11, "", "")))
         )

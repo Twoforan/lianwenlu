@@ -1141,6 +1141,7 @@ private fun AiAssistantPanel(
     val memorySearch by vm.memorySearchState.collectAsState()
     val memoryToolReady by vm.memoryToolConfigured.collectAsState()
     val generationRunning by vm.generationRunning.collectAsState()
+    val generationStage by vm.generationStage.collectAsState()
     // 对话分组的展开状态：默认全部收起，用户点开 / 收起后记住，下次进入沿用
     val expandedGroups by vm.expandedChatGroups.collectAsState()
 
@@ -1337,6 +1338,7 @@ private fun AiAssistantPanel(
                     onViewLog = { logTarget = it },
                     onViewPrompt = { promptTarget = it },
                     onStop = { vm.stopCurrentWork() },
+                    generationStage = generationStage,
                     // 「重新生成」识别出生成轮次时，生成的梗概同样可一键写回本章
                     onWriteToChapter = onWriteToChapter,
                     // 「写入梗概」只对本章的回答生效，避免在别的章节的抽屉里误写到当前章节
@@ -1414,9 +1416,9 @@ private fun AiAssistantPanel(
                     }
                 }
 
-                // 工具条上方的冒泡提示：检索中 / 生成中（浮在对话区底部，不占用工具条宽度）
+                // 工具条上方的冒泡提示：按阶段显示（生成梗概中 / 分析梗概中 / 记忆检索中 / 生成文本中）
                 val busyText = when {
-                    generationRunning -> "生成中"
+                    generationRunning -> generationStage ?: "生成中"
                     memorySearch == MemorySearchState.SEARCHING && memoryRetrieval -> "搜索中"
                     else -> null
                 }
@@ -3096,6 +3098,9 @@ private fun PromptLogDialog(log: PromptLog?, onClose: () -> Unit) {
                     LogTextNode("本章梗概", log.summary)
                     if (log.memory.isNotBlank()) LogTextNode("记忆检索参考资料", log.memory)
                     if (log.autoOutline.isNotBlank()) LogTextNode("新增大纲参考资料", log.autoOutline)
+                    // 文风样本与句例只在当轮请求中使用，这里仅回显本轮实际提交的内容
+                    if (log.sentenceSamples.isNotBlank()) LogTextNode("本章梗概·文风标签句例", log.sentenceSamples)
+                    if (log.styleSamples.isNotBlank()) LogTextNode("文风样本", log.styleSamples)
                     LogTextNode("用户提示词部分", log.userPrompt)
 
                     // 四、工具与响应日志：排查「工具没触发 / 工具写成正文」一类问题
@@ -3199,6 +3204,8 @@ private fun ChatMessageItem(
     /** 正在流式生成的正文 / 思考内容（实时显示） */
     streamingContent: String,
     streamingReasoning: String,
+    /** 生成正文的阶段提示；为空时回退成「正在生成」 */
+    generationStage: String? = null,
     ui: MessageUiState,
     chapters: List<Chapter>,
     outline: List<OutlineItem>,
@@ -3314,6 +3321,7 @@ private fun ChatMessageItem(
                         content = streamingContent,
                         reasoning = streamingReasoning,
                         modelName = modelName,
+                        stage = generationStage,
                         onStop = onStop
                     )
                 } else {
@@ -3763,6 +3771,7 @@ private fun RespondingBlock(
     content: String,
     reasoning: String,
     modelName: String,
+    stage: String?,
     onStop: () -> Unit
 ) {
     var dots by remember { mutableIntStateOf(1) }
@@ -3798,7 +3807,7 @@ private fun RespondingBlock(
             )
             Spacer(Modifier.weight(1f))
             Text(
-                "正在生成" + "…".repeat(dots),
+                (stage ?: "正在生成") + "…".repeat(dots),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
