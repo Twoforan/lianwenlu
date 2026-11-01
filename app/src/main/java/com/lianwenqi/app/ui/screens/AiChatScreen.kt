@@ -3067,6 +3067,17 @@ private fun PromptLogDialog(log: PromptLog?, onClose: () -> Unit) {
                             }
                         }
                     }
+                    if (log.context.isNotBlank()) {
+                        LogTextNode("上下文内容", log.context)
+                    } else {
+                        LogNode("上下文内容") {
+                            Text(
+                                "（未勾选章节梗概 / 正文）",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
 
                     // 二、上下文日志：历史上已发送过的轮次
                     LogSectionTitle("上下文日志")
@@ -3098,8 +3109,7 @@ private fun PromptLogDialog(log: PromptLog?, onClose: () -> Unit) {
                     LogTextNode("本章梗概", log.summary)
                     if (log.memory.isNotBlank()) LogTextNode("记忆检索参考资料", log.memory)
                     if (log.autoOutline.isNotBlank()) LogTextNode("新增大纲参考资料", log.autoOutline)
-                    // 文风样本与句例只在当轮请求中使用，这里仅回显本轮实际提交的内容
-                    if (log.sentenceSamples.isNotBlank()) LogTextNode("本章梗概·文风标签句例", log.sentenceSamples)
+                    // 文风样本只在当轮请求中使用，这里仅回显本轮实际提交的内容
                     if (log.styleSamples.isNotBlank()) LogTextNode("文风样本", log.styleSamples)
                     LogTextNode("用户提示词部分", log.userPrompt)
 

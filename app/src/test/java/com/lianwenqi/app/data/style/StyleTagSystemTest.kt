@@ -285,9 +285,22 @@ class StyleSampleRetrieverTest {
         val result = retriever(listOf(first, second), emptyMap())
             .pick(profileId = 7L, chapterTags = listOf(chapterTag("人物对话")), limit = 2)
 
-        assertEquals(setOf(1L, 2L), result.hits.map { it.chunkId }.toSet())
+        // 没有标签命中时退化为全档案随机，条数按「命中数 0」取最少 1 条
+        assertEquals(1, result.hits.size)
         assertEquals(0, result.matchedChunks)
         assertTrue(result.hits.all { it.weight == 0.0 })
+    }
+
+    @Test
+    fun `条数随命中数增长且总字数不超过上限`() = runTest {
+        val chunks = (1L..6L).map { chunk(it, 7L, "甲".repeat(300)) }
+        val rows = chunks.associate { it.id to listOf(row(it.id, "雨夜")) }
+        val result = retriever(chunks, rows)
+            .pick(profileId = 7L, chapterTags = listOf(chapterTag("雨夜")))
+
+        assertEquals(3, result.hits.size)
+        assertTrue(result.hits.sumOf { it.text.length } <= StyleSampleRetriever.MAX_SAMPLE_CHARS)
+        assertTrue(result.hits.size <= StyleSampleRetriever.MAX_HITS)
     }
 
     @Test

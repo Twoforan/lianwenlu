@@ -271,9 +271,9 @@ fun buildSummarySentenceTagBlock(samples: List<SummarySentenceSample>): String {
 fun buildStyleSampleBlock(hits: List<StyleSampleHit>): String {
     if (hits.isEmpty()) return ""
     return hits.mapIndexed { index, hit ->
-        val label = if (hit.tagLabels.isEmpty()) "" else "；标签：${hit.tagLabels.joinToString("、")}"
+        val label = if (hit.tagLabels.isEmpty()) "" else "（标签：${hit.tagLabels.joinToString("、")}）"
         buildString {
-            append("样本").append(index + 1).append("（来自当前文风档案").append(label).append("）\n")
+            append("样本").append(index + 1).append(label).append('\n')
             append(hit.text.trim())
         }
     }.joinToString("\n\n")

@@ -939,7 +939,7 @@ class AiChatViewModel(
                 userPrompt = userPrompt,
                 fullPrompt = userPrompt.trim().ifBlank { CONTENT_FALLBACK_INPUT },
                 styleSamples = styleSamplesBlock,
-                sentenceSamples = summarySentenceBlock
+                context = prefix.contextLog
             ).encode()
         )
         _generationState.value = FlowState.Done
@@ -1721,13 +1721,14 @@ class AiChatViewModel(
         fullPrompt: String,
         /** 本轮提交给模型的文风样本：只在当轮日志回显，不做前缀冻结 */
         styleSamples: String = "",
-        /** 本轮提交的「本章梗概·文风标签句例」：同样只在当轮日志回显 */
-        sentenceSamples: String = ""
+        /** 预设日志回显：当前勾选的章节梗概 / 正文 */
+        context: String = ""
     ): PromptLog = PromptLog(
         // 实际生效的预设提示词：模型配置里的 systemPrompt（真正随请求发出）
         systemPrompt = configRepository.getModel(modelId)?.systemPrompt.orEmpty(),
         customPrefix = prefix.custom,
         outlines = prefix.outlineEntries.map { PromptLogNode(outlineLogTitle(it.text), it.text) },
+        context = context,
         rounds = rounds,
         summary = summary,
         memory = memory,
@@ -1735,8 +1736,7 @@ class AiChatViewModel(
         userPrompt = userPrompt,
         fullPrompt = fullPrompt,
         genKind = genKind,
-        styleSamples = styleSamples,
-        sentenceSamples = sentenceSamples
+        styleSamples = styleSamples
     )
 
     // ---------------- AI 工具 ----------------
@@ -2698,6 +2698,7 @@ class AiChatViewModel(
             replyToUserId = userId, historyEndId = userId, variantIndex = 0, prefix = prefix,
             logContext = PromptLogContext(
                 outlines = prefix.outlineEntries.map { PromptLogNode(outlineLogTitle(it.text), it.text) },
+                context = prefix.contextLog,
                 summary = summaryBlock,
                 memory = memoryRef,
                 autoOutline = prefix.autoOutlineMaterial
@@ -2980,6 +2981,7 @@ class AiChatViewModel(
         val newBooks = mutableListOf<PrefixEntry>()
         val newOutlines = mutableListOf<PrefixEntry>()
         val newChapters = mutableListOf<PrefixEntry>()
+        var contextLog = ""
 
         if (contextOn) {
             val bookIds = selectedBookIds.value.toList()
@@ -3048,6 +3050,18 @@ class AiChatViewModel(
                 summaryChapters = summarySubmitted.toList(),
                 contentChapters = contentSubmitted.toList()
             )
+            // 日志回显要在首轮清空勾选之前快照：合并「已冻结在前缀里的 + 本轮尾部追加的」章节，
+            // 前缀化关闭时直接用当前勾选实时渲染（与请求实际注入的内容同源）
+            contextLog = if (contextOn) {
+                val seen = LinkedHashSet<Long>()
+                val texts = mutableListOf<String>()
+                (sp.chapters + newChapters).forEach { entry ->
+                    if (seen.add(entry.id)) texts += entry.text
+                }
+                if (texts.isEmpty()) renderCheckedChapters(chapterIds) else texts.joinToString("\n\n")
+            } else {
+                renderCheckedChapters(chapterIds)
+            }
         }
 
         if (outlineOn) {
@@ -3076,8 +3090,15 @@ class AiChatViewModel(
         // 命中的条目（此前未提交过的）渲染成「新增大纲资料」，随当轮用户消息在检索片段之后、
         // 提示词之前注入；已提交过的 id 记入 [SessionPrefix.autoOutlineIds]，后续不重复提交。
         var autoOutlineMaterial = ""
-        if (applyAdaptive && outlineOn && prefs.prefixAdaptiveFilterEnabled.first()) {
-            val summary = fixedChapterId?.let { bookRepository.getChapter(it)?.summary.orEmpty() }.orEmpty()
+        // 触发条件只看「适配性筛选」开关本身：不再依赖「大纲前缀化」，
+        // 否则关闭大纲前缀化（或没有常驻化分类、首轮无任何大纲被冻结）时筛选完全不生效。
+        if (applyAdaptive && prefs.prefixAdaptiveFilterEnabled.first()) {
+            // 匹配用梗概：编辑器固定章节 → 会话绑定章节 → 本书最近打开的章节，
+            // 与 [currentRoundChapterId] 同一套回落，避免只有固定章节才命中。
+            val summaryChapterId = currentRoundChapterId().takeIf { it > 0L }
+            val summary = summaryChapterId
+                ?.let { bookRepository.getChapter(it)?.summary.orEmpty() }
+                .orEmpty()
             val freshIds = adaptiveMatchedOutlineIds(summary).filterNot { it in sp.autoOutlineIds }
             if (freshIds.isNotEmpty()) {
                 val freshEntries = freshIds.mapNotNull { renderOutlineEntry(it) }
@@ -3112,6 +3133,7 @@ class AiChatViewModel(
             contextOn = contextOn,
             outlineOn = outlineOn,
             outlineEntries = if (outlineOn) sp.outlines else emptyList(),
+            contextLog = contextLog,
             newReference = if (appended.isBlank()) "" else "以下是新增参考资料，请在写作时参考：\n$appended",
             autoOutlineMaterial = autoOutlineMaterial,
             sessionPrefix = sp
@@ -3152,6 +3174,13 @@ class AiChatViewModel(
         val contextOn = prefs.prefixContextEnabled.first()
         val outlineOn = prefs.prefixOutlineEnabled.first()
         val sp = SessionPrefix.decode(chatRepository.getSession(sid)?.prefix.orEmpty())
+        val checkedIds =
+            (if (chapterAllSelected.value) contextChapterIds() else selectedChapterIds.value).toList()
+        val contextLog = if (contextOn && sp.chapters.isNotEmpty()) {
+            sp.chapters.joinToString("\n\n") { it.text }
+        } else {
+            renderCheckedChapters(checkedIds)
+        }
         return PreparedPrefix(
             custom = sp.custom,
             style = sp.style,
@@ -3159,8 +3188,22 @@ class AiChatViewModel(
             contextOn = contextOn,
             outlineOn = outlineOn,
             outlineEntries = if (outlineOn) sp.outlines else emptyList(),
+            contextLog = contextLog,
             sessionPrefix = sp
         )
+    }
+
+    /** 按当前勾选渲染章节上下文（梗概 / 正文），供「提交日志」回显 */
+    private suspend fun renderCheckedChapters(chapterIds: List<Long>): String {
+        val texts = mutableListOf<String>()
+        chapterIds.forEach { cid ->
+            val summaryOn = chapterSummaryOn(cid)
+            val contentOn = chapterContentOn(cid)
+            if (summaryOn || contentOn) {
+                chatRepository.renderChapterEntry(cid, summaryOn, contentOn)?.let { texts += it }
+            }
+        }
+        return texts.joinToString("\n\n")
     }
 
     /** 渲染单条大纲条目（文本 + 分类），分类取自当前已加载的大纲列表 */
@@ -3218,6 +3261,8 @@ class AiChatViewModel(
         val outlineOn: Boolean,
         /** 已冻结进前置预设的大纲条目（供「查看日志」回显选择的大纲清单） */
         val outlineEntries: List<PrefixEntry> = emptyList(),
+        /** 「查看日志」回显：本次实际进入请求的章节上下文（已冻结 + 本轮追加） */
+        val contextLog: String = "",
         /** 本轮新勾选内容渲染出的文本（挂到当轮用户消息尾端），无新增时为空 */
         val newReference: String = "",
         /** 「适配性筛选」本轮新命中的大纲资料（挂在检索片段之后、用户提示词之前），无新增时为空 */

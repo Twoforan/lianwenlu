@@ -16,7 +16,7 @@ import com.lianwenqi.app.util.shortHash
 import kotlinx.coroutines.flow.Flow
 
 /** 文风样本默认切片目标长度（字）；这是目标值，不是硬性上限 */
-private const val STYLE_SAMPLE_CHUNK_TARGET = 100
+private const val STYLE_SAMPLE_CHUNK_TARGET = 200
 
 /** 标签名称 / 分类的规范化与校验规则（AI 与用户输入共用，保证去重口径一致） */
 object StyleTagRules {
@@ -358,7 +358,7 @@ class StyleTagRepository(private val db: AppDatabase) {
     /**
      * 导入并切分样本。[profileId] 为 0 时样本默认未绑定（不参与任何档案的 RAG 检索），
      * 之后可在样本管理里再绑定档案；大于 0 时直接归属该档案。
-     * 切片使用文风专用的 [chunkStyleSample]：默认约 100 字、按自然段与句末标点切分、不重叠。
+     * 切片使用文风专用的 [chunkStyleSample]：默认约 200 字、按自然段与句末标点切分、不重叠。
      * 向量化由调用方注入现有 [com.lianwenqi.app.ai.EmbeddingGateway]，
      * 失败时片段照常保存（vector = null），不阻断导入。
      */

@@ -52,7 +52,8 @@ class StyleSampleRetriever internal constructor(
     suspend fun pick(
         profileId: Long,
         chapterTags: List<ChapterSummaryTag>,
-        limit: Int = 2
+        limit: Int = MAX_HITS,
+        maxChars: Int = MAX_SAMPLE_CHARS
     ): StyleSamplePickResult {
         if (profileId <= 0L) return StyleSamplePickResult(reason = "书籍未绑定文风档案")
         val chunks = try {
@@ -94,17 +95,27 @@ class StyleSampleRetriever internal constructor(
             chunks
         }
 
-        val hits = sampleWeighted(pool, weights, limit.coerceAtLeast(1)).map { (chunk, weight) ->
-            StyleSampleHit(
-                chunkId = chunk.id,
-                sampleId = chunk.sampleId,
-                chunkIndex = chunk.chunkIndex,
-                text = chunk.text,
-                tagLabels = tagsByChunk[chunk.id].orEmpty()
-                    .map { "${it.category}：${it.name}" }
-                    .distinct(),
-                weight = weight
-            )
+        // 条数按「命中片段数」动态决定：命中越多给越多，最少 1 条、最多 [limit]（默认 5）条；
+        // 总字数按 [maxChars] 封顶，超出预算的后续片段直接放弃（至少保留 1 条）
+        val desired = (if (matchedChunks <= 0) 1 else matchedChunks).coerceAtMost(limit.coerceAtLeast(1))
+        val picked = sampleWeighted(pool, weights, desired)
+        val hits = ArrayList<StyleSampleHit>(picked.size)
+        var chars = 0
+        picked.forEach { (chunk, weight) ->
+            val len = chunk.text.trim().length
+            if (hits.isEmpty() || chars + len <= maxChars) {
+                hits += StyleSampleHit(
+                    chunkId = chunk.id,
+                    sampleId = chunk.sampleId,
+                    chunkIndex = chunk.chunkIndex,
+                    text = chunk.text,
+                    tagLabels = tagsByChunk[chunk.id].orEmpty()
+                        .map { it.name }
+                        .distinct(),
+                    weight = weight
+                )
+                chars += len
+            }
         }
 
         return StyleSamplePickResult(
@@ -153,5 +164,13 @@ class StyleSampleRetriever internal constructor(
         category.contains("情绪") || category.contains("氛围") -> 2.0
         category.contains("节奏") -> 2.0
         else -> 1.5
+    }
+
+    companion object {
+        /** 单次最多注入的样本片段数（命中数不足时按命中数减少） */
+        const val MAX_HITS = 5
+
+        /** 单次注入样本的总字数上限 */
+        const val MAX_SAMPLE_CHARS = 1000
     }
 }

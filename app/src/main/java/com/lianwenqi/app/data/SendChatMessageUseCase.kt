@@ -51,6 +51,8 @@ data class PromptLog(
     val customPrefix: String = "",
     /** 预设里勾选的大纲清单（每项可单独展开） */
     val outlines: List<PromptLogNode> = emptyList(),
+    /** 预设里勾选的章节上下文（梗概 / 正文回显，仅用于日志查看） */
+    val context: String = "",
     /** 命中缓存的历史轮次（第一轮、第二轮…） */
     val rounds: List<PromptLogRound> = emptyList(),
     /** 本轮「＋本章梗概」附带内容 */
@@ -61,8 +63,6 @@ data class PromptLog(
     val autoOutline: String = "",
     /** 本轮提交给模型的文风样本（仅当轮日志回显，不做前缀冻结） */
     val styleSamples: String = "",
-    /** 本轮提交的「本章梗概·文风标签句例」（仅当轮日志回显） */
-    val sentenceSamples: String = "",
     /** 本轮用户输入的提示词 */
     val userPrompt: String = "",
     /** 本轮实际发送的完整提示词（按角色顺序拼接） */
@@ -97,6 +97,8 @@ private val promptLogJson = Json {
 data class PromptLogContext(
     /** 预设里勾选的大纲清单 */
     val outlines: List<PromptLogNode> = emptyList(),
+    /** 预设里勾选的章节上下文（梗概 / 正文） */
+    val context: String = "",
     val summary: String = "",
     val memory: String = "",
     val autoOutline: String = ""
@@ -425,6 +427,7 @@ class SendChatMessageUseCase(
             systemPrompt = systemPrompt,
             customPrefix = request.prefixText,
             outlines = request.logContext.outlines,
+            context = request.logContext.context,
             rounds = rounds,
             summary = request.logContext.summary,
             memory = request.logContext.memory,

@@ -1024,7 +1024,7 @@ internal fun ImportSampleDialog(
             Column(Modifier.heightIn(max = 460.dp).verticalScroll(rememberScrollState())) {
                 Text(
                     "选择 txt 文件或直接粘贴文本即可，不强制绑定文风档案。" +
-                        "样本会按约 100 字、优先句末标点的规则切片并生成片段向量，" +
+                        "样本会按约 200 字、优先句末标点的规则切片并生成片段向量，" +
                         "导入后显示为「未绑定 / 未分析」，可稍后再绑定档案。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
