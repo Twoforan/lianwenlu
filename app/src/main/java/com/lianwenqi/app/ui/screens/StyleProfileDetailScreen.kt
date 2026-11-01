@@ -18,6 +18,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.AlertDialog
@@ -116,6 +117,7 @@ class StyleProfileDetailViewModel(
 
     private val repository = container.styleRepository
     private val updater = container.styleProfileUpdater
+    private val prefs = container.prefs
 
     private val _state = MutableStateFlow<StyleProfileDetailState>(StyleProfileDetailState.Loading)
     val state: StateFlow<StyleProfileDetailState> = _state.asStateFlow()
@@ -141,8 +143,21 @@ class StyleProfileDetailViewModel(
     private val _unknownFieldAck = MutableStateFlow(false)
     val unknownFieldAck: StateFlow<Boolean> = _unknownFieldAck.asStateFlow()
 
+    /** 分析结果是否收起：从偏好恢复，切换后立即写回，下次进入保持上次选择 */
+    private val _analysisCollapsed = MutableStateFlow(false)
+    val analysisCollapsed: StateFlow<Boolean> = _analysisCollapsed.asStateFlow()
+
     init {
+        viewModelScope.launch {
+            prefs.styleAnalysisCollapsed.collect { _analysisCollapsed.value = it }
+        }
         load()
+    }
+
+    fun toggleAnalysisCollapsed() {
+        val next = !_analysisCollapsed.value
+        _analysisCollapsed.value = next
+        viewModelScope.launch { prefs.setStyleAnalysisCollapsed(next) }
     }
 
     fun load() {
@@ -283,7 +298,12 @@ class StyleProfileDetailViewModel(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun StyleProfileDetailScreen(profileId: Long, onBack: () -> Unit) {
+fun StyleProfileDetailScreen(
+    profileId: Long,
+    onBack: () -> Unit,
+    onOpenTags: (Long) -> Unit = {},
+    onOpenSamples: (Long) -> Unit = {}
+) {
     val vm = appViewModel(key = "style-profile-$profileId") {
         StyleProfileDetailViewModel(it, profileId)
     }
@@ -295,6 +315,7 @@ fun StyleProfileDetailScreen(profileId: Long, onBack: () -> Unit) {
     val deletePhase by vm.deletePhase.collectAsState()
     val showDelete by vm.showDeleteConfirm.collectAsState()
     val unknownAck by vm.unknownFieldAck.collectAsState()
+    val analysisCollapsed by vm.analysisCollapsed.collectAsState()
 
     LaunchedEffect(deletePhase) {
         if (deletePhase == StyleProfileDeletePhase.Deleted) onBack()
@@ -347,7 +368,7 @@ fun StyleProfileDetailScreen(profileId: Long, onBack: () -> Unit) {
                     ) {
                         Text("文风档案不存在或已被删除", style = MaterialTheme.typography.bodyMedium)
                         Spacer(Modifier.height(12.dp))
-                        Button(onClick = onBack) { Text("返回文风库") }
+                        Button(onClick = onBack) { Text("返回档案列表") }
                     }
                 }
 
@@ -399,7 +420,11 @@ fun StyleProfileDetailScreen(profileId: Long, onBack: () -> Unit) {
                                 onUnknownAckChange = vm::setUnknownFieldAck
                             )
                         } else {
-                            StyleProfileReadonlyContent(loaded = current)
+                            StyleProfileReadonlyContent(
+                                loaded = current,
+                                collapsed = analysisCollapsed,
+                                onToggleCollapsed = vm::toggleAnalysisCollapsed
+                            )
                             if (editing) {
                                 Spacer(Modifier.height(12.dp))
                                 Text(
@@ -443,6 +468,18 @@ fun StyleProfileDetailScreen(profileId: Long, onBack: () -> Unit) {
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         } else {
+                            Spacer(Modifier.height(20.dp))
+                            StyleProfileTagEntry(
+                                title = "专属标签库",
+                                subtitle = "管理本档案的标签；AI 分析样本时只能新增，不会修改或删除",
+                                onClick = { onOpenTags(current.profile.id) }
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            StyleProfileTagEntry(
+                                title = "文风样本",
+                                subtitle = "导入、绑定 / 解绑样本，按片段分析标签；未绑定样本不参与文风检索",
+                                onClick = { onOpenSamples(current.profile.id) }
+                            )
                             Spacer(Modifier.height(24.dp))
                             HorizontalDivider()
                             Spacer(Modifier.height(16.dp))
@@ -569,7 +606,11 @@ private fun StyleProfileCompatibilityNotice(summary: StyleProfileSummary) {
 
 /** 只读展示：名称以外不修改任何已保存内容 */
 @Composable
-private fun StyleProfileReadonlyContent(loaded: StyleProfileDetailState.Loaded) {
+private fun StyleProfileReadonlyContent(
+    loaded: StyleProfileDetailState.Loaded,
+    collapsed: Boolean,
+    onToggleCollapsed: () -> Unit
+) {
     val analysis = loaded.analysis
     var showRaw by remember(loaded.profile.id) { mutableStateOf(false) }
 
@@ -619,31 +660,48 @@ private fun StyleProfileReadonlyContent(loaded: StyleProfileDetailState.Loaded) 
         return
     }
 
-    Text("整体风格", style = MaterialTheme.typography.titleMedium)
-    Spacer(Modifier.height(4.dp))
-    Text(analysis.overview, style = MaterialTheme.typography.bodyMedium)
-    Spacer(Modifier.height(16.dp))
-
-    analysisSections(analysis).forEach { section ->
-        StyleDetailSection(title = section.label, items = section.items)
-        Spacer(Modifier.height(14.dp))
+    Row(
+        Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            "文风分析结果",
+            style = MaterialTheme.typography.titleSmall,
+            modifier = Modifier.weight(1f)
+        )
+        TextButton(onClick = onToggleCollapsed) {
+            Text(if (collapsed) "展开" else "收起")
+        }
     }
 
-    StyleDetailSection(
-        title = "证据与可信度",
-        items = analysis.evidenceAndConfidence.map { evidence ->
-            "${analysisDimensionLabel(evidence.dimension)}｜" +
-                "${analysisEvidenceConfidenceLabel(evidence)}：${evidence.evidence}"
-        }
-    )
-
-    if (analysis.evidenceAndConfidence.isEmpty()) {
+    if (!collapsed) {
         Spacer(Modifier.height(4.dp))
-        Text(
-            "该档案没有保存证据说明。",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+        Text("整体风格", style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.height(4.dp))
+        Text(analysis.overview, style = MaterialTheme.typography.bodyMedium)
+        Spacer(Modifier.height(16.dp))
+
+        analysisSections(analysis).forEach { section ->
+            StyleDetailSection(title = section.label, items = section.items)
+            Spacer(Modifier.height(14.dp))
+        }
+
+        StyleDetailSection(
+            title = "证据与可信度",
+            items = analysis.evidenceAndConfidence.map { evidence ->
+                "${analysisDimensionLabel(evidence.dimension)}｜" +
+                    "${analysisEvidenceConfidenceLabel(evidence)}：${evidence.evidence}"
+            }
         )
+
+        if (analysis.evidenceAndConfidence.isEmpty()) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "该档案没有保存证据说明。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
     }
 }
 
@@ -766,6 +824,36 @@ private fun FormTextField(
             .fillMaxWidth()
             .padding(bottom = 10.dp)
     )
+}
+
+@Composable
+private fun StyleProfileTagEntry(title: String, subtitle: String, onClick: () -> Unit) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.titleSmall)
+                Text(
+                    subtitle,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Icon(
+                Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = "进入$title",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
 }
 
 @Composable

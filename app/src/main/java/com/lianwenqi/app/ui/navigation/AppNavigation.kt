@@ -37,9 +37,13 @@ import com.lianwenqi.app.ui.screens.MemorySettingsScreen
 import com.lianwenqi.app.ui.screens.PrefixManageScreen
 import com.lianwenqi.app.ui.screens.ReaderScreen
 import com.lianwenqi.app.ui.screens.SettingsScreen
-import com.lianwenqi.app.ui.screens.StyleLibraryScreen
+import com.lianwenqi.app.ui.screens.StyleNewProfileScreen
 import com.lianwenqi.app.ui.screens.StyleProfileDetailScreen
+import com.lianwenqi.app.ui.screens.StyleProfileStyleScreen
+import com.lianwenqi.app.ui.screens.StyleSampleManageScreen
+import com.lianwenqi.app.ui.screens.StyleSampleStyleScreen
 import com.lianwenqi.app.ui.screens.StyleSettingsScreen
+import com.lianwenqi.app.ui.screens.StyleTagLibraryScreen
 
 object Routes {
     const val SHELL = "shell"
@@ -52,8 +56,21 @@ object Routes {
     const val MEMORY = "memory"
     const val MEMORY_PROGRESS = "memoryprogress"
     const val STYLE = "style"
-    const val STYLE_LIBRARY = "stylelibrary"
+    /** 新建文风档案：样本导入与文风分析独立页 */
+    const val STYLE_NEW = "stylenew"
     const val STYLE_DETAIL = "style/{profileId}"
+    /** 全局用户标签库 */
+    const val STYLE_TAGS = "styletags"
+    /** 文风档案专属标签库 */
+    const val STYLE_PROFILE_TAGS = "styletags/{profileId}"
+    /** 文风档案下的样本管理 */
+    const val STYLE_SAMPLES = "stylesamples/{profileId}"
+    /** 进入样本管理并直接打开导入弹窗 */
+    const val STYLE_SAMPLES_IMPORT = "stylesamples/{profileId}/import"
+    /** 文风档案样式详情 */
+    const val STYLE_PROFILE_STYLE = "stylearchive/{profileId}"
+    /** 文风样本样式详情 */
+    const val STYLE_SAMPLE_STYLE = "stylesample/{sampleId}"
     const val UPDATE = "update"
     const val MANUAL = "manual"
 
@@ -62,6 +79,11 @@ object Routes {
     fun reader(bookId: Long, chapterId: Long) = "reader/$bookId/$chapterId"
     fun bookSearch(bookId: Long) = "booksearch/$bookId"
     fun styleProfile(profileId: Long) = "style/$profileId"
+    fun styleProfileTags(profileId: Long) = "styletags/$profileId"
+    fun styleSamples(profileId: Long) = "stylesamples/$profileId"
+    fun styleSamplesImport(profileId: Long) = "stylesamples/$profileId/import"
+    fun styleProfileStyle(profileId: Long) = "stylearchive/$profileId"
+    fun styleSampleStyle(sampleId: Long) = "stylesample/$sampleId"
 }
 
 private data class TabItem(val route: String, val label: String, val icon: ImageVector)
@@ -100,16 +122,48 @@ fun RootNavHost() {
         composable(Routes.STYLE) {
             StyleSettingsScreen(
                 onBack = { rootNav.popBackStack() },
-                onOpenLibrary = { rootNav.navigate(Routes.STYLE_LIBRARY) }
+                onCreateProfile = { rootNav.navigate(Routes.STYLE_NEW) },
+                onOpenProfile = { profileId -> rootNav.navigate(Routes.styleProfile(profileId)) },
+                onOpenProfileStyle = { profileId ->
+                    rootNav.navigate(Routes.styleProfileStyle(profileId))
+                },
+                onOpenSampleStyle = { sampleId ->
+                    rootNav.navigate(Routes.styleSampleStyle(sampleId))
+                },
+                onOpenGlobalTags = { rootNav.navigate(Routes.STYLE_TAGS) },
+                onOpenSamples = { profileId -> rootNav.navigate(Routes.styleSamples(profileId)) },
+                onImportSample = { profileId ->
+                    rootNav.navigate(Routes.styleSamplesImport(profileId))
+                }
             )
         }
 
-        composable(Routes.STYLE_LIBRARY) {
-            StyleLibraryScreen(
+        composable(Routes.STYLE_NEW) {
+            StyleNewProfileScreen(
                 onBack = { rootNav.popBackStack() },
-                onOpenProfile = { profileId -> rootNav.navigate(Routes.styleProfile(profileId)) },
-                // 新建档案复用文风配置页的样本导入与分析流程
-                onCreate = { rootNav.popBackStack() }
+                onDone = { rootNav.popBackStack() }
+            )
+        }
+
+        composable(
+            Routes.STYLE_PROFILE_STYLE,
+            arguments = listOf(navArgument("profileId") { type = NavType.LongType })
+        ) { entry ->
+            StyleProfileStyleScreen(
+                profileId = entry.arguments?.getLong("profileId") ?: 0L,
+                onBack = { rootNav.popBackStack() },
+                onOpenTags = { profileId -> rootNav.navigate(Routes.styleProfileTags(profileId)) }
+            )
+        }
+
+        composable(
+            Routes.STYLE_SAMPLE_STYLE,
+            arguments = listOf(navArgument("sampleId") { type = NavType.LongType })
+        ) { entry ->
+            StyleSampleStyleScreen(
+                sampleId = entry.arguments?.getLong("sampleId") ?: 0L,
+                onBack = { rootNav.popBackStack() },
+                onOpenSamples = { profileId -> rootNav.navigate(Routes.styleSamples(profileId)) }
             )
         }
 
@@ -119,7 +173,52 @@ fun RootNavHost() {
         ) { entry ->
             StyleProfileDetailScreen(
                 profileId = entry.arguments?.getLong("profileId") ?: 0L,
+                onBack = { rootNav.popBackStack() },
+                onOpenTags = { profileId -> rootNav.navigate(Routes.styleProfileTags(profileId)) },
+                onOpenSamples = { profileId -> rootNav.navigate(Routes.styleSamples(profileId)) }
+            )
+        }
+
+        composable(Routes.STYLE_TAGS) {
+            StyleTagLibraryScreen(
+                scope = 0L,
+                title = "全局标签库",
+                subtitle = "全局用户标签库：只有你能新增、修改和删除；AI 只会读取和使用这里的标签。",
                 onBack = { rootNav.popBackStack() }
+            )
+        }
+
+        composable(
+            Routes.STYLE_PROFILE_TAGS,
+            arguments = listOf(navArgument("profileId") { type = NavType.LongType })
+        ) { entry ->
+            val profileId = entry.arguments?.getLong("profileId") ?: 0L
+            StyleTagLibraryScreen(
+                scope = profileId,
+                title = "档案标签库",
+                subtitle = "当前文风档案专属标签库：与其它档案隔离；AI 分析样本时只能新增标签，不会修改或删除已有标签。",
+                onBack = { rootNav.popBackStack() }
+            )
+        }
+
+        composable(
+            Routes.STYLE_SAMPLES,
+            arguments = listOf(navArgument("profileId") { type = NavType.LongType })
+        ) { entry ->
+            StyleSampleManageScreen(
+                profileId = entry.arguments?.getLong("profileId") ?: 0L,
+                onBack = { rootNav.popBackStack() }
+            )
+        }
+
+        composable(
+            Routes.STYLE_SAMPLES_IMPORT,
+            arguments = listOf(navArgument("profileId") { type = NavType.LongType })
+        ) { entry ->
+            StyleSampleManageScreen(
+                profileId = entry.arguments?.getLong("profileId") ?: 0L,
+                onBack = { rootNav.popBackStack() },
+                autoOpenImport = true
             )
         }
 

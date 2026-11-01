@@ -1,6 +1,9 @@
 package com.lianwenqi.app.ai
 
 import com.lianwenqi.app.data.entity.ChatRole
+import com.lianwenqi.app.data.entity.StyleTag
+import com.lianwenqi.app.data.style.StyleSampleHit
+import com.lianwenqi.app.data.style.SummarySentenceSample
 import com.lianwenqi.app.util.TextTool
 
 /** 字数兜底结果：[over] 表示被截断（原输出超上限），[under] 表示原输出低于下限（不重试，仅提示） */
@@ -57,6 +60,18 @@ private const val HEAD_SUMMARY = "【本章梗概】"
 private const val HEAD_OUTLINE = "【大纲 / 人物设定】"
 private const val HEAD_MEMORY = "【记忆检索参考资料】"
 private const val HEAD_USER = "【用户要求】"
+private const val HEAD_SENTENCE_TAGS = "【本章梗概·文风标签句例】"
+private const val HEAD_STYLE_SAMPLES = "【临时文风样本】"
+
+/** 临时文风样本的使用规则：只参考表达方式，不复制内容，也不写入任何长期数据 */
+private val STYLE_SAMPLES_RULES = """
+【临时文风样本使用规则】
+- 样本只用于参考表达方式、句式节奏、描写方式、对话习惯和情绪呈现方式。
+- 不得复制样本中的人物、剧情、设定、地点、专有名词和具体台词。
+- 不得把样本内容当成本章的剧情事实；不得因样本与梗概相似而改变当前故事设定。
+- 以当前书籍剧情、人物设定和章节梗概为事实依据。
+- 如果样本表现与当前场景不适合，应当降低其参考作用。
+- 样本是辅助参考，不是要求逐句仿写。""".trim()
 
 /** 字数上限是否有效：区间为空或上限 <= 0 都视作「不约束」 */
 private fun upperBound(range: IntRange?): Int? =
@@ -69,13 +84,21 @@ private fun hasLowerBound(range: IntRange?): Boolean =
 /**
  * 生成梗概的 messages：System 指令（含字数硬约束与 4 步自检流程）+ 参考资料块 + 用户即时输入。
  * [input] 为空时给一句兜底指令，避免空 user 轮次。
+ *
+ * [withTags] 为 true 且 [profileTags] 非空时，一次结构化输出 synopsis + 句段标签
+ * （每 3 句为一段）：标签只允许引用当前绑定文风档案的 id，模型必须原样复制句段作为 text。
  */
 fun buildSummaryTurns(
     input: String,
     range: IntRange?,
     referenceBlock: String = "",
-    chapterTitle: String = ""
+    chapterTitle: String = "",
+    /** true：一次结构化输出梗概 + 梗概句子标签；字数约束只作用于 synopsis */
+    withTags: Boolean = false,
+    /** 当前书籍绑定文风档案的已有标签；为空时不要求打标 */
+    profileTags: List<StyleTag> = emptyList()
 ): List<ChatTurn> {
+    val tagging = withTags && profileTags.isNotEmpty()
     val max = upperBound(range)
     val lower = if (hasLowerBound(range)) range!!.first else null
     val instruction = buildString {
@@ -97,8 +120,29 @@ fun buildSummaryTurns(
             append("   - 高于 ").append(max).append("：删除修饰性描写，合并相邻事件；\n")
         }
         append("   - 在范围内：输出。\n")
-        append("4. 只输出最终梗概这一整段文字。\n")
-        append("\n输出禁令：除最终梗概本身外，不得输出任何其他内容 —— 包括核心事件清单、步骤说明、字数统计、字数区间、标题、章节名、列表符号、markdown 标记或任何解释。")
+        if (tagging) {
+            append("4. 把最终梗概按顺序每 3 句合并成一个句段（最后不足 3 句按实际句数），标出符合文风标签的句段，只输出一个 JSON 对象。\n")
+            append("\n句段标签要求：\n")
+            append("- synopsis 必须是上面字数约束下的最终梗概整段文字；\n")
+            append("- sentences 只收录需要打标的句段，text 必须从 synopsis 中原样复制整个句段（连续的 1～3 句，含标点，不要拆分或改写）；\n")
+            append("- 每个句段的 tags 只能引用下面【当前文风档案标签】中的 id，不得发明新标签；\n")
+            append("- 一个句段可以对应多个标签，一个标签也可以对应多个句段；\n")
+            append("- 没有符合标签含义的句段时输出空数组，不要为了凑标签而强行标注。\n")
+            append("\n【当前文风档案标签】\n")
+            profileTags.forEach { tag ->
+                append("- id=").append(tag.id)
+                    .append(" 分类=").append(tag.category)
+                    .append(" 名称=").append(tag.name)
+                if (tag.description.isNotBlank()) append(" 说明=").append(tag.description)
+                append('\n')
+            }
+            append("\n输出格式（只输出该 JSON，不要 markdown 围栏）：\n")
+            append("{\"synopsis\":\"最终梗概正文\",\"sentences\":[{\"text\":\"句段原文\",\"tags\":[{\"id\":12}]}]}\n")
+            append("\n输出禁令：除该 JSON 对象外，不得输出任何其他内容 —— 包括核心事件清单、步骤说明、字数统计、标题、章节名、列表符号或任何解释。")
+        } else {
+            append("4. 只输出最终梗概这一整段文字。\n")
+            append("\n输出禁令：除最终梗概本身外，不得输出任何其他内容 —— 包括核心事件清单、步骤说明、字数统计、字数区间、标题、章节名、列表符号、markdown 标记或任何解释。")
+        }
     }
     return buildList {
         add(ChatTurn(ChatRole.SYSTEM, instruction))
@@ -124,7 +168,11 @@ fun buildContentTurns(
     memoryBlock: String,
     userInput: String,
     range: IntRange?,
-    chapterTitle: String = ""
+    chapterTitle: String = "",
+    /** 【本章梗概·文风标签句例】块，为空表示本次没有可抽样的句子 */
+    summarySentenceBlock: String = "",
+    /** 【临时文风样本】+ 使用规则，为空表示本次没有检索到样本 */
+    styleSamplesBlock: String = ""
 ): List<ChatTurn> {
     val max = upperBound(range)
     val lower = if (hasLowerBound(range)) range!!.first else null
@@ -140,14 +188,27 @@ fun buildContentTurns(
         append("- 严格依据「本章梗概」展开，覆盖其中所有核心事件；\n")
         append("- 参考「大纲 / 人物设定」，保持人物、世界观与情节走向一致；\n")
         append("- 「记忆检索参考资料」来自本书已写正文，仅供写作参考，请勿照抄或复述；\n")
+        if (summarySentenceBlock.isNotBlank()) {
+            append("- 「本章梗概·文风标签句例」是本章梗概中与指定文风标签对应的表达示例，仅参考措辞、节奏和表达方式；不得当作新增剧情设定，不要求照抄；不要在回答中解释标签或输出抽样过程；\n")
+        }
+        if (styleSamplesBlock.isNotBlank()) {
+            append("- 「临时文风样本」是本次生成的表达参考，只借鉴写法，不得复制其中的人物、剧情、设定或台词；\n")
+        }
         append("- 只输出正文内容，不要输出标题、章节名、说明、字数统计或任何解释。")
     }
     val reference = buildString {
         if (summary.isNotBlank()) {
             append(HEAD_SUMMARY).append('\n').append(summary.trim()).append('\n')
         }
+        if (summarySentenceBlock.isNotBlank()) {
+            append(HEAD_SENTENCE_TAGS).append('\n').append(summarySentenceBlock.trim()).append('\n')
+        }
         if (outlineSlot.isNotBlank()) {
             append(HEAD_OUTLINE).append('\n').append(outlineSlot.trim()).append('\n')
+        }
+        if (styleSamplesBlock.isNotBlank()) {
+            append(HEAD_STYLE_SAMPLES).append('\n').append(styleSamplesBlock.trim()).append('\n')
+            append(STYLE_SAMPLES_RULES).append('\n')
         }
         if (memoryBlock.isNotBlank()) {
             append(HEAD_MEMORY).append('\n').append(memoryBlock.trim()).append('\n')
@@ -182,6 +243,39 @@ fun buildSummaryReferenceBlock(
         }
     }
     return sb.toString().trimEnd('\n')
+}
+
+/**
+ * 【本章梗概·文风标签句例】块：只放本次随机抽中的梗概句段（每段 1～3 句）及其标签。
+ * 该文本只进入本次请求，不写入正文、梗概、样本库或任何长期数据。
+ */
+fun buildSummarySentenceTagBlock(samples: List<SummarySentenceSample>): String {
+    if (samples.isEmpty()) return ""
+    val rules = "以下句段摘自本章梗概，是与指定文风标签对应的表达示例；" +
+        "仅用于参考措辞、节奏和表达方式，不是新增剧情设定，不要求照抄；" +
+        "不要在回答中解释标签或输出抽样过程。"
+    return buildString {
+        append(rules).append('\n')
+        samples.forEachIndexed { index, sample ->
+            append(index + 1).append(". 标签：").append(sample.tagNames.joinToString("、"))
+                .append("｜原文：").append(sample.text.trim()).append('\n')
+        }
+    }.trimEnd('\n')
+}
+
+/**
+ * 【临时文风样本】块：只放本次检索到的 1～2 个片段与来源 / 标签说明。
+ * 该文本只进入本次请求，不写入任何长期数据；使用规则由 [buildContentTurns] 统一追加。
+ */
+fun buildStyleSampleBlock(hits: List<StyleSampleHit>): String {
+    if (hits.isEmpty()) return ""
+    return hits.mapIndexed { index, hit ->
+        val label = if (hit.tagLabels.isEmpty()) "" else "；标签：${hit.tagLabels.joinToString("、")}"
+        buildString {
+            append("样本").append(index + 1).append("（来自当前文风档案").append(label).append("）\n")
+            append(hit.text.trim())
+        }
+    }.joinToString("\n\n")
 }
 
 /**

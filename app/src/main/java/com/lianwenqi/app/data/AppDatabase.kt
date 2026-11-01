@@ -12,17 +12,20 @@ import com.lianwenqi.app.data.dao.AiModelDao
 import com.lianwenqi.app.data.dao.BookDao
 import com.lianwenqi.app.data.dao.BookGroupDao
 import com.lianwenqi.app.data.dao.ChapterDao
+import com.lianwenqi.app.data.dao.ChapterSummaryTagDao
 import com.lianwenqi.app.data.dao.ChatDao
 import com.lianwenqi.app.data.dao.MemoryChunkDao
 import com.lianwenqi.app.data.dao.OutlineDao
 import com.lianwenqi.app.data.dao.PromptDao
 import com.lianwenqi.app.data.dao.ProviderDao
 import com.lianwenqi.app.data.dao.StyleProfileDao
+import com.lianwenqi.app.data.dao.StyleTagDao
 import com.lianwenqi.app.data.dao.VolumeDao
 import com.lianwenqi.app.data.entity.AiModel
 import com.lianwenqi.app.data.entity.Book
 import com.lianwenqi.app.data.entity.BookGroup
 import com.lianwenqi.app.data.entity.Chapter
+import com.lianwenqi.app.data.entity.ChapterSummaryTag
 import com.lianwenqi.app.data.entity.ChatMessage
 import com.lianwenqi.app.data.entity.ChatSession
 import com.lianwenqi.app.data.entity.MemoryChunk
@@ -30,6 +33,11 @@ import com.lianwenqi.app.data.entity.OutlineItem
 import com.lianwenqi.app.data.entity.Prompt
 import com.lianwenqi.app.data.entity.Provider
 import com.lianwenqi.app.data.entity.StyleProfile
+import com.lianwenqi.app.data.entity.StyleSampleChunk
+import com.lianwenqi.app.data.entity.StyleSampleRecord
+import com.lianwenqi.app.data.entity.StyleSampleTagLink
+import com.lianwenqi.app.data.entity.StyleTag
+import com.lianwenqi.app.data.entity.StyleTagCategory
 import com.lianwenqi.app.data.entity.Volume
 
 @Database(
@@ -45,9 +53,15 @@ import com.lianwenqi.app.data.entity.Volume
         ChatSession::class,
         ChatMessage::class,
         MemoryChunk::class,
-        StyleProfile::class
+        StyleProfile::class,
+        StyleTagCategory::class,
+        StyleTag::class,
+        StyleSampleRecord::class,
+        StyleSampleChunk::class,
+        StyleSampleTagLink::class,
+        ChapterSummaryTag::class
     ],
-    version = 17,
+    version = 19,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
@@ -63,6 +77,8 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun chatDao(): ChatDao
     abstract fun memoryChunkDao(): MemoryChunkDao
     abstract fun styleProfileDao(): StyleProfileDao
+    abstract fun styleTagDao(): StyleTagDao
+    abstract fun chapterSummaryTagDao(): ChapterSummaryTagDao
 
     companion object {
         @Volatile
@@ -245,6 +261,115 @@ abstract class AppDatabase : RoomDatabase() {
         }
 
         /**
+         * v18：文风标签体系与样本片段。
+         * 只新增表，不改旧表：旧文风档案、书籍绑定、正文 / 梗概 / 向量全部原样保留。
+         * 旧样本（旧版本只存在内存）没有可迁移的记录；旧档案标签库为空，允许为空。
+         */
+        internal val MIGRATION_17_18 = object : Migration(17, 18) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS style_tag_category (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "styleProfileId INTEGER NOT NULL DEFAULT 0, " +
+                        "name TEXT NOT NULL, " +
+                        "source TEXT NOT NULL, " +
+                        "createdAt INTEGER NOT NULL)"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_style_tag_category_styleProfileId ON style_tag_category (styleProfileId)")
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS index_style_tag_category_styleProfileId_name " +
+                        "ON style_tag_category (styleProfileId, name)"
+                )
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS style_tag (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "styleProfileId INTEGER NOT NULL DEFAULT 0, " +
+                        "category TEXT NOT NULL, " +
+                        "name TEXT NOT NULL, " +
+                        "source TEXT NOT NULL, " +
+                        "description TEXT NOT NULL, " +
+                        "createdAt INTEGER NOT NULL)"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_style_tag_styleProfileId ON style_tag (styleProfileId)")
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS index_style_tag_styleProfileId_category_name " +
+                        "ON style_tag (styleProfileId, category, name)"
+                )
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS style_sample (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "styleProfileId INTEGER, " +
+                        "fileName TEXT NOT NULL, " +
+                        "format TEXT NOT NULL, " +
+                        "charCount INTEGER NOT NULL DEFAULT 0, " +
+                        "status TEXT NOT NULL, " +
+                        "createdAt INTEGER NOT NULL, " +
+                        "updatedAt INTEGER NOT NULL)"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_style_sample_styleProfileId ON style_sample (styleProfileId)")
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS style_sample_chunk (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "sampleId INTEGER NOT NULL, " +
+                        "styleProfileId INTEGER NOT NULL DEFAULT 0, " +
+                        "chunkIndex INTEGER NOT NULL, " +
+                        "text TEXT NOT NULL, " +
+                        "hash TEXT NOT NULL, " +
+                        "dim INTEGER NOT NULL DEFAULT 0, " +
+                        "vector BLOB, " +
+                        "createdAt INTEGER NOT NULL)"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_style_sample_chunk_sampleId ON style_sample_chunk (sampleId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_style_sample_chunk_styleProfileId ON style_sample_chunk (styleProfileId)")
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS index_style_sample_chunk_sampleId_chunkIndex " +
+                        "ON style_sample_chunk (sampleId, chunkIndex)"
+                )
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS style_sample_tag (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "chunkId INTEGER NOT NULL, " +
+                        "tagId INTEGER NOT NULL, " +
+                        "source TEXT NOT NULL, " +
+                        "createdAt INTEGER NOT NULL)"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_style_sample_tag_chunkId ON style_sample_tag (chunkId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_style_sample_tag_tagId ON style_sample_tag (tagId)")
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS index_style_sample_tag_chunkId_tagId " +
+                        "ON style_sample_tag (chunkId, tagId)"
+                )
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS chapter_summary_tag (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "chapterId INTEGER NOT NULL, " +
+                        "category TEXT NOT NULL, " +
+                        "name TEXT NOT NULL, " +
+                        "tagId INTEGER NOT NULL DEFAULT 0, " +
+                        "source TEXT NOT NULL, " +
+                        "summaryHash TEXT NOT NULL, " +
+                        "manual INTEGER NOT NULL DEFAULT 0, " +
+                        "createdAt INTEGER NOT NULL)"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_chapter_summary_tag_chapterId ON chapter_summary_tag (chapterId)")
+            }
+        }
+
+        /**
+         * v19：梗概标签补充「句子定位」。
+         * 只新增列、不改旧行：已有书籍 / 梗概 / 正文 / 标签全部保留；
+         * 旧标签的句子定位为 -1 / 空，不参与正文抽样，下一次生成或分析时自动替换。
+         */
+        internal val MIGRATION_18_19 = object : Migration(18, 19) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE chapter_summary_tag ADD COLUMN sentenceIndex INTEGER NOT NULL DEFAULT -1")
+                db.execSQL("ALTER TABLE chapter_summary_tag ADD COLUMN sentenceStart INTEGER NOT NULL DEFAULT -1")
+                db.execSQL("ALTER TABLE chapter_summary_tag ADD COLUMN sentenceEnd INTEGER NOT NULL DEFAULT -1")
+                db.execSQL("ALTER TABLE chapter_summary_tag ADD COLUMN sentenceText TEXT NOT NULL DEFAULT ''")
+            }
+        }
+
+        /**
          * 修复历史遗留的超长行：整本正文被冻结进会话前缀、超长提示词日志 / 正文等，
          * 单行超过 SQLite CursorWindow（2MB）上限后读取会抛 SQLiteBlobTooBigException 直接闪退。
          * 首次打开数据库时把超限文本截断到安全长度，之后用标记表跳过，避免每次启动全表扫描。
@@ -271,7 +396,7 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "lianwenqi.db"
-                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17).addCallback(REPAIR_OVERSIZED_ROWS).build().also { INSTANCE = it }
+                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19).addCallback(REPAIR_OVERSIZED_ROWS).build().also { INSTANCE = it }
             }
     }
 }

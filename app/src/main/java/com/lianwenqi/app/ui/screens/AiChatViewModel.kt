@@ -23,7 +23,9 @@ import com.lianwenqi.app.ai.SummaryFailureChoice
 import com.lianwenqi.app.ai.buildContentTurns
 import com.lianwenqi.app.ai.buildGenerationPrefixTurns
 import com.lianwenqi.app.ai.buildRetrievalQuery
+import com.lianwenqi.app.ai.buildStyleSampleBlock
 import com.lianwenqi.app.ai.buildSummaryReferenceBlock
+import com.lianwenqi.app.ai.buildSummarySentenceTagBlock
 import com.lianwenqi.app.ai.buildSummaryTurns
 import com.lianwenqi.app.ai.contentDialogOrder
 import com.lianwenqi.app.ai.enforceWordRange
@@ -45,6 +47,7 @@ import com.lianwenqi.app.data.entity.AiModel
 import com.lianwenqi.app.data.entity.Book
 import com.lianwenqi.app.data.entity.BookGroup
 import com.lianwenqi.app.data.entity.Chapter
+import com.lianwenqi.app.data.entity.ChapterSummaryTag
 import com.lianwenqi.app.data.entity.ChatMessage
 import com.lianwenqi.app.data.entity.ChatRole
 import com.lianwenqi.app.data.entity.ChatSession
@@ -57,6 +60,7 @@ import com.lianwenqi.app.data.entity.outlineCategoryLabel
 import com.lianwenqi.app.data.entity.defaultOutlineKeys
 import com.lianwenqi.app.data.entity.Prompt
 import com.lianwenqi.app.data.entity.Provider
+import com.lianwenqi.app.data.entity.StyleTag
 import com.lianwenqi.app.data.entity.Volume
 import com.lianwenqi.app.util.AI_CHAPTER_TOOL_PROMPT
 import com.lianwenqi.app.util.AI_OUTLINE_TOOL_PROMPT
@@ -66,6 +70,14 @@ import com.lianwenqi.app.util.AiChapterBlock
 import com.lianwenqi.app.util.AiOutlineBlock
 import com.lianwenqi.app.util.detectImportKindHint
 import com.lianwenqi.app.util.isChapterLikeOutlineBlock
+import com.lianwenqi.app.data.style.SummarySentenceSample
+import com.lianwenqi.app.data.style.SummarySentenceSampler
+import com.lianwenqi.app.data.style.SummarySentenceSegmenter
+import com.lianwenqi.app.data.style.SummarySentenceSplitter
+import com.lianwenqi.app.data.style.SummarySentenceTagResolver
+import com.lianwenqi.app.data.style.SummaryTagValidity
+import com.lianwenqi.app.data.style.SummaryTaggingOutcome
+import com.lianwenqi.app.data.style.SummaryWithTagsCodec
 import com.lianwenqi.app.util.parseAiChapterBlocks
 import com.lianwenqi.app.util.parseAiOutlineBlocks
 import com.lianwenqi.app.util.shortHash
@@ -87,6 +99,8 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+
+private const val TAG = "AiChatViewModel"
 
 /** 消息超长的统一提示：只提示、不提交，也不做任何截断 */
 private const val MSG_TOO_LONG = "消息过长，请缩短后重试"
@@ -244,6 +258,18 @@ class AiChatViewModel(
         // 未配置向量化工具、或本章没有梗概（无从匹配）时一律不生效；否则取用户手动勾选的持久值
         toolReady && avail.summaryReady && manual
     }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    /**
+     * 「文风样式」勾选框（默认关闭，持久化上次选择）。
+     * 只有本次生成请求勾选了它，才对本章梗概句子自动打标、生成正文时抽样注入参考块；
+     * 未勾选时只生成梗概 / 正文，不调用标签分析模型。
+     */
+    val styleEnabled: StateFlow<Boolean> =
+        prefs.genStyleEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    fun toggleStyleEnabled() = viewModelScope.launch {
+        prefs.setGenStyleEnabled(!styleEnabled.value)
+    }
 
     /** 勾选记忆检索时的提示（Toast 用，展示后由 UI 清空） */
     val memoryToast = MutableStateFlow<String?>(null)
@@ -474,7 +500,9 @@ class AiChatViewModel(
             val text: String,
             val promptTokens: Int = 0,
             val completionTokens: Int = 0,
-            val cachedTokens: Int = 0
+            val cachedTokens: Int = 0,
+            /** 本次同时生成并已落库的章节标签（未开启 / 未解析出来时为空） */
+            val tags: List<ChapterSummaryTag> = emptyList()
         ) : SummaryCall
 
         data class Failed(val message: String) : SummaryCall
@@ -558,12 +586,18 @@ class AiChatViewModel(
         // 生成请求：聊天同构前缀块 +（开关开启时）「前情提要」参考资料块 + 生成专用块（指令 + 新增参考资料 + 用户输入）
         val history =
             if (prefs.genCarryHistory.first()) generationHistory(sid, round.userId, modelId) else GenerationHistory()
+        // 「文风样式」勾选才打标：读取当前书籍绑定的唯一档案标签；未勾选 / 未绑定 / 无标签时只生成梗概
+        val withTags = prefs.genStyleEnabled.first()
+        // 只读取当前书籍绑定档案的已有标签；未绑定 / 无标签时正常生成梗概
+        val tagProfileId = styleProfileIdOfChapter(chapterId)
+        val tagProfileTags = summaryTaggingProfileTags(tagProfileId, withTags)
         val turns = assembleGenerationTurns(
-            prefix, ref, history, buildSummaryTurns(userPrompt, plan.summaryWordRange, ref.extra, chapterTitle)
+            prefix, ref, history,
+            buildSummaryTurns(userPrompt, plan.summaryWordRange, ref.extra, chapterTitle, withTags, tagProfileTags)
         )
         // 生成过程中的逐步输出实时回显在本轮对话的回答位置（显示「正在生成」）
         beginGenerationStreaming(round.userId)
-        when (val r = runSummaryCall(plan, turns, stream = true)) {
+        when (val r = runSummaryCall(plan, turns, stream = true, withTags = withTags, chapterId = chapterId, profileTags = tagProfileTags)) {
             is SummaryCall.Ok -> {
                 persistGenerationAnswer(
                     sid = sid,
@@ -637,7 +671,7 @@ class AiChatViewModel(
             GenerationMode.CONTENT_WITH_SUMMARY
         } else {
             if (bookRepository.getChapter(chapterId)?.summary.orEmpty().isBlank()) {
-                noticeThenCancel("请先填写本章梗概，或在设置中开启「同时生成梗概」")
+                noticeThenCancel("无梗概：请先填写本章梗概，或勾选「生成正文同时生成梗概」后再生成正文")
                 return
             }
             GenerationMode.CONTENT_ONLY
@@ -722,14 +756,26 @@ class AiChatViewModel(
             } else {
                 GenerationHistory()
             }
+        val summaryTagsEnabled = prefs.genStyleEnabled.first()
+        val summaryTagProfileTags = if (summaryTagsEnabled) {
+            summaryTaggingProfileTags(styleProfileIdOfChapter(chapterId), true)
+        } else {
+            emptyList()
+        }
         val summary = if (mode == GenerationMode.CONTENT_WITH_SUMMARY) {
             awaitSummaryWithRetry(
                 plan,
                 assembleGenerationTurns(
-                    prefix, ref, history, buildSummaryTurns(userPrompt, plan.summaryWordRange, ref.extra, chapterTitle)
+                    prefix, ref, history,
+                    buildSummaryTurns(
+                        userPrompt, plan.summaryWordRange, ref.extra, chapterTitle,
+                        summaryTagsEnabled, summaryTagProfileTags
+                    )
                 ),
                 chapterId,
-                onSummary
+                onSummary,
+                withTags = summaryTagsEnabled,
+                profileTags = summaryTagProfileTags
             )
                 ?: run {
                     if (!generationCancelled) _generationState.value = FlowState.Failed
@@ -765,6 +811,52 @@ class AiChatViewModel(
             chatRepository.updateSessionPrefix(sid, sp.encode())
         }
 
+        // 只有勾选「文风样式」才做梗概标签分析（复用有效关联 / 缺失过期时重新分析）；
+        // 未勾选时不分析、不抽样、不注入句子参考块，正文按原流程生成
+        val styleProfileId = styleProfileIdOfChapter(chapterId)
+        val chapterTags = if (summaryTagsEnabled) {
+            ensureSummaryTags(chapterId, summary, modelId)
+        } else {
+            emptyList()
+        }
+        // 文风样本 RAG：未勾选「文风样式」时完全不检索；勾选后只检索当前书籍绑定档案的已绑定片段。
+        // 检索失败 / 无结果继续正常生成
+        val styleRetrieval = if (summaryTagsEnabled && styleProfileId > 0L && summary.isNotBlank()) {
+            try {
+                // 句子关联会让同一标签出现多次，检索前按标签去重，避免重复加分
+                container.styleSampleRetriever.retrieve(
+                    styleProfileId,
+                    summary,
+                    chapterTags.distinctBy { it.category + "\u0000" + it.name }
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                Log.w(TAG, "文风样本检索失败：${e.message}")
+                null
+            }
+        } else {
+            null
+        }
+        // 本章当前梗概中随机抽样 1～3 个带档案标签的句段，仅本次请求临时使用
+        val sentenceSamples = if (summaryTagsEnabled) {
+            sampleSummarySentences(chapterTags, summary, styleProfileId)
+        } else {
+            emptyList()
+        }
+        val summarySentenceBlock = buildSummarySentenceTagBlock(sentenceSamples)
+        val styleSamplesBlock = buildStyleSampleBlock(styleRetrieval?.hits.orEmpty())
+        // 只记录检索摘要（不打印完整样本与提示词），遵循现有日志规范
+        Log.d(
+            TAG,
+            "style-rag book=$chapterId profile=$styleProfileId summaryHash=${shortHash(summary)} " +
+                "tags=${chapterTags.joinToString(",") { "${it.category}:${it.name}" }} " +
+                // 句子参考块只记数量与字数，不打印原句
+                "sentenceSamples=${sentenceSamples.size}/${sentenceSamples.sumOf { it.text.length }}chars " +
+                "chunks=${styleRetrieval?.candidateChunks} hits=${styleRetrieval?.hits?.map { it.chunkId }}" +
+                " vector=${styleRetrieval?.vectorUsed} injected=${styleRetrieval?.hits?.size ?: 0}" +
+                (styleRetrieval?.reason?.takeIf { it.isNotBlank() }?.let { " reason=$it" } ?: "")
+        )
         // 正文专用块：文风约束已冻结在会话前缀首块（见 [prepareSessionPrefix]），这里不再重复注入
         val contentTurns = buildContentTurns(
             summary = summary,
@@ -773,7 +865,9 @@ class AiChatViewModel(
             memoryBlock = memoryRef.text,
             userInput = userPrompt,
             range = plan.contentWordRange,
-            chapterTitle = chapterTitle
+            chapterTitle = chapterTitle,
+            summarySentenceBlock = summarySentenceBlock,
+            styleSamplesBlock = styleSamplesBlock
         )
         val turns = assembleGenerationTurns(prefix, ref, history, contentTurns)
         // 先落「用户消息」：输入框提示词 + 「生成正文」标记；本轮新增的参考资料随消息落库成为历史的一部分。
@@ -1073,7 +1167,12 @@ class AiChatViewModel(
         plan: GenerationPlan,
         turns: List<ChatTurn>,
         /** true：单独「生成梗概」时流式回显到对话；false：「同时生成梗概」的子调用保持静默 */
-        stream: Boolean = false
+        stream: Boolean = false,
+        /** true：本次要求一次结构化输出梗概 + 句子标签 */
+        withTags: Boolean = false,
+        chapterId: Long = 0L,
+        /** 当前绑定文风档案的已有标签；为空表示不自动打标 */
+        profileTags: List<StyleTag> = emptyList()
     ): SummaryCall {
         val modelId = activeModelId.value
         if (modelId <= 0L) return SummaryCall.Failed("请先在设置中配置并选择一个模型")
@@ -1085,7 +1184,10 @@ class AiChatViewModel(
         if (!result.success) return SummaryCall.Failed(result.error?.userMessage ?: "生成梗概失败")
         val raw = result.content.trim()
         if (raw.isBlank()) return SummaryCall.Failed("梗概生成失败：模型返回空内容")
-        val enforced = enforceWordRange(raw, plan.summaryWordRange)
+        // 标签解析失败时绝不能丢梗概：解析不出来就把原始文本当梗概
+        val structured = if (withTags) SummaryWithTagsCodec.parse(raw) else null
+        val synopsis = structured?.synopsis ?: raw
+        val enforced = enforceWordRange(synopsis, plan.summaryWordRange)
         // 落库的是截断 / 校正后的梗概：把回显内容同步成最终文本，避免完成后内容突变
         if (stream && streamingContent.value.isNotEmpty()) streamingContent.value = enforced.text
         if (enforced.over) {
@@ -1093,11 +1195,32 @@ class AiChatViewModel(
         } else if (enforced.under) {
             generationMessage.value = "梗概略短于设定下限，可直接使用"
         }
+        // 打标对象必须是最终保存的梗概文本：按最终文本重新切句并每 3 句合成句段后精确映射，映射失败的丢弃
+        val tags = if (structured != null && chapterId > 0L && profileTags.isNotEmpty()) {
+            val hash = shortHash(enforced.text)
+            runCatching {
+                val sentences = SummarySentenceSplitter.split(enforced.text)
+                val segments = SummarySentenceSegmenter.segment(enforced.text, sentences)
+                val resolved = SummarySentenceTagResolver.resolve(
+                    structured.sentences,
+                    enforced.text,
+                    sentences,
+                    segments,
+                    profileTags,
+                    hash
+                )
+                container.styleTagRepository.saveSummaryTags(chapterId, hash, resolved, keepManual = true)
+                resolved
+            }.getOrElse { emptyList() }
+        } else {
+            emptyList()
+        }
         return SummaryCall.Ok(
             enforced.text,
             promptTokens = result.promptTokens,
             completionTokens = result.completionTokens,
-            cachedTokens = result.cachedTokens
+            cachedTokens = result.cachedTokens,
+            tags = tags
         )
     }
 
@@ -1110,10 +1233,15 @@ class AiChatViewModel(
         plan: GenerationPlan,
         turns: List<ChatTurn>,
         chapterId: Long,
-        onSummary: (String) -> Unit
+        onSummary: (String) -> Unit,
+        withTags: Boolean = false,
+        profileTags: List<StyleTag> = emptyList()
     ): String? {
         while (true) {
-            when (val r = runSummaryCall(plan, turns)) {
+            when (val r = runSummaryCall(
+                plan, turns, stream = false, withTags = withTags,
+                chapterId = chapterId, profileTags = profileTags
+            )) {
                 is SummaryCall.Ok -> {
                     // 生成的梗概静默写回本章梗概（经编辑器本地缓冲，避免被下次整章保存覆盖）
                     onSummary(r.text)
@@ -1144,6 +1272,112 @@ class AiChatViewModel(
                 }
             }
         }
+    }
+
+    /** 当前章节所属书籍绑定的文风档案 id；未绑定返回 0 */
+    private suspend fun styleProfileIdOfChapter(chapterId: Long): Long {
+        val bookId = bookRepository.getChapter(chapterId)?.bookId ?: return 0L
+        return bookRepository.getBook(bookId)?.styleId ?: 0L
+    }
+
+    /** 生成梗概时的打标标签：只读取当前绑定档案；开关关闭 / 未绑定 / 无标签时返回空 */
+    private suspend fun summaryTaggingProfileTags(profileId: Long, withTags: Boolean): List<StyleTag> {
+        if (!withTags || profileId <= 0L) return emptyList()
+        return try {
+            container.styleTagRepository.profileTags(profileId)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            emptyList()
+        }
+    }
+
+    /**
+     * 正文生成时的句子抽样：实时读取本章当前梗概与最新绑定档案的标签，
+     * 只在本次请求中临时使用，不写入任何长期数据。
+     */
+    private suspend fun sampleSummarySentences(
+        tags: List<ChapterSummaryTag>,
+        summary: String,
+        profileId: Long
+    ): List<SummarySentenceSample> {
+        if (profileId <= 0L || summary.isBlank()) return emptyList()
+        return try {
+            val profileTags = container.styleTagRepository.profileTags(profileId)
+            SummarySentenceSampler.sample(
+                tags = tags,
+                summary = summary,
+                profileTagIds = profileTags.map { it.id }.toSet()
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            emptyList()
+        }
+    }
+
+    /**
+     * 正文生成前的梗概标签检查（仅勾选「文风样式」时调用）：
+     * - 关联未过期、带句子定位、且标签仍属于当前绑定档案：直接复用，不重复请求模型；
+     * - 关联缺失 / 已过期 / 属于旧档案：重新分析当前最终梗概并保存（保留用户手动标签）；
+     * - 未绑定档案 / 档案没有标签：不分析、不打标，正文照常生成；
+     * - 分析失败：最多保留手动标签，绝不阻断正文生成。
+     */
+    private suspend fun ensureSummaryTags(
+        chapterId: Long,
+        summary: String,
+        modelId: Long
+    ): List<ChapterSummaryTag> {
+        val text = summary.trim()
+        if (text.isBlank() || modelId <= 0L) return emptyList()
+        val profileId = styleProfileIdOfChapter(chapterId)
+        // 自动打标只允许使用当前绑定档案的已有标签
+        val profileTags = try {
+            if (profileId <= 0L) emptyList() else container.styleTagRepository.profileTags(profileId)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            emptyList()
+        }
+        val existing = try {
+            container.styleTagRepository.summaryTags(chapterId)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            emptyList()
+        }
+        // 未绑定档案 / 档案没有标签：不自动打标，手动标签继续保留
+        if (profileTags.isEmpty()) return existing.filter { it.manual }
+        val hash = shortHash(text)
+        val profileTagIds = profileTags.map { it.id }.toSet()
+        // 打标粒度是「每 3 句一段」：旧版逐句关联不算有效，需要按当前粒度重新分析一次
+        val segments = SummarySentenceSegmenter.segment(text, SummarySentenceSplitter.split(text))
+        // 复用只看自动标签：手动标签没有句段关联、也不参与抽样，其过期 hash 不应触发重复分析。
+        // 旧版本自动标签没有句段定位、或标签不属于当前档案，都不能复用：需要重新分析一次。
+        if (SummaryTagValidity.isReusable(existing, hash, profileTagIds, segments)) return existing
+        val fresh = try {
+            when (val outcome = container.styleTaggingService.analyzeSummary(modelId, text, profileId)) {
+                is SummaryTaggingOutcome.Success -> {
+                    container.styleTagRepository.saveSummaryTags(
+                        chapterId,
+                        outcome.summaryHash,
+                        outcome.tags,
+                        keepManual = true
+                    )
+                    // 确认落库的自动关联与本次最终梗概一致，否则不参与抽样
+                    container.styleTagRepository.summaryTags(chapterId).filter {
+                        it.manual || SummaryTagValidity.isValidAuto(it, hash, profileTagIds, segments)
+                    }
+                }
+                else -> null
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            Log.w(TAG, "梗概标签分析失败：${e.message}")
+            null
+        }
+        return fresh ?: existing.filter { it.manual }
     }
 
     /**
@@ -2707,6 +2941,10 @@ class AiChatViewModel(
             val bookIds = selectedBookIds.value.toList()
             val chapterIds =
                 (if (chapterAllSelected.value) contextChapterIds() else selectedChapterIds.value).toList()
+            // 已提交过梗概 / 正文的章节：前缀冻结与历史尾部追加都算，
+            // 用来判断「本次新勾选的梗概 / 正文」是否还需要再注入（章节本身可能早已在前缀里）。
+            val summarySubmitted = sp.summaryChapters.toMutableSet()
+            val contentSubmitted = sp.contentChapters.toMutableSet()
             if (firstTime) {
                 // 建立前置预设：把首轮勾选的书籍 / 章节一次性冻结进去
                 bookIds.forEach { bid ->
@@ -2714,10 +2952,21 @@ class AiChatViewModel(
                         ?.let { sp = sp.copy(books = sp.books.upsert(PrefixEntry(bid, it))) }
                 }
                 chapterIds.forEach { cid ->
-                    chatRepository.renderChapterEntry(cid, chapterSummaryOn(cid), chapterContentOn(cid))
+                    val summaryOn = chapterSummaryOn(cid)
+                    val contentOn = chapterContentOn(cid)
+                    chatRepository.renderChapterEntry(cid, summaryOn, contentOn)
                         ?.let { sp = sp.copy(chapters = sp.chapters.upsert(PrefixEntry(cid, it))) }
+                    if (summaryOn) summarySubmitted += cid
+                    if (contentOn) contentSubmitted += cid
                 }
             } else {
+                // 旧会话没有记录「已提交过哪些内容」：按已冻结的前缀条目文本推断一次
+                if (sp.summaryChapters.isEmpty() && sp.contentChapters.isEmpty()) {
+                    sp.chapters.forEach { entry ->
+                        if (entry.text.contains("梗概：")) summarySubmitted += entry.id
+                        if (entry.text.contains("正文：")) contentSubmitted += entry.id
+                    }
+                }
                 bookIds.filterNot { it in sp.checkedBooks }.forEach { bid ->
                     when {
                         // 已在预设内：对比内容后原位替换（重新勾选才刷新）
@@ -2733,21 +2982,28 @@ class AiChatViewModel(
                         }
                     }
                 }
-                chapterIds.filterNot { it in sp.checkedChapters }.forEach { cid ->
-                    when {
-                        sp.chapters.any { it.id == cid } ->
-                            chatRepository.renderChapterEntry(cid, chapterSummaryOn(cid), chapterContentOn(cid))
-                                ?.let { sp = sp.copy(chapters = sp.chapters.upsert(PrefixEntry(cid, it))) }
-                        cid in sp.tailChapters -> Unit
-                        else -> chatRepository.renderChapterEntry(cid, chapterSummaryOn(cid), chapterContentOn(cid))
-                            ?.let { text ->
-                                newChapters += PrefixEntry(cid, text)
-                                sp = sp.copy(tailChapters = sp.tailChapters + cid)
-                            }
+                chapterIds.forEach { cid ->
+                    val needSummary = chapterSummaryOn(cid) && cid !in summarySubmitted
+                    val needContent = chapterContentOn(cid) && cid !in contentSubmitted
+                    if (!needSummary && !needContent) return@forEach
+                    // 只渲染本次真正新增的部分：章节已在前缀里时也不改写前缀（保持字节稳定），
+                    // 把后补勾选的梗概 / 正文追加到本轮历史尾部。
+                    // 渲染失败（章节已被删除）时不记账，下次仍会尝试。
+                    val text = chatRepository.renderChapterEntry(cid, needSummary, needContent) ?: return@forEach
+                    newChapters += PrefixEntry(cid, text)
+                    if (sp.chapters.none { it.id == cid } && cid !in sp.tailChapters) {
+                        sp = sp.copy(tailChapters = sp.tailChapters + cid)
                     }
+                    if (needSummary) summarySubmitted += cid
+                    if (needContent) contentSubmitted += cid
                 }
             }
-            sp = sp.copy(checkedBooks = bookIds, checkedChapters = chapterIds)
+            sp = sp.copy(
+                checkedBooks = bookIds,
+                checkedChapters = chapterIds,
+                summaryChapters = summarySubmitted.toList(),
+                contentChapters = contentSubmitted.toList()
+            )
         }
 
         if (outlineOn) {

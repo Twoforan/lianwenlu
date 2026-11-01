@@ -381,6 +381,16 @@ fun AiChatScreen(initialBookId: Long?) {
                     pendingReplyTo > 0L -> listState.scrollToBottom()
                 }
             }
+            // 输入法弹出会把对话区从底部压缩：键盘动画期间持续贴回最新一条，
+            // 否则最后几条消息会随可视区缩短被键盘挡住，看起来像「对话框没顶起」。
+            // 只在输入法高度变化时触发，输入文字 / 普通重组 / 回答落库都不会触发跳转。
+            val imeBottomPx = WindowInsets.ime.getBottom(LocalDensity.current)
+            LaunchedEffect(imeBottomPx) {
+                if (imeBottomPx <= 0) return@LaunchedEffect
+                if (entries.isEmpty()) return@LaunchedEffect
+                snapshotFlow { listState.layoutInfo.totalItemsCount }.first { it > 0 }
+                listState.scrollToBottom()
+            }
             // 流式输出到达时：只有用户仍停在底部才向下补滚一次；
             // 用户已上滑阅读时视角保持不动，且不再「先滚到条目顶部再滚到底部」造成抖动
             val followSlop = with(LocalDensity.current) { 48.dp.toPx() }
@@ -1123,6 +1133,7 @@ private fun AiAssistantPanel(
     val streamingContent by vm.streamingContent.collectAsState()
     val streamingReasoning by vm.streamingReasoning.collectAsState()
     val memoryRetrieval by vm.memoryRetrievalEnabled.collectAsState()
+    val styleEnabled by vm.styleEnabled.collectAsState()
     val memoryEmptyAsk by vm.pendingEmptyVectorizeAsk.collectAsState()
     val memoryScopePick by vm.pendingMemoryScopePick.collectAsState()
     val memoryToastMsg by vm.memoryToast.collectAsState()
@@ -1294,6 +1305,15 @@ private fun AiAssistantPanel(
             LaunchedEffect(pendingReplyTo, streamingContent.length, streamingReasoning.length) {
                 if (pendingReplyTo > 0L) listState.followStreaming(followSlop)
             }
+            // 侧边栏同理：输入法弹出压缩对话区时持续贴回最新一条，
+            // 保证最后一条对话始终紧贴输入框上方，而不是被键盘挡住。
+            val panelImeBottomPx = WindowInsets.ime.getBottom(LocalDensity.current)
+            LaunchedEffect(panelImeBottomPx) {
+                if (panelImeBottomPx <= 0) return@LaunchedEffect
+                if (entries.isEmpty()) return@LaunchedEffect
+                snapshotFlow { listState.layoutInfo.totalItemsCount }.first { it > 0 }
+                listState.scrollToBottom()
+            }
             // 一条对话的渲染（侧边栏专属：回答可一键写入当前章节）
             val renderEntry: @Composable (ChatEntry) -> Unit = { entry ->
                 ChatMessageItem(
@@ -1449,8 +1469,6 @@ private fun AiAssistantPanel(
             }
             }
 
-            // 「文风样本」：与「记忆检索」同款的勾选占位，暂未接入任何功能
-            var styleSample by remember { mutableStateOf(false) }
             // 按钮行：按可用宽度等分容纳，不横向滚动
             Row(
                 Modifier
@@ -1475,11 +1493,12 @@ private fun AiAssistantPanel(
                     enabled = memoryToolReady && memoryVectorizing == null,
                     modifier = Modifier.weight(1.12f)
                 )
-                // 「文风样本」：与「记忆检索」一样的勾选按钮，先占位（勾选状态仅本地保存，暂无实际作用）
+                // 「文风样式」：勾选后生成梗概时按当前绑定档案标签给句子打标，
+                // 生成正文时抽样 1～3 句带标签的梗概原句作为参考（未勾选不分析、不注入）
                 SmallChip(
-                    "文风样本",
-                    styleSample,
-                    { styleSample = !styleSample },
+                    "文风样式",
+                    styleEnabled,
+                    { vm.toggleStyleEnabled() },
                     modifier = Modifier.weight(1.12f)
                 )
             }
@@ -2027,7 +2046,7 @@ private fun ChapterSwitchArrow(icon: ImageVector, desc: String, onClick: () -> U
 
 /**
  * 紧凑勾选按钮：自绘容器代替 FilterChip，避免默认内边距在窄屏 / 大字体下把
- * 「记忆检索」「文风样本」四个字裁掉。文字保持单行，宽度按可用权重分配后仍能完整显示。
+ * 「记忆检索」「文风样式」四个字裁掉。文字保持单行，宽度按可用权重分配后仍能完整显示。
  */
 @Composable
 private fun SmallChip(

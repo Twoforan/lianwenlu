@@ -92,6 +92,9 @@ class Prefs(private val context: Context) {
         val lastBookId = longPreferencesKey("last_book_id")
         val lastChapterId = longPreferencesKey("last_chapter_id")
 
+        // 文风档案详情：分析结果是否收起（跨会话保持）
+        val styleAnalysisCollapsed = booleanPreferencesKey("style_analysis_collapsed")
+
         val readerPageMode = intPreferencesKey("reader_page_mode")
         val readerImmersive = booleanPreferencesKey("reader_immersive")
 
@@ -126,8 +129,14 @@ class Prefs(private val context: Context) {
         val genContentMaxWords = intPreferencesKey("gen_content_max_words")
         val genContentWithSummary = booleanPreferencesKey("gen_content_with_summary")
 
+        // 「文风样式」勾选框（默认关闭）：勾选后生成梗概自动给句子打标，生成正文时抽样注入
+        val genStyleEnabled = booleanPreferencesKey("gen_style_enabled")
+
         // 生成工具（生成梗概 / 生成正文）的请求是否携带本会话历史对话（默认关闭）
         val genCarryHistory = booleanPreferencesKey("gen_carry_history")
+
+        // 编辑器「本章标签」区的展开状态（默认收起，记住上次选择）
+        val summaryTagsExpanded = booleanPreferencesKey("summary_tags_expanded")
 
         // AI 对话分组中「用户手动展开」的分组 key 集合（默认全部收起，下次进入沿用上次的展开状态）
         val chatExpandedGroups = stringSetPreferencesKey("chat_expanded_groups")
@@ -192,6 +201,10 @@ class Prefs(private val context: Context) {
     val lastBookId: Flow<Long> = context.dataStore.data.map { it[K.lastBookId] ?: 0L }
     val lastChapterId: Flow<Long> = context.dataStore.data.map { it[K.lastChapterId] ?: 0L }
 
+    /** 文风档案详情：分析结果是否收起（默认展开） */
+    val styleAnalysisCollapsed: Flow<Boolean> =
+        context.dataStore.data.map { it[K.styleAnalysisCollapsed] ?: false }
+
     /** 阅读器全屏（隐藏系统状态栏与导航栏） */
     val readerImmersive: Flow<Boolean> = context.dataStore.data.map { it[K.readerImmersive] ?: true }
 
@@ -244,12 +257,23 @@ class Prefs(private val context: Context) {
         context.dataStore.data.map { it[K.genContentWithSummary] ?: false }
 
     /**
+     * 「文风样式」勾选框（默认关闭）：勾选后才对梗概句子自动打标、生成正文时抽样注入参考。
+     * 未勾选时只生成梗概 / 正文，不调用标签分析模型。
+     */
+    val genStyleEnabled: Flow<Boolean> =
+        context.dataStore.data.map { it[K.genStyleEnabled] ?: false }
+
+    /**
      * 生成工具（生成梗概 / 生成正文）的请求是否携带本会话历史对话（默认关闭）。
      * 关闭：只复用与聊天请求逐字一致的前置块，缓存命中长度恒定；
      * 开启：在前置块之后追加本会话历史，随轮次累积，命中率更高（生成上下文包含历史对话）。
      */
     val genCarryHistory: Flow<Boolean> =
         context.dataStore.data.map { it[K.genCarryHistory] ?: false }
+
+    /** 编辑器「本章标签」区的展开状态（默认收起）：可只看梗概不看标签，并记住上次选择。 */
+    val summaryTagsExpanded: Flow<Boolean> =
+        context.dataStore.data.map { it[K.summaryTagsExpanded] ?: false }
 
     /**
      * AI 对话分组的展开状态：只记录用户手动展开过的分组 key。
@@ -413,7 +437,9 @@ class Prefs(private val context: Context) {
         it[K.genContentMaxWords] = r.last
     }
     suspend fun setGenContentWithSummary(v: Boolean) = writePrefs { it[K.genContentWithSummary] = v }
+    suspend fun setGenStyleEnabled(v: Boolean) = writePrefs { it[K.genStyleEnabled] = v }
     suspend fun setGenCarryHistory(v: Boolean) = writePrefs { it[K.genCarryHistory] = v }
+    suspend fun setSummaryTagsExpanded(v: Boolean) = writePrefs { it[K.summaryTagsExpanded] = v }
 
     /** 记录某个对话分组被用户展开 / 收起 */
     suspend fun setChatGroupExpanded(key: String, expanded: Boolean) = writePrefs {
@@ -538,6 +564,11 @@ class Prefs(private val context: Context) {
         block: suspend (androidx.datastore.preferences.core.MutablePreferences) -> Unit
     ) {
         context.dataStore.edit(block)
+    }
+
+    /** 记住文风档案详情分析结果的收起 / 展开状态 */
+    suspend fun setStyleAnalysisCollapsed(collapsed: Boolean) {
+        writePrefs { it[K.styleAnalysisCollapsed] = collapsed }
     }
 
     // ---------------- AI 上下文选择记忆 ----------------

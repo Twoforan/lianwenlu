@@ -93,3 +93,59 @@ class ChunkingTest {
         assertEquals(shortHash(chunks[0].text), chunks[0].hash)
     }
 }
+
+class StyleSampleChunkingTest {
+
+    @Test
+    fun shortParagraphs_staySeparateAndKeepOrder() {
+        val content = "第一段很短。\n\n第二段也很短。"
+        val chunks = chunkStyleSample(content)
+        assertEquals(2, chunks.size)
+        assertEquals("第一段很短。", chunks[0].text)
+        assertEquals("第二段也很短。", chunks[1].text)
+        assertEquals(listOf(0, 1), chunks.map { it.index })
+    }
+
+    @Test
+    fun longParagraph_splitsAtSentenceEndingsWithinTarget() {
+        val sentences = listOf(
+            "他推开门，雨声一下子涌了进来。",
+            "屋里没有开灯，桌面上只剩一只凉透的杯子。",
+            "她站在门口，没有换鞋，也没有抬头。",
+            "他张了张嘴，最后什么也没说。",
+            "窗外的雨持续了很久，像谁在低声数数。"
+        )
+        val content = sentences.joinToString("")
+        val chunks = chunkStyleSample(content, target = 40)
+        assertTrue(chunks.size >= 3)
+        // 除最后一段外都应接近目标长度，且每段尽量以句末标点收尾
+        chunks.dropLast(1).forEach { chunk ->
+            assertTrue("chunk too long: ${chunk.text}", chunk.text.length <= 40)
+            assertTrue(
+                "chunk should end at sentence boundary: ${chunk.text}",
+                chunk.text.last() in setOf('。', '！', '？', '；')
+            )
+        }
+        // 原文顺序不变
+        assertEquals(content, chunks.joinToString("") { it.text })
+    }
+
+    @Test
+    fun overlongSentence_fallsBackToSecondaryBreakWithoutLosingText() {
+        val sentence = "甲".repeat(60) + "，" + "乙".repeat(60) + "。"
+        val chunks = chunkStyleSample(sentence, target = 80)
+        assertTrue(chunks.size >= 2)
+        assertEquals(sentence, chunks.joinToString("") { it.text })
+        chunks.forEach { assertTrue(it.text.length <= 80) }
+    }
+
+    @Test
+    fun lastShortChunk_isKeptAndIndexesAreSequential() {
+        val content = "第一段" + "。".repeat(1) + "\n\n短尾。"
+        val chunks = chunkStyleSample(content)
+        assertEquals(2, chunks.size)
+        assertEquals("短尾。", chunks.last().text)
+        assertEquals(1, chunks.last().index)
+        assertEquals(shortHash(chunks.last().text), chunks.last().hash)
+    }
+}

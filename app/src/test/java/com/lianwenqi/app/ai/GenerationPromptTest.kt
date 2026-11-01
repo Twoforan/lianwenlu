@@ -67,6 +67,48 @@ class GenerationPromptTest {
     }
 
     @Test
+    fun buildContentTurns_sentenceBlockSitsBetweenSummaryAndOutline() {
+        val hits = listOf(
+            com.lianwenqi.app.data.style.StyleSampleHit(
+                chunkId = 1,
+                sampleId = 10,
+                chunkIndex = 0,
+                text = "他把杯子放下，没有抬头。",
+                tagLabels = listOf("表达方式：潜台词"),
+                tagScore = 4.5,
+                vectorScore = 0.6f,
+                score = 5.1
+            )
+        )
+        val sentenceBlock = buildSummarySentenceTagBlock(
+            listOf(com.lianwenqi.app.data.style.SummarySentenceSample("他停在门口。", listOf("潜台词")))
+        )
+        val turns = buildContentTurns(
+            summary = "本章梗概",
+            outlineSlot = "人物设定",
+            memoryBlock = "片段1",
+            userInput = "开写",
+            range = 1000..6000,
+            summarySentenceBlock = sentenceBlock,
+            styleSamplesBlock = buildStyleSampleBlock(hits)
+        )
+        // 参考块顺序：梗概 → 句例 → 大纲 → 临时文风样本 → 记忆检索
+        val ref = turns[1].content
+        val heads = listOf(
+            "【本章梗概】",
+            "【本章梗概·文风标签句例】",
+            "【大纲 / 人物设定】",
+            "【临时文风样本】",
+            "【记忆检索参考资料】"
+        )
+        val positions = heads.map { ref.indexOf(it) }
+        assertTrue(positions.all { it >= 0 })
+        assertTrue(positions.zipWithNext().all { (a, b) -> a < b })
+        assertTrue(ref.contains("原文：他停在门口。"))
+        assertTrue(ref.contains("标签：潜台词"))
+    }
+
+    @Test
     fun buildContentTurns_pointsOutChapterTitle() {
         val turns = buildContentTurns("梗概", "大纲", "", "写", null, chapterTitle = "第2章")
         assertTrue(turns[0].content.contains("现在撰写的是「第2章」"))

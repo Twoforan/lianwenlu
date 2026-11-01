@@ -21,7 +21,10 @@ import com.lianwenqi.app.data.ManualSeeder
 import com.lianwenqi.app.data.OutlineRepository
 import com.lianwenqi.app.data.Prefs
 import com.lianwenqi.app.data.StyleRepository
+import com.lianwenqi.app.data.StyleTagRepository
 import com.lianwenqi.app.data.style.StyleAnalysisService
+import com.lianwenqi.app.data.style.StyleSampleRetriever
+import com.lianwenqi.app.data.style.StyleTaggingService
 import com.lianwenqi.app.data.style.StyleConstraintLoader
 import com.lianwenqi.app.data.style.StyleProfileSaver
 import com.lianwenqi.app.data.style.StyleProfileUpdater
@@ -50,6 +53,13 @@ class AppContainer(val app: Application) {
     /** 文风档案编辑：复用同一 Repository，保存前查重与结构校验 */
     val styleProfileUpdater: StyleProfileUpdater = StyleProfileUpdater(styleRepository)
 
+    /** 文风标签 / 样本：全局标签库、档案专属标签库、片段关联与章节梗概标签 */
+    val styleTagRepository: StyleTagRepository = StyleTagRepository(database)
+
+    /** 样本片段标签分析：复用现有模型配置与 AiClient，模型只输出结构化建议 */
+    val styleTaggingService: StyleTaggingService =
+        StyleTaggingService(configRepository, aiClient, styleTagRepository)
+
     /**
      * 生成请求的文风加载入口：每次按书籍 id 实时读取 styleId 与档案，
      * 换绑 / 解绑 / 编辑 / 删除后下一次生成立即使用最新数据。
@@ -77,7 +87,7 @@ class AppContainer(val app: Application) {
      * 上层（MemoryRepository）只依赖这个接口，因此切到本地工具后
      * 「原先提交给向量 API 的内容」自动改由本地模型计算并返回。
      */
-    private val memoryEmbeddingGateway: EmbeddingGateway = MemoryEmbeddingGateway(
+    val memoryEmbeddingGateway: EmbeddingGateway = MemoryEmbeddingGateway(
         remote = RemoteEmbeddingGateway(embeddingClient) {
             EmbeddingConfig(
                 baseUrl = prefs.memoryEmbeddingBaseUrl.first(),
@@ -90,6 +100,10 @@ class AppContainer(val app: Application) {
     )
 
     val memoryRepository: MemoryRepository = MemoryRepository(database, memoryEmbeddingGateway)
+
+    /** 正文生成前的文风样本检索：复用同一套向量网关，硬性按 styleProfileId 过滤 */
+    val styleSampleRetriever: StyleSampleRetriever =
+        StyleSampleRetriever(styleTagRepository) { texts -> memoryEmbeddingGateway.embed(texts) }
 }
 
 class LianWenQiApplication : Application() {

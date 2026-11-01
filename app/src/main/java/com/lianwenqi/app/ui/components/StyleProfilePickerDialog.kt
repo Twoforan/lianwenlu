@@ -88,7 +88,7 @@ fun StyleProfilePickerDialog(
                             )
                             Spacer(Modifier.height(4.dp))
                             Text(
-                                "可先在「设置 → 通用设置 → 文风配置」中导入样本并完成分析；" +
+                                "可先在「设置 → 通用设置 → 文风 → 新建文风档案」中导入样本并完成分析；" +
                                     "现在也可以直接选择「不使用文风」。",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant

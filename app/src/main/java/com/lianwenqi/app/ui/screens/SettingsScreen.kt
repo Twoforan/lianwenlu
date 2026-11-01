@@ -468,9 +468,9 @@ fun SettingsScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Column(Modifier.weight(1f)) {
-                                Text("文风配置")
+                                Text("文风")
                                 Text(
-                                    "管理文风档案，为后续写作提供风格参考",
+                                    "管理文风档案、样本与标签",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )

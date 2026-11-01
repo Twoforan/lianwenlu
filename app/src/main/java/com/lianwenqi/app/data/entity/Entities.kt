@@ -414,6 +414,14 @@ data class SessionPrefix(
     val checkedOutlines: List<Long> = emptyList(),
     val checkedChapters: List<Long> = emptyList(),
     /**
+     * 已提交过「梗概 / 正文」的章节 id（只增不减）：
+     * 前缀冻结、历史尾部追加都算已提交。用于判断本次新勾选的梗概 / 正文是否还需要注入，
+     * 避免「章节已在前缀里、只是后补勾了梗概」时被当成重复项跳过。
+     * 旧会话没有这两个字段时为空，由已冻结的前缀条目文本推断一次。
+     */
+    val summaryChapters: List<Long> = emptyList(),
+    val contentChapters: List<Long> = emptyList(),
+    /**
      * 已经「追加到历史对话尾端」的条目 id（只增不减）：
      * 首轮之后新勾选的内容不再回填前置预设，而是渲染成文本挂到当轮用户消息尾端成为历史的一部分；
      * 记录这些 id 后，后续「取消勾选再重新勾选」不会重复追加。

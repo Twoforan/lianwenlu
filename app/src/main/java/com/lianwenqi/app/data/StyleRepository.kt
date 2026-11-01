@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.Flow
 class StyleRepository(private val db: AppDatabase) {
     private val styleDao = db.styleProfileDao()
     private val bookDao = db.bookDao()
+    private val styleTagRepository = StyleTagRepository(db)
 
     fun observeProfiles(): Flow<List<StyleProfile>> = styleDao.observeAll()
 
@@ -42,6 +43,8 @@ class StyleRepository(private val db: AppDatabase) {
      */
     suspend fun deleteProfile(id: Long) = db.withTransaction {
         bookDao.clearStyle(id)
+        // 删除档案专属标签与分类，并解除片段关联；样本只解绑，不删除原文 / 向量
+        styleTagRepository.detachProfile(id)
         styleDao.deleteById(id)
     }
 

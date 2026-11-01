@@ -22,10 +22,10 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.filled.Label
 import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -39,15 +39,19 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SecondaryTabRow
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -58,9 +62,12 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lianwenqi.app.AppContainer
+import com.lianwenqi.app.data.StyleProfileStyleStats
+import com.lianwenqi.app.data.StyleSampleStyleStats
 import com.lianwenqi.app.data.entity.AiModel
 import com.lianwenqi.app.data.entity.Provider
 import com.lianwenqi.app.data.entity.StyleProfile
+import com.lianwenqi.app.data.entity.StyleSampleRecord
 import com.lianwenqi.app.data.style.StyleAnalysis
 import com.lianwenqi.app.data.style.StyleAnalysisDraft
 import com.lianwenqi.app.data.style.StyleAnalysisOutcome
@@ -422,20 +429,132 @@ class StyleLibraryViewModel(container: AppContainer) : ViewModel() {
     }
 }
 
+/** 文风中心的三个一级页签 */
+private enum class StyleTab(val label: String) {
+    Profiles("档案"),
+    Samples("样本"),
+    Tags("标签")
+}
+
+/** 样本导入与管理共用同一个档案选择弹窗 */
+private enum class StyleProfileAction { Import, Manage }
+
 /**
- * 文风配置：文风分析（样本导入 / 解析 / 预览、选择模型、调用、校验、命名保存）、
- * 文风库入口（进入独立的文风库页面）与文风样式（后续规划，暂未开放）。
- * 分析结果在用户点击「保存档案」前只存在于当前页面内存，不会写入正式档案。
+ * 文风中心：档案 / 样本 / 标签三个页签。
+ *
+ * 仅聚合管理与导航入口；新建档案进入独立页面 [StyleNewProfileScreen]，
+ * 档案详情、档案样式、样本样式、标签库与样本管理继续复用各自原有页面。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun StyleSettingsScreen(onBack: () -> Unit, onOpenLibrary: () -> Unit) {
-    val vm = appViewModel { StyleImportViewModel(it) }
+fun StyleSettingsScreen(
+    onBack: () -> Unit,
+    onCreateProfile: () -> Unit,
+    onOpenProfile: (Long) -> Unit,
+    onOpenProfileStyle: (Long) -> Unit,
+    onOpenSampleStyle: (Long) -> Unit,
+    onOpenGlobalTags: () -> Unit,
+    onOpenSamples: (Long) -> Unit,
+    onImportSample: (Long) -> Unit
+) {
     val libraryVm = appViewModel { StyleLibraryViewModel(it) }
+    val stylesVm = appViewModel { StyleStylesViewModel(it) }
+    val library by libraryVm.library.collectAsState()
+    val profiles by stylesVm.profiles.collectAsState()
+    val samples by stylesVm.samples.collectAsState()
+    val profileStats by stylesVm.profileStats.collectAsState()
+    val sampleStats by stylesVm.sampleStats.collectAsState()
+
+    var selectedTab by rememberSaveable { mutableStateOf(StyleTab.Profiles.ordinal) }
+    var profileAction by remember { mutableStateOf<StyleProfileAction?>(null) }
+
+    LaunchedEffect(profiles, samples) { stylesVm.refresh(profiles, samples) }
+
+    Scaffold(
+        topBar = {
+            Column {
+                TopAppBar(
+                    title = { Text("文风") },
+                    navigationIcon = {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                        }
+                    }
+                )
+                SecondaryTabRow(selectedTabIndex = selectedTab) {
+                    StyleTab.entries.forEachIndexed { index, tab ->
+                        Tab(
+                            selected = selectedTab == index,
+                            onClick = { selectedTab = index },
+                            text = { Text(tab.label) }
+                        )
+                    }
+                }
+            }
+        }
+    ) { padding ->
+        Column(
+            Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp)
+        ) {
+            when (StyleTab.entries.getOrElse(selectedTab) { StyleTab.Profiles }) {
+                StyleTab.Profiles -> StyleProfilesTab(
+                    library = library,
+                    onCreate = onCreateProfile,
+                    onRetry = libraryVm::retry,
+                    onOpenProfile = onOpenProfile,
+                    onOpenProfileStyle = onOpenProfileStyle
+                )
+
+                StyleTab.Samples -> StyleSamplesTab(
+                    profiles = profiles,
+                    samples = samples,
+                    sampleStats = sampleStats,
+                    onImport = { profileAction = StyleProfileAction.Import },
+                    onManage = { profileAction = StyleProfileAction.Manage },
+                    onOpenSampleStyle = onOpenSampleStyle
+                )
+
+                StyleTab.Tags -> StyleTagsTab(
+                    profiles = profiles,
+                    profileStats = profileStats,
+                    onOpenGlobalTags = onOpenGlobalTags,
+                    onOpenProfileStyle = onOpenProfileStyle
+                )
+            }
+        }
+    }
+
+    profileAction?.let { action ->
+        StyleProfileActionDialog(
+            title = if (action == StyleProfileAction.Import) "导入样本到档案" else "管理档案样本",
+            subtitle = if (action == StyleProfileAction.Import) {
+                "样本会归属到所选档案，导入后按约 100 字切片并生成向量。"
+            } else {
+                "进入所选档案的样本管理：导入、绑定 / 解绑、标签分析与片段预览。"
+            },
+            profiles = profiles,
+            onPick = { profileId ->
+                profileAction = null
+                if (action == StyleProfileAction.Import) onImportSample(profileId)
+                else onOpenSamples(profileId)
+            },
+            onDismiss = { profileAction = null }
+        )
+    }
+}
+
+/** 新建文风档案：只承载样本导入与文风分析，保存成功后返回档案列表 */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun StyleNewProfileScreen(onBack: () -> Unit, onDone: () -> Unit) {
+    val vm = appViewModel { StyleImportViewModel(it) }
     val samples by vm.samples.collectAsState()
     val processing by vm.processing.collectAsState()
     val currentName by vm.currentFileName.collectAsState()
-    val library by libraryVm.library.collectAsState()
 
     val picker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()
@@ -447,7 +566,7 @@ fun StyleSettingsScreen(onBack: () -> Unit, onOpenLibrary: () -> Unit) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("文风配置") },
+                title = { Text("新建文风档案") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
@@ -470,68 +589,9 @@ fun StyleSettingsScreen(onBack: () -> Unit, onOpenLibrary: () -> Unit) {
                 currentName = currentName,
                 onImport = { picker.launch(arrayOf("*/*")) },
                 onPreview = { previewKey = it },
-                onRemove = vm::remove
+                onRemove = vm::remove,
+                onBackToList = onDone
             )
-
-            Spacer(Modifier.height(24.dp))
-            HorizontalDivider()
-            Spacer(Modifier.height(16.dp))
-
-            Text("文风库", style = MaterialTheme.typography.titleMedium)
-            Spacer(Modifier.height(4.dp))
-            Text(
-                "已保存的文风档案。点击进入文风库查看、编辑或删除。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(Modifier.height(12.dp))
-
-            StyleLibraryEntryCard(library = library, onClick = onOpenLibrary)
-
-            Spacer(Modifier.height(24.dp))
-            HorizontalDivider()
-            Spacer(Modifier.height(16.dp))
-
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    "文风样式",
-                    style = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.weight(1f)
-                )
-                UnavailableBadge()
-            }
-            Spacer(Modifier.height(4.dp))
-            Text(
-                "把文风档案进一步编排为可套用的样式模板。该区域为后续规划，暂未开放。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(Modifier.height(12.dp))
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp),
-                color = MaterialTheme.colorScheme.surfaceContainerHigh
-            ) {
-                Column(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 20.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Icon(
-                        Icons.Filled.Lock,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(28.dp)
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        "文风样式暂未开放",
-                        style = MaterialTheme.typography.bodyMedium,
-                        textAlign = TextAlign.Center
-                    )
-                }
-            }
         }
     }
 
@@ -540,113 +600,24 @@ fun StyleSettingsScreen(onBack: () -> Unit, onOpenLibrary: () -> Unit) {
     }
 }
 
-/** 主页面的文风库入口：档案数量 + 进入箭头 */
+/** 档案页签：新建入口 + 真实档案列表（主体进详情，样式概览进样式页） */
 @Composable
-private fun StyleLibraryEntryCard(library: StyleLibraryState, onClick: () -> Unit) {
-    val subtitle = when {
-        library.loading -> "正在读取文风档案…"
-        library.error != null -> "档案读取失败，进入后可重试"
-        library.rows.isEmpty() -> "还没有文风档案"
-        else -> "${library.rows.size} 个文风档案"
-    }
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick),
-        shape = RoundedCornerShape(12.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerHigh
-    ) {
-        Row(
-            Modifier.fillMaxWidth().padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(
-                Icons.AutoMirrored.Filled.MenuBook,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(24.dp)
-            )
-            Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
-                Text("查看文风库", style = MaterialTheme.typography.titleSmall)
-                Text(
-                    subtitle,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            Icon(
-                Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                contentDescription = "进入文风库",
-                tint = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-    }
-}
-
-/** 独立的文风库页面：档案列表的读取中 / 读取失败 / 空 / 有数据四种状态 */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun StyleLibraryScreen(onBack: () -> Unit, onOpenProfile: (Long) -> Unit, onCreate: () -> Unit) {
-    val vm = appViewModel { StyleLibraryViewModel(it) }
-    val library by vm.library.collectAsState()
-
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("文风库") },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-                    }
-                }
-            )
-        }
-    ) { padding ->
-        Column(
-            Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp)
-        ) {
-            Text(
-                "已保存的文风档案。点击档案可查看完整分析结果，或修改名称与分析内容。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(Modifier.height(12.dp))
-
-            StyleLibrarySection(
-                library = library,
-                onOpenProfile = onOpenProfile,
-                onCreate = onCreate,
-                onRetry = vm::retry
-            )
-        }
-    }
-}
-
-/** 文风库：真实档案列表 + 读取状态 + 创建入口（创建回到文风配置页导入样本并分析） */
-@Composable
-private fun StyleLibrarySection(
+private fun StyleProfilesTab(
     library: StyleLibraryState,
-    onOpenProfile: (Long) -> Unit,
     onCreate: () -> Unit,
-    onRetry: () -> Unit
+    onRetry: () -> Unit,
+    onOpenProfile: (Long) -> Unit,
+    onOpenProfileStyle: (Long) -> Unit
 ) {
+    Button(onClick = onCreate, modifier = Modifier.fillMaxWidth()) {
+        Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+        Spacer(Modifier.width(6.dp))
+        Text("新建文风档案")
+    }
+    Spacer(Modifier.height(14.dp))
+
     when {
-        library.loading -> {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    "正在读取文风档案…",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        }
+        library.loading -> StyleLoadingRow("正在读取文风档案…")
 
         library.error != null -> {
             Text(
@@ -660,24 +631,193 @@ private fun StyleLibrarySection(
 
         library.rows.isEmpty() -> StyleLibraryEmptyState(onCreate = onCreate)
 
-        else -> {
-            library.rows.forEach { row ->
-                StyleProfileCard(row = row, onClick = { onOpenProfile(row.profile.id) })
-                Spacer(Modifier.height(8.dp))
-            }
-            Spacer(Modifier.height(2.dp))
-            OutlinedButton(onClick = onCreate, modifier = Modifier.fillMaxWidth()) {
-                Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(6.dp))
-                Text("新建档案")
-            }
+        else -> library.rows.forEach { row ->
+            StyleProfileCard(
+                row = row,
+                onClick = { onOpenProfile(row.profile.id) },
+                onOpenStyle = { onOpenProfileStyle(row.profile.id) }
+            )
+            Spacer(Modifier.height(8.dp))
         }
     }
 }
 
+/** 样本页签：导入入口 + 全部真实样本列表 + 按档案管理入口 */
+@Composable
+private fun StyleSamplesTab(
+    profiles: List<StyleProfile>,
+    samples: List<StyleSampleRecord>,
+    sampleStats: Map<Long, StyleSampleStyleStats>,
+    onImport: () -> Unit,
+    onManage: () -> Unit,
+    onOpenSampleStyle: (Long) -> Unit
+) {
+    val profileNames = remember(profiles) { profiles.associate { it.id to it.name } }
+
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("文风样本", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "${samples.size} 个样本 · 未绑定样本不参与检索",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        Button(onClick = onImport, enabled = profiles.isNotEmpty()) { Text("导入样本") }
+    }
+    if (profiles.isEmpty()) {
+        Spacer(Modifier.height(6.dp))
+        Text(
+            "请先在「档案」页签新建文风档案，再导入样本。",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.error
+        )
+    }
+    Spacer(Modifier.height(12.dp))
+
+    if (samples.isEmpty()) {
+        StyleStylesEmptyHint("暂无文风样本。导入样本后会显示在这里。")
+    } else {
+        samples.forEach { sample ->
+            StyleSampleStyleCard(
+                sample = sample,
+                profileName = sample.styleProfileId?.let { profileNames[it] },
+                stats = sampleStats[sample.id],
+                onClick = { onOpenSampleStyle(sample.id) }
+            )
+            Spacer(Modifier.height(8.dp))
+        }
+    }
+
+    Spacer(Modifier.height(16.dp))
+    StyleStylesEntryCard(
+        icon = {
+            Icon(
+                Icons.AutoMirrored.Filled.MenuBook,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        },
+        title = "管理档案样本",
+        subtitle = "导入、绑定 / 解绑、标签分析与片段预览",
+        onClick = onManage
+    )
+}
+
+/** 标签页签：全局标签库入口 + 档案专属标签与样本样式概览 */
+@Composable
+private fun StyleTagsTab(
+    profiles: List<StyleProfile>,
+    profileStats: Map<Long, StyleProfileStyleStats>,
+    onOpenGlobalTags: () -> Unit,
+    onOpenProfileStyle: (Long) -> Unit
+) {
+    Text("全局标签库", style = MaterialTheme.typography.titleMedium)
+    Spacer(Modifier.height(10.dp))
+    StyleStylesEntryCard(
+        icon = {
+            Icon(
+                Icons.AutoMirrored.Filled.Label,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        },
+        title = "查看全局标签库",
+        subtitle = "标签由你维护，AI 只读取使用",
+        onClick = onOpenGlobalTags
+    )
+
+    Spacer(Modifier.height(24.dp))
+    HorizontalDivider()
+    Spacer(Modifier.height(16.dp))
+
+    Text("档案标签与样式", style = MaterialTheme.typography.titleMedium)
+    Spacer(Modifier.height(4.dp))
+    Text(
+        "查看各档案的专属标签体系，以及这些标签在文风样本中的使用情况。",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+    Spacer(Modifier.height(10.dp))
+
+    if (profiles.isEmpty()) {
+        StyleStylesEmptyHint("暂无文风档案。请先在「档案」页签新建档案。")
+    } else {
+        profiles.forEach { profile ->
+            StyleProfileStyleCard(
+                profile = profile,
+                stats = profileStats[profile.id],
+                onClick = { onOpenProfileStyle(profile.id) }
+            )
+            Spacer(Modifier.height(8.dp))
+        }
+    }
+}
+
+@Composable
+private fun StyleLoadingRow(text: String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+/** 导入 / 管理样本前的档案选择弹窗；沿用原有交互，不新增流程 */
+@Composable
+private fun StyleProfileActionDialog(
+    title: String,
+    subtitle: String,
+    profiles: List<StyleProfile>,
+    onPick: (Long) -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            Column(
+                Modifier
+                    .heightIn(max = 420.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                Text(
+                    subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(8.dp))
+                profiles.forEach { profile ->
+                    TextButton(
+                        onClick = { onPick(profile.id) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            profile.name,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        }
+    )
+}
+
 /** 单个档案条目：名称、概述、来源与更新时间；无法识别的分析结果只显示「暂无概述」 */
 @Composable
-private fun StyleProfileCard(row: StyleProfileRow, onClick: () -> Unit) {
+private fun StyleProfileCard(
+    row: StyleProfileRow,
+    onClick: () -> Unit,
+    onOpenStyle: () -> Unit
+) {
     val summary = row.summary
     val profile = row.profile
     Surface(
@@ -732,6 +872,16 @@ private fun StyleProfileCard(row: StyleProfileRow, onClick: () -> Unit) {
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.error
                 )
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                TextButton(
+                    onClick = onOpenStyle,
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                        horizontal = 8.dp, vertical = 0.dp
+                    )
+                ) {
+                    Text("样式概览", style = MaterialTheme.typography.labelMedium)
+                }
             }
         }
     }
@@ -803,7 +953,8 @@ private fun StyleAnalysisSection(
     currentName: String?,
     onImport: () -> Unit,
     onPreview: (String) -> Unit,
-    onRemove: (String) -> Unit
+    onRemove: (String) -> Unit,
+    onBackToList: () -> Unit
 ) {
     val models by vm.models.collectAsState()
     val providers by vm.providers.collectAsState()
@@ -985,13 +1136,17 @@ private fun StyleAnalysisSection(
                     Text("已保存文风档案", style = MaterialTheme.typography.titleSmall)
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        "「${current.name}」已写入文风库，可在页面顶部的档案列表查看、编辑或删除。",
+                        "「${current.name}」已写入文风档案，可在「档案」页签中查看、编辑或删除。",
                         style = MaterialTheme.typography.bodySmall
                     )
                 }
             }
             Spacer(Modifier.height(6.dp))
-            TextButton(onClick = vm::resetAnalysis) { Text("继续分析") }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = vm::resetAnalysis) { Text("继续分析") }
+                Spacer(Modifier.weight(1f))
+                Button(onClick = onBackToList) { Text("返回档案列表") }
+            }
         }
     }
 
@@ -1350,24 +1505,3 @@ private fun StylePreviewDialog(sample: StyleSample, onDismiss: () -> Unit) {
 
 /** 预览最多展示的字符数 */
 private const val PREVIEW_CHARS = 2000
-
-/** 区块右上角的「暂未开放」小标签 */
-@Composable
-private fun UnavailableBadge() {
-    Surface(
-        shape = RoundedCornerShape(50),
-        color = MaterialTheme.colorScheme.secondaryContainer
-    ) {
-        Row(
-            Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.Center
-        ) {
-            Text(
-                "暂未开放",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSecondaryContainer
-            )
-        }
-    }
-}

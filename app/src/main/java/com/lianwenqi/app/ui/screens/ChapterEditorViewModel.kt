@@ -7,22 +7,30 @@ import com.lianwenqi.app.ai.AiRequest
 import com.lianwenqi.app.ai.ChatTurn
 import com.lianwenqi.app.data.entity.Book
 import com.lianwenqi.app.data.entity.Chapter
+import com.lianwenqi.app.data.entity.ChapterSummaryTag
 import com.lianwenqi.app.data.entity.ChatRole
 import com.lianwenqi.app.data.entity.OutlineCategory
 import com.lianwenqi.app.data.entity.OutlineItem
 import com.lianwenqi.app.data.entity.Prompt
+import com.lianwenqi.app.data.entity.StyleTag
 import com.lianwenqi.app.data.entity.Volume
 import com.lianwenqi.app.util.FormatSettings
 import com.lianwenqi.app.util.StyleSettings
 import com.lianwenqi.app.util.TextTool
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class ChapterEditorViewModel(
     private val container: AppContainer,
     val bookId: Long,
@@ -71,6 +79,43 @@ class ChapterEditorViewModel(
     }
 
     suspend fun loadChapter(id: Long = currentChapterId): Chapter? = bookRepository.getChapter(id)
+
+    /** 章节梗概标签（与梗概正文分开保存，不拼接进梗概） */
+    fun observeSummaryTags(chapterId: Long) =
+        container.styleTagRepository.observeSummaryTags(chapterId)
+
+    /**
+     * 当前书籍绑定文风档案的已有标签。
+     * 章节标签区用它做两件事：过滤有效自动关联（档案隔离）与「点击标签更换」的候选列表。
+     */
+    val summaryTagProfileTags: StateFlow<List<StyleTag>> =
+        book.map { it?.styleId ?: 0L }
+            .distinctUntilChanged()
+            .flatMapLatest { styleId ->
+                if (styleId <= 0L) flowOf(emptyList())
+                else container.styleTagRepository.observeProfileTags(styleId)
+            }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    /** 「本章标签」区展开状态（默认收起，记住上次选择） */
+    val summaryTagsExpanded: StateFlow<Boolean> =
+        prefs.summaryTagsExpanded.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    fun toggleSummaryTagsExpanded() = viewModelScope.launch {
+        prefs.setSummaryTagsExpanded(!summaryTagsExpanded.value)
+    }
+
+    /**
+     * 用户主动更换某条句子关联上的档案标签：
+     * 保留原句定位与梗概哈希，替换标签后仍算有效自动关联（可展示、可参与正文抽样）。
+     */
+    fun replaceSummaryTag(tag: ChapterSummaryTag, newTag: StyleTag) = viewModelScope.launch {
+        runCatching { container.styleTagRepository.replaceSummaryTag(tag, newTag) }
+    }
+
+    fun deleteSummaryTag(id: Long) = viewModelScope.launch {
+        runCatching { container.styleTagRepository.deleteSummaryTag(id) }
+    }
 
     fun createChapter(volumeId: Long?, onCreated: (Long) -> Unit) = viewModelScope.launch {
         val id = bookRepository.createChapter(bookId, volumeId)

@@ -133,6 +133,10 @@ fun ChapterEditorScreen(
     val outline by vm.outline.collectAsState()
 
     var currentId by remember { mutableStateOf(chapterId) }
+    val summaryTagFlow = remember(currentId) { vm.observeSummaryTags(currentId) }
+    val summaryTags by summaryTagFlow.collectAsState(initial = emptyList())
+    val profileTags by vm.summaryTagProfileTags.collectAsState()
+    val summaryTagsExpanded by vm.summaryTagsExpanded.collectAsState()
     var title by remember(currentId) { mutableStateOf("") }
     var summary by remember(currentId) { mutableStateOf("") }
     var content by remember(currentId) { mutableStateOf(TextFieldValue("")) }
@@ -622,6 +626,16 @@ fun ChapterEditorScreen(
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                         }
                     }
+                )
+                Spacer(Modifier.height(8.dp))
+                ChapterSummaryTagsSection(
+                    tags = summaryTags,
+                    summary = summary,
+                    profileTags = profileTags,
+                    expanded = summaryTagsExpanded,
+                    onToggleExpanded = { vm.toggleSummaryTagsExpanded() },
+                    onDelete = { id -> vm.deleteSummaryTag(id) },
+                    onReplaceTag = { tag, newTag -> vm.replaceSummaryTag(tag, newTag) }
                 )
             }
             Spacer(Modifier.height(10.dp))
