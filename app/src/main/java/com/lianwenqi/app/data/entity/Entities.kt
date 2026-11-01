@@ -441,7 +441,17 @@ data class SessionPrefix(
      * 命中的片段随当轮用户消息落库后记入这里，后续轮次即使再次召回同一片段也不再重复提交，
      * 避免同一批参考资料在多轮里反复占 token（内容仍在历史对话里，不会丢）。
      */
-    val autoMemoryKeys: List<String> = emptyList()
+    val autoMemoryKeys: List<String> = emptyList(),
+    /**
+     * 「历史对话前缀」开关：在新建会话时从「前缀词管理」冻结，之后修改设置不影响本会话。
+     * 历史梗概 / 历史正文按本会话消息涉及章节每次发送重算；
+     * [historyMessageOn] 为总开关，[historyAiOn] / [historyUserOn] 控制注入哪些角色的消息。
+     */
+    val historySummaryOn: Boolean = false,
+    val historyContentOn: Boolean = false,
+    val historyMessageOn: Boolean = false,
+    val historyAiOn: Boolean = false,
+    val historyUserOn: Boolean = false
 ) {
     fun encode(): String = prefixJson.encodeToString(serializer(), this)
 

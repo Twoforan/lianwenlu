@@ -4,11 +4,11 @@ import com.lianwenqi.app.ai.AiError
 import com.lianwenqi.app.ai.AiRequest
 import com.lianwenqi.app.ai.AiResult
 import com.lianwenqi.app.ai.ChatTurn
-import com.lianwenqi.app.ai.PRIOR_CONTEXT_HEADER
 import com.lianwenqi.app.ai.buildGenerationPrefixTurns
 import com.lianwenqi.app.data.entity.AiModel
 import com.lianwenqi.app.data.entity.ChatMessage
 import com.lianwenqi.app.data.entity.ChatRole
+import com.lianwenqi.app.data.entity.Chapter
 import com.lianwenqi.app.data.entity.ContextSnapshot
 import com.lianwenqi.app.util.AI_IMPORT_CHAPTER_TOOL_SPEC
 import com.lianwenqi.app.util.AI_IMPORT_OUTLINE_TOOL_SPEC
@@ -53,8 +53,14 @@ data class PromptLog(
     val outlines: List<PromptLogNode> = emptyList(),
     /** 预设里勾选的章节上下文（梗概 / 正文回显，仅用于日志查看） */
     val context: String = "",
-    /** 命中缓存的历史轮次（第一轮、第二轮…） */
+    /** 命中缓存的历史轮次（「历史对话前缀」实际注入的消息轮次） */
     val rounds: List<PromptLogRound> = emptyList(),
+    /** 本轮实际注入的「历史梗概」块（空表示未注入，不显示节点） */
+    val historySummary: String = "",
+    /** 本轮实际注入的「历史正文」块（空表示未注入，不显示节点） */
+    val historyContent: String = "",
+    /** 本轮实际注入的「历史对话」块（空表示未注入，不显示节点） */
+    val historyDialogue: String = "",
     /** 本轮「＋本章梗概」附带内容 */
     val summary: String = "",
     /** 本轮长期记忆检索到的参考资料 */
@@ -101,7 +107,9 @@ data class PromptLogContext(
     val context: String = "",
     val summary: String = "",
     val memory: String = "",
-    val autoOutline: String = ""
+    val autoOutline: String = "",
+    /** 本轮实际注入的「历史对话」消息轮次（来自新前缀配置，供提交日志回显） */
+    val rounds: List<PromptLogRound> = emptyList()
 )
 
 /**
@@ -129,8 +137,15 @@ data class SendChatRequest(
     val prefixText: String = "",
     /** 会话已冻结的「参考资料前缀」（书籍/大纲/章节字面文本），为空则不发送 */
     val referencePrefix: String = "",
-    /** 上一轮之前的全部轮次，渲染成与生成路径相同的「前情提要」块；为空则不带历史 */
-    val priorContext: String = "",
+    /**
+     * 「历史对话前缀」（历史梗概 / 历史正文 / 每轮消息）渲染成的整段文本，
+     * 作为稳定前缀之后、本轮用户输入之前的 System 块发出；为空则不带历史。
+     */
+    val historyPrefix: String = "",
+    /** 本轮实际注入的「历史梗概」块正文（仅供当轮日志回显，未注入时为空） */
+    val historySummary: String = "",
+    /** 本轮实际注入的「历史正文」块正文（仅供当轮日志回显，未注入时为空） */
+    val historyContent: String = "",
     /** 本轮对话所属章节 id（0 表示未绑定章节），随消息落库用于按章节分组收起 */
     val chapterId: Long = 0,
     /** 本轮日志素材（本章梗概 / 检索片段 / 新增大纲资料 / 预设大纲清单） */
@@ -208,6 +223,88 @@ interface ModelGateway {
 }
 
 /**
+ * 「历史对话前缀」的纯逻辑：从本会话消息里按角色开关与截止位置挑出要注入的消息，
+ * 渲染成「用户：… / AI：…」文本，并生成日志轮次。
+ * 只读取已落库的消息，不参与写库；调用方传入发送前的截止位置，避免重复注入本轮输入。
+ */
+object HistoryPrefix {
+    /** 截止位置为「不包含」语义：只取 id < [cutoffExclusive] 的消息 */
+    fun pick(
+        messages: List<ChatMessage>,
+        cutoffExclusive: Long,
+        aiOn: Boolean,
+        userOn: Boolean
+    ): List<ChatMessage> = messages
+        .filter { it.id < cutoffExclusive }
+        .filter { m ->
+            when (m.role) {
+                ChatRole.USER -> userOn
+                ChatRole.ASSISTANT -> aiOn && m.active
+                ChatRole.SYSTEM -> false
+            }
+        }
+
+    /** 渲染历史消息块正文（不含标题）；没有消息时返回空串 */
+    fun render(messages: List<ChatMessage>): String = messages
+        .joinToString("\n") { m ->
+            (if (m.role == ChatRole.USER) "用户：" else "AI：") + m.content.trim()
+        }
+
+    /** 日志轮次：一条用户发言 + 紧随其后的 AI 回答算作一轮 */
+    fun rounds(messages: List<ChatMessage>): List<PromptLogRound> {
+        val rounds = mutableListOf<PromptLogRound>()
+        var pendingUser: String? = null
+        messages.forEach { m ->
+            if (m.role == ChatRole.USER) {
+                pendingUser?.let { rounds += PromptLogRound(it, "") }
+                pendingUser = m.content
+            } else if (m.role == ChatRole.ASSISTANT) {
+                if (pendingUser != null) {
+                    rounds += PromptLogRound(pendingUser, m.content)
+                    pendingUser = null
+                } else {
+                    rounds += PromptLogRound(assistant = m.content)
+                }
+            }
+        }
+        pendingUser?.let { rounds += PromptLogRound(it, "") }
+        return rounds
+    }
+}
+
+/**
+ * 「历史对话前缀」中历史梗概 / 历史正文的纯逻辑：
+ * 从「消息所在章节 + 会话绑定章节」得到本会话绑定过的章节，排除本次请求章节，去重，
+ * 再按书籍中的章节顺序（sortOrder, id）排列；梗概 / 正文为空的章节直接跳过，正文使用完整内容。
+ */
+object HistoryChapters {
+    /** 本会话绑定过的章节 id（去重，排除本次请求所在章节；排除章节为 0 时不排除任何章节） */
+    fun pickIds(
+        messageChapterIds: List<Long>,
+        sessionChapterId: Long?,
+        excludeChapterId: Long
+    ): List<Long> {
+        val ids = messageChapterIds.filter { it > 0L }.toMutableList()
+        sessionChapterId?.takeIf { it > 0L }?.let { ids += it }
+        return ids.distinct().filter { it != excludeChapterId }
+    }
+
+    /** 按书籍顺序排列：先按书籍 id 分组，再按书内章节顺序（sortOrder, id）排列 */
+    fun order(chapters: List<Chapter>): List<Chapter> =
+        chapters.sortedWith(compareBy({ it.bookId }, { it.sortOrder }, { it.id }))
+
+    /** 渲染历史梗概块正文：跳过空梗概，每章带标题区分 */
+    fun renderSummary(chapters: List<Chapter>): String = chapters
+        .filter { it.summary.isNotBlank() }
+        .joinToString("\n\n") { "【章节】${it.title.trim()}\n梗概：${it.summary.trim()}" }
+
+    /** 渲染历史正文块正文：跳过空正文，使用完整正文（不截断、不摘要） */
+    fun renderContent(chapters: List<Chapter>): String = chapters
+        .filter { it.content.isNotBlank() }
+        .joinToString("\n\n") { "【章节】${it.title.trim()}\n正文：${it.content.trim()}" }
+}
+
+/**
  * 「发送 AI 消息」用例：组装上下文与历史 → 流式请求模型 → 写回助手消息 → 解析工具区块。
  *
  * 仅搬动原先 AiChatViewModel.generate(...) 的逻辑，行为保持不变：
@@ -233,29 +330,28 @@ class SendChatMessageUseCase(
             .filter { it.isNotBlank() }
             .joinToString("\n")
         // 只取该用户消息之前的上下文，避免把同组的其他回答版本带进历史。
-        // 0 表示不限：携带全部历史，长对话下前缀更稳定、缓存命中率更高
         val model = configRepository.getModel(request.modelId)
-        val maxContext = model?.maxContext ?: 20
         // 实际生效的系统提示词：模型配置里的「预设提示词」优先（真正随请求发出），
         // 仅当模型未配置预设时才回退到请求里带的自定义系统提示词。
         // 日志必须记录这个「实际值」，否则「预设提示词」一栏会永远为空。
         val effectiveSystemPrompt = model?.systemPrompt?.takeIf { it.isNotBlank() } ?: request.systemPrompt
-        val history = allMessages
+        // 历史不再自动注入：仅保留「本轮」这条消息作为最后一轮真实输入；
+        // 之前的历史统一由「历史对话前缀」按开关渲染成 System 块。
+        val lastMessage = allMessages
             .filter { it.id <= request.historyEndId }
             .filter { it.role == ChatRole.USER || it.role == ChatRole.ASSISTANT }
             // 同一轮用户消息下只保留「当前生效」的那一条回答：多次「重新生成」产生的废弃候选
             // 不进后续请求的上下文，否则它们会并列堆积在历史里，造成 token 线性膨胀。
             .filter { it.role == ChatRole.USER || it.active }
-            .let { if (maxContext > 0) it.takeLast(maxContext) else it }
-            // 拼回这条消息隐藏的附加提示词（如「＋本章梗概」「长期记忆检索片段」），保证与当初发送的字节一致。
-            // 顺序上附加提示词放在用户指令**之前**：让「用户的要求」始终是本轮最后一句话，
-            // 否则参考资料（尤其检索到的本书正文片段）会被模型当成要续写的内容，直接把片段原样吐回来。
-            .map {
-                val extra = it.promptExtra
-                ChatTurn(it.role, if (extra.isBlank()) it.content else extra + "\n\n" + it.content)
-            }
+            .lastOrNull()
+        val finalTurn = lastMessage?.let {
+            // 拼回这条消息隐藏的附加提示词（如「＋本章梗概」「长期记忆检索片段」），
+            // 顺序上附加提示词放在用户指令**之前**：让「用户的要求」始终是本轮最后一句话。
+            val extra = it.promptExtra
+            ChatTurn(it.role, if (extra.isBlank()) it.content else extra + "\n\n" + it.content)
+        }
         val turns = buildList {
-            // 「自定义前缀 / 工具提示 / 参考资料前缀」与生成路径共用同一段只读前缀
+            // 「自定义前缀 / 参考资料前缀」与生成路径共用同一段只读前缀
             // （见 buildGenerationPrefixTurns），保证两种请求逐字节一致
             addAll(
                 buildGenerationPrefixTurns(
@@ -264,16 +360,13 @@ class SendChatMessageUseCase(
                     styleBlock = request.stylePrefix
                 )
             )
-            // 历史统一压成一个 System「前情提要」块，与生成路径同构：
-            // 聊天与生成交替使用时，前缀之后的内容也是「只追加」的，
-            // 切换功能不会再让整段历史重新计费。
-            if (request.priorContext.isNotBlank()) {
-                add(ChatTurn(ChatRole.SYSTEM, PRIOR_CONTEXT_HEADER + request.priorContext))
+            // 「历史对话前缀」排在所有稳定前缀之后，减少动态内容对前面缓存的破坏
+            if (request.historyPrefix.isNotBlank()) {
+                add(ChatTurn(ChatRole.SYSTEM, request.historyPrefix))
             }
             // 最后一轮始终是真实的用户输入；历史以助手消息结尾时（编辑回答后继续）补兜底指令
-            val last = history.lastOrNull()
-            if (last != null && last.role == ChatRole.USER) {
-                add(last)
+            if (finalTurn != null && finalTurn.role == ChatRole.USER) {
+                add(finalTurn)
             } else {
                 add(ChatTurn(ChatRole.USER, "请基于以上内容继续往下写。"))
             }
@@ -331,7 +424,7 @@ class SendChatMessageUseCase(
                 cachedTokens = result.cachedTokens,
                 chapterId = request.chapterId,
                 promptLog = buildPromptLog(
-                    request, turns, history, allMessages, effectiveSystemPrompt,
+                    request, turns, allMessages, effectiveSystemPrompt,
                     toolNames = tools.map { it.name },
                     rawResponse = responseDigest
                 ).encode()
@@ -398,37 +491,21 @@ class SendChatMessageUseCase(
     private fun buildPromptLog(
         request: SendChatRequest,
         turns: List<ChatTurn>,
-        history: List<ChatTurn>,
         allMessages: List<ChatMessage>,
         systemPrompt: String,
         toolNames: List<String> = emptyList(),
         rawResponse: String = ""
     ): PromptLog {
-        // 历史轮次：一条用户发言 + 紧随其后的助手回答算作一轮
-        val rounds = mutableListOf<PromptLogRound>()
-        var pendingUser: String? = null
-        history.forEach { turn ->
-            when (turn.role) {
-                ChatRole.USER -> {
-                    pendingUser?.let { rounds += PromptLogRound(it, "") }
-                    pendingUser = turn.content
-                }
-
-                ChatRole.ASSISTANT -> {
-                    rounds += PromptLogRound(pendingUser.orEmpty(), turn.content)
-                    pendingUser = null
-                }
-
-                else -> Unit
-            }
-        }
-        pendingUser?.let { rounds += PromptLogRound(it, "") }
         return PromptLog(
             systemPrompt = systemPrompt,
             customPrefix = request.prefixText,
             outlines = request.logContext.outlines,
             context = request.logContext.context,
-            rounds = rounds,
+            // 历史不再由 UseCase 推导：直接回显本轮「历史对话前缀」实际注入的内容与轮次
+            rounds = request.logContext.rounds,
+            historySummary = request.historySummary,
+            historyContent = request.historyContent,
+            historyDialogue = request.historyPrefix,
             summary = request.logContext.summary,
             memory = request.logContext.memory,
             autoOutline = request.logContext.autoOutline,

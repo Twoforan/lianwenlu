@@ -121,7 +121,13 @@ class SendChatMessageUseCaseTest {
         chapterImportTool: Boolean = false,
         replyToUserId: Long = 0L,
         historyEndId: Long = 1L,
-        priorContext: String = ""
+        historyPrefix: String = "",
+        historySummary: String = "",
+        historyContent: String = "",
+        rounds: List<PromptLogRound> = emptyList(),
+        stylePrefix: String = "",
+        prefixText: String = "",
+        referencePrefix: String = ""
     ) = SendChatRequest(
         sessionId = 1L,
         modelId = 1L,
@@ -132,7 +138,13 @@ class SendChatMessageUseCaseTest {
         variantIndex = 0,
         writeOutlineTool = writeOutlineTool,
         chapterImportTool = chapterImportTool,
-        priorContext = priorContext
+        stylePrefix = stylePrefix,
+        prefixText = prefixText,
+        referencePrefix = referencePrefix,
+        historyPrefix = historyPrefix,
+        historySummary = historySummary,
+        historyContent = historyContent,
+        logContext = PromptLogContext(rounds = rounds)
     )
 
     // ---------------- 场景 1：正常发送 ----------------
@@ -281,15 +293,19 @@ class SendChatMessageUseCaseTest {
         assertEquals("$memory\n\n继续写", turns.single().content)
     }
 
-    // ---------------- 场景 6：历史统一压成「前情提要」块，与生成路径同构 ----------------
+    // ---------------- 场景 6：历史统一以「历史对话前缀」System 块注入 ----------------
 
     @Test
     fun historyEndingWithAssistant_appendsContinueUserTurn() = runTest {
-        // 历史以助手消息结尾（编辑回答后继续）：前情提要块携带它，末尾补一句「继续」的指令
+        // 历史以助手消息结尾（编辑回答后继续）：历史对话块携带它，末尾补一句「继续」的指令
         val chat = FakeChatGateway(messages = listOf(assistantMessage(id = 1L, content = "上文回答")))
         val model = FakeModelGateway(result = AiResult.ok("好的"))
         SendChatMessageUseCase(chat, model)(
-            request(replyToUserId = 0L, historyEndId = 1L, priorContext = "助手：上文回答")
+            request(
+                replyToUserId = 0L,
+                historyEndId = 1L,
+                historyPrefix = "【历史对话】\nAI：上文回答"
+            )
         ).toList()
 
         val turns = model.lastRequest!!.turns
@@ -299,8 +315,8 @@ class SendChatMessageUseCaseTest {
     }
 
     @Test
-    fun history_isSentAsPriorContextBlock() = runTest {
-        // 历史不再逐条作为对话轮次发送：只保留一个 System「前情提要」块 + 本轮真实的用户输入，
+    fun historyPrefix_isSentAsSystemBlockBeforeUserInput() = runTest {
+        // 历史不再逐条作为对话轮次发送：只保留一个 System「历史对话」块 + 本轮真实的用户输入，
         // 这样与生成路径逐字节同构，两种请求可共享同一段服务端前缀缓存
         val chat = FakeChatGateway(
             messages = listOf(
@@ -310,18 +326,84 @@ class SendChatMessageUseCaseTest {
             )
         )
         val model = FakeModelGateway(result = AiResult.ok("好的"))
+        val history = "【历史对话】\n用户：写第一章\nAI：最终版"
         SendChatMessageUseCase(chat, model)(
-            request(
-                replyToUserId = 5L,
-                historyEndId = 5L,
-                priorContext = "用户：写第一章\n助手：最终版"
-            )
+            request(replyToUserId = 5L, historyEndId = 5L, historyPrefix = history)
         ).toList()
 
         val turns = model.lastRequest!!.turns
         assertEquals(listOf(ChatRole.SYSTEM, ChatRole.USER), turns.map { it.role })
         assertTrue(turns[0].content.contains("用户：写第一章"))
-        assertTrue(turns[0].content.contains("助手：最终版"))
+        assertTrue(turns[0].content.contains("AI：最终版"))
         assertEquals("继续写第二章", turns.last().content)
+    }
+
+    // ---------------- 场景 7：提示词日志与实际注入内容一致 ----------------
+
+    @Test
+    fun promptLog_replaysInjectedHistoryBlocks() = runTest {
+        val chat = FakeChatGateway(messages = listOf(userMessage(id = 1L, content = "你好")))
+        val model = FakeModelGateway(result = AiResult.ok("好的"))
+        val historyBody = "用户：上一问"
+        SendChatMessageUseCase(chat, model)(
+            request(
+                replyToUserId = 1L,
+                historyPrefix = "【历史对话】\n$historyBody",
+                historySummary = "【章节】第1章\n梗概：旧梗概",
+                historyContent = "【章节】第1章\n正文：旧正文",
+                rounds = listOf(PromptLogRound(user = "上一问", assistant = "上一答"))
+            )
+        ).toList()
+
+        val log = PromptLog.decode(chat.savedMessages.single().promptLog)!!
+        assertEquals("【章节】第1章\n梗概：旧梗概", log.historySummary)
+        assertEquals("【章节】第1章\n正文：旧正文", log.historyContent)
+        assertEquals("【历史对话】\n$historyBody", log.historyDialogue)
+        assertEquals(listOf(PromptLogRound(user = "上一问", assistant = "上一答")), log.rounds)
+        // 日志里的历史块与实际发送的 System 块逐字一致
+        assertEquals(log.historyDialogue, model.lastRequest!!.turns[0].content)
+    }
+
+    @Test
+    fun allHistoryOff_sendsNoHistoryBlock() = runTest {
+        val chat = FakeChatGateway(messages = listOf(userMessage(id = 1L, content = "你好")))
+        val model = FakeModelGateway(result = AiResult.ok("好的"))
+        SendChatMessageUseCase(chat, model)(request(replyToUserId = 1L)).toList()
+
+        val turns = model.lastRequest!!.turns
+        assertEquals(listOf(ChatRole.USER), turns.map { it.role })
+        val log = PromptLog.decode(chat.savedMessages.single().promptLog)!!
+        assertTrue(log.historySummary.isBlank())
+        assertTrue(log.historyContent.isBlank())
+        assertTrue(log.historyDialogue.isBlank())
+        assertTrue(log.rounds.isEmpty())
+    }
+
+    // ---------------- 场景 8：动态历史对话块排在稳定前缀之后 ----------------
+
+    @Test
+    fun historyBlock_isPlacedAfterStablePrefix_beforeUserTurn() = runTest {
+        val chat = FakeChatGateway(messages = listOf(userMessage(id = 1L, content = "本轮输入")))
+        val model = FakeModelGateway(result = AiResult.ok("好的"))
+        SendChatMessageUseCase(chat, model)(
+            request(
+                replyToUserId = 1L,
+                stylePrefix = "文风约束",
+                prefixText = "自定义前缀",
+                referencePrefix = "参考资料",
+                historyPrefix = "【历史对话】\n用户：上一问"
+            )
+        ).toList()
+
+        val turns = model.lastRequest!!.turns
+        assertEquals(
+            listOf(ChatRole.SYSTEM, ChatRole.SYSTEM, ChatRole.SYSTEM, ChatRole.SYSTEM, ChatRole.USER),
+            turns.map { it.role }
+        )
+        assertEquals("文风约束", turns[0].content)
+        assertEquals("自定义前缀", turns[1].content)
+        assertTrue(turns[2].content.contains("参考资料"))
+        assertEquals("【历史对话】\n用户：上一问", turns[3].content)
+        assertEquals("本轮输入", turns[4].content)
     }
 }

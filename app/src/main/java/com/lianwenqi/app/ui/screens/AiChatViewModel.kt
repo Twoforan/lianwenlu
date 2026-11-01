@@ -18,7 +18,9 @@ import com.lianwenqi.app.ai.MemoryScopeVolume
 import com.lianwenqi.app.ai.RetrievalMode
 import com.lianwenqi.app.ai.SUMMARY_FALLBACK_INPUT
 import com.lianwenqi.app.ai.CONTENT_FALLBACK_INPUT
-import com.lianwenqi.app.ai.PRIOR_CONTEXT_HEADER
+import com.lianwenqi.app.ai.HISTORY_CONTENT_HEADER
+import com.lianwenqi.app.ai.HISTORY_DIALOGUE_HEADER
+import com.lianwenqi.app.ai.HISTORY_SUMMARY_HEADER
 import com.lianwenqi.app.ai.SummaryFailureChoice
 import com.lianwenqi.app.ai.buildContentTurns
 import com.lianwenqi.app.ai.buildGenerationPrefixTurns
@@ -33,6 +35,8 @@ import com.lianwenqi.app.data.AiChapterImporter
 import com.lianwenqi.app.data.AiOutlineImporter
 import com.lianwenqi.app.data.ChatEvent
 import com.lianwenqi.app.data.GEN_KIND_SUMMARY
+import com.lianwenqi.app.data.HistoryChapters
+import com.lianwenqi.app.data.HistoryPrefix
 import com.lianwenqi.app.data.MAX_CHAT_MESSAGE_CHARS
 import com.lianwenqi.app.data.MemoryGateway
 import com.lianwenqi.app.data.PromptLog
@@ -563,7 +567,7 @@ class AiChatViewModel(
         }
         // 生成路径也走 [prepareSessionPrefix]：首次调用把已勾选的大纲 / 上下文冻结成会话前缀，
         // 之后逐轮复用 → 参考资料前缀跨轮逐字节稳定，缓存命中率随轮次提高
-        val prefix = prepareSessionPrefix(sid, applyAdaptive = false)
+        val prefix = prepareSessionPrefix(sid, applyAdaptive = false, excludeChapterId = chapterId)
         val ref = buildGenerationReference(prefix, plan.selectedOutlineIds)
         // 像普通发送一样落一条「用户消息」：输入框提示词 + 「生成梗概」标记；
         // 本轮新增的参考资料随消息落库成为历史的一部分，故上面对选定标签的「已提交」标记语义成立。
@@ -583,15 +587,14 @@ class AiChatViewModel(
         if (regenerateUserId == 0L) input.value = ""
         // 选定标签的内容已随本轮消息落库，此时记入前缀去重（后续轮次只写「参见大纲『X』」）
         markGenerationOutlines(sid, ref.sessionPrefix, ref.freshOutlineIds)
-        // 生成请求：聊天同构前缀块 +（开关开启时）「前情提要」参考资料块 + 生成专用块（指令 + 新增参考资料 + 用户输入）
-        val history =
-            if (prefs.genCarryHistory.first()) generationHistory(sid, round.userId, modelId) else GenerationHistory()
+        // 生成请求：聊天同构前缀块 +（按「历史对话前缀」开关）历史块 + 生成专用块（指令 + 新增参考资料 + 用户输入）
+        val history = buildHistoryDialogue(prefix, sid, round.userId)
         // 「文风样式」勾选才打标：读取用户全局标签 + 当前书籍绑定的档案标签；都为空时只生成梗概
         val withTags = prefs.genStyleEnabled.first()
         val tagProfileId = styleProfileIdOfChapter(chapterId)
         val tagProfileTags = summaryTaggingTags(tagProfileId, withTags)
         val turns = assembleGenerationTurns(
-            prefix, ref, history,
+            prefix, ref, history.text,
             buildSummaryTurns(userPrompt, plan.summaryWordRange, ref.extra, chapterTitle, withTags, tagProfileTags)
         )
         // 生成过程中的逐步输出实时回显在本轮对话的回答位置（显示「正在生成」）
@@ -610,6 +613,7 @@ class AiChatViewModel(
                         modelId = modelId,
                         prefix = prefix,
                         rounds = history.rounds,
+                        historyDialogue = history.text,
                         genKind = GEN_KIND_SUMMARY,
                         summary = "",
                         memory = "",
@@ -733,7 +737,7 @@ class AiChatViewModel(
         val memoryScope = prefs.memorySearchScope.first()
 
         // 生成路径也走 [prepareSessionPrefix]：首次调用把已勾选的大纲 / 上下文冻结成会话前缀
-        val prefix = prepareSessionPrefix(sid, applyAdaptive = false)
+        val prefix = prepareSessionPrefix(sid, applyAdaptive = false, excludeChapterId = chapterId)
         // 选定标签只在「会生成梗概」时作为指定大纲参考资料提交：
         // 已在本会话前缀里的只写「参见大纲『X』」；未提交过的取完整内容并入本轮新增参考资料
         val ref = buildGenerationReference(
@@ -742,19 +746,12 @@ class AiChatViewModel(
         )
         var sp = ref.sessionPrefix
 
-        // 生成请求携带的历史：本轮的用户消息在正文落库前才写入，故此处取到当前全部轮次；
-        // 编辑历史提示词后再生成时，历史只取到被编辑的那一轮之前（该轮旧内容不进前情提要）
         // 历史截止位置：编辑态取被编辑的消息；「重新生成」取被重新生成的那条用户消息
-        // （其旧回答 id 大于该消息，不进入前情提要，避免模型把旧成品当成前情续写）
+        // （其旧回答 id 大于该消息，不进入历史对话块，避免模型把旧成品当成前情续写）
         val historyEnd = editingId.takeIf { it > 0L }
             ?: regenerateUserId.takeIf { it > 0L }
             ?: Long.MAX_VALUE
-        val history =
-            if (prefs.genCarryHistory.first()) {
-                generationHistory(sid, historyEnd, modelId)
-            } else {
-                GenerationHistory()
-            }
+        val history = buildHistoryDialogue(prefix, sid, historyEnd)
         val summaryTagsEnabled = prefs.genStyleEnabled.first()
         val summaryTagProfileTags = if (summaryTagsEnabled) {
             summaryTaggingTags(styleProfileIdOfChapter(chapterId), true)
@@ -767,7 +764,7 @@ class AiChatViewModel(
             awaitSummaryWithRetry(
                 plan,
                 assembleGenerationTurns(
-                    prefix, ref, history,
+                    prefix, ref, history.text,
                     buildSummaryTurns(
                         userPrompt, plan.summaryWordRange, ref.extra, chapterTitle,
                         summaryTagsEnabled, summaryTagProfileTags
@@ -872,7 +869,7 @@ class AiChatViewModel(
             summarySentenceBlock = summarySentenceBlock,
             styleSamplesBlock = styleSamplesBlock
         )
-        val turns = assembleGenerationTurns(prefix, ref, history, contentTurns)
+        val turns = assembleGenerationTurns(prefix, ref, history.text, contentTurns)
         // 先落「用户消息」：输入框提示词 + 「生成正文」标记；本轮新增的参考资料随消息落库成为历史的一部分。
         // 放在模型请求之前，回答位置才能就地显示流式输出（「正在生成」）。
         // 若用户点了某条历史提示词的「编辑」后再生成，则改写那一轮并追加新回答版本（见 [openGenerationRound]）
@@ -932,6 +929,7 @@ class AiChatViewModel(
                 modelId = modelId,
                 prefix = prefix,
                 rounds = history.rounds,
+                historyDialogue = history.text,
                 genKind = "",
                 summary = summary,
                 memory = memoryRef.text,
@@ -1609,82 +1607,43 @@ class AiChatViewModel(
     }
 
     /**
-     * 生成请求可携带的「前情提要」块：取 [beforeId] 之前的本会话轮次
-     * （只保留生效版本、按 maxContext 截断），按章节分段（每段前加一行章节标题）渲染成
-     * 「用户：… / 助手：…」的文本，
-     * 由 [assembleGenerationTurns] 作为 System 参考资料块发出 —— 不作为对话轮次，
-     * 避免模型把上一章的成品当成自己「正在续写的回答」而反复复用。
-     * [rounds] 供「提交日志」的上下文日志回显，与实际发送内容一致。
+     * 本轮的「历史对话」块：按本会话已生效的角色开关，从 [cutoffExclusive] 之前的消息里
+     * 挑选要注入的内容（[HistoryPrefix.pick] 负责过滤角色 / 生效版本 / 截止位置），
+     * 渲染成「用户：… / AI：…」的 System 块；开关全关或过滤后为空时返回空块。
+     * 消息内容每次发送都按当前数据库状态重算，不冻结成快照。
      */
-    private suspend fun generationHistory(sid: Long, beforeId: Long, modelId: Long): GenerationHistory {
-        val maxContext = configRepository.getModel(modelId)?.maxContext ?: 20
-        val raw = chatRepository.getMessages(sid)
-            .filter { it.id < beforeId }
-            .filter { it.role == ChatRole.USER || it.role == ChatRole.ASSISTANT }
-            // 同一轮只保留「当前生效」的那条回答（多次重新生成的废弃候选不进上下文）
-            .filter { it.role == ChatRole.USER || it.active }
-            .let { if (maxContext > 0) it.takeLast(maxContext) else it }
-        // 前情提要只取可见的对话内容（隐藏的附加参考资料块不进前情提要，避免与上方参考资料重复）。
-        // 按章节分段：章节切换时插入一行章节标题，让模型知道每段对话出自哪一章；
-        // 各卷章节会重新从「第1章」编号，因此在卷切换处额外标注卷名（如「第二卷：第4章」），
-        // 同卷内后续章节只写章名（如「第5章」），避免不同卷的同号章节混淆。
-        val chapterInfo = raw.map { it.chapterId }.distinct()
-            .filter { it != 0L }
-            .associateWith { id -> bookRepository.getChapter(id) }
-        val volumesByBook = chapterInfo.values.filterNotNull().map { it.bookId }.distinct()
-            .associateWith { bookId ->
-                bookRepository.getVolumes(bookId).associate { it.id to it.title.trim() }
-            }
-        val prior = buildString {
-            var lastChapterId = Long.MIN_VALUE
-            var lastVolumeId: Long? = null
-            var volumeMarked = false
-            raw.forEach { m ->
-                if (m.chapterId != lastChapterId) {
-                    val chapter = chapterInfo[m.chapterId]
-                    if (chapter != null) {
-                        if (isNotEmpty()) append('\n')
-                        val volumeId = chapter.volumeId
-                        val volumeTitle = volumeId?.let { volumesByBook[chapter.bookId]?.get(it) }.orEmpty()
-                        if ((volumeId != lastVolumeId || !volumeMarked) && volumeTitle.isNotBlank()) {
-                            append(volumeTitle).append('：')
-                        }
-                        append(chapter.title.trim().ifBlank { "（章节已删除）" }).append('\n')
-                        lastVolumeId = volumeId
-                        volumeMarked = true
-                    } else if (m.chapterId != 0L) {
-                        if (isNotEmpty()) append('\n')
-                        append("（章节已删除）").append('\n')
-                    }
-                    lastChapterId = m.chapterId
-                }
-                append(if (m.role == ChatRole.USER) "用户：" else "助手：")
-                    .append(m.content.trim()).append('\n')
-            }
-        }.trimEnd('\n')
-        val rounds = mutableListOf<PromptLogRound>()
-        raw.forEach { m ->
-            if (m.role == ChatRole.USER) {
-                rounds += PromptLogRound(user = m.content)
-            } else if (rounds.isEmpty()) {
-                rounds += PromptLogRound(assistant = m.content)
-            } else {
-                rounds[rounds.lastIndex] = rounds.last().copy(assistant = m.content)
-            }
+    private suspend fun buildHistoryDialogue(
+        prefix: PreparedPrefix,
+        sid: Long,
+        cutoffExclusive: Long
+    ): HistoryDialogue {
+        if (!prefix.historyMessageOn || (!prefix.historyAiOn && !prefix.historyUserOn)) {
+            return HistoryDialogue()
         }
-        return GenerationHistory(prior, rounds)
+        val messages = HistoryPrefix.pick(
+            chatRepository.getMessages(sid),
+            cutoffExclusive,
+            prefix.historyAiOn,
+            prefix.historyUserOn
+        )
+        val body = HistoryPrefix.render(messages)
+        if (body.isBlank()) return HistoryDialogue()
+        return HistoryDialogue(
+            text = HISTORY_DIALOGUE_HEADER + body,
+            rounds = HistoryPrefix.rounds(messages)
+        )
     }
 
     /**
-     * 组装生成请求的 messages：聊天同构前缀块 +（开关开启时）「前情提要」参考资料块 + 生成专用块 [tail]。
+     * 组装生成请求的 messages：聊天同构前缀块 → 历史梗概 → 历史正文 →（动态）历史对话 → 生成专用块 [tail]。
      * 前缀块与聊天请求逐字节一致，故两条路径能命中同一段供应商侧前缀缓存；
-     * 前情提要只作参考资料发出（不是对话轮次），故模型不会把上一章的成品当成正在续写的回答；
-     * 生成专用块只在前缀之后追加，不会破坏前缀的字节稳定性。
+     * 历史块都作参考资料发出（不是对话轮次），故模型不会把上一章的成品当成正在续写的回答；
+     * 动态历史对话排在所有稳定前缀之后，减少消息增长对前面缓存的破坏。
      */
     private fun assembleGenerationTurns(
         prefix: PreparedPrefix,
         ref: GenerationRef,
-        history: GenerationHistory,
+        historyMessageBlock: String,
         tail: List<ChatTurn>
     ): List<ChatTurn> = buildList {
         addAll(
@@ -1694,7 +1653,13 @@ class AiChatViewModel(
                 styleBlock = prefix.style
             )
         )
-        if (history.prior.isNotBlank()) add(ChatTurn(ChatRole.SYSTEM, PRIOR_CONTEXT_HEADER + history.prior))
+        if (prefix.historySummaryOn && prefix.historySummaryBlock.isNotBlank()) {
+            add(ChatTurn(ChatRole.SYSTEM, HISTORY_SUMMARY_HEADER + prefix.historySummaryBlock))
+        }
+        if (prefix.historyContentOn && prefix.historyContentBlock.isNotBlank()) {
+            add(ChatTurn(ChatRole.SYSTEM, HISTORY_CONTENT_HEADER + prefix.historyContentBlock))
+        }
+        if (historyMessageBlock.isNotBlank()) add(ChatTurn(ChatRole.SYSTEM, historyMessageBlock))
         addAll(tail)
     }
 
@@ -1706,8 +1671,8 @@ class AiChatViewModel(
 
     /**
      * 生成路径落库回答的「提示词日志」：与聊天发送一致的三级结构（预设 / 上下文 / 本轮提示词），
-     * 供「查看日志 / 查看本轮提示词」回显。[rounds] 为本次请求实际携带的历史轮次
-     * （「生成工具携带本会话历史消息」关闭时为空）。
+     * 供「查看日志 / 查看本轮提示词」回显。[rounds] / [historyDialogue] 为本次请求实际注入的历史对话，
+     * 历史梗概与历史正文直接取 [prefix] 里本次实际注入的块（空内容不显示节点）。
      */
     private suspend fun buildGenerationLog(
         modelId: Long,
@@ -1722,7 +1687,9 @@ class AiChatViewModel(
         /** 本轮提交给模型的文风样本：只在当轮日志回显，不做前缀冻结 */
         styleSamples: String = "",
         /** 预设日志回显：当前勾选的章节梗概 / 正文 */
-        context: String = ""
+        context: String = "",
+        /** 本轮实际注入的历史对话正文（含「【历史对话】」抬头），为空表示未注入 */
+        historyDialogue: String = ""
     ): PromptLog = PromptLog(
         // 实际生效的预设提示词：模型配置里的 systemPrompt（真正随请求发出）
         systemPrompt = configRepository.getModel(modelId)?.systemPrompt.orEmpty(),
@@ -1730,6 +1697,9 @@ class AiChatViewModel(
         outlines = prefix.outlineEntries.map { PromptLogNode(outlineLogTitle(it.text), it.text) },
         context = context,
         rounds = rounds,
+        historySummary = if (prefix.historySummaryOn) prefix.historySummaryBlock else "",
+        historyContent = if (prefix.historyContentOn) prefix.historyContentBlock else "",
+        historyDialogue = historyDialogue,
         summary = summary,
         memory = memory,
         autoOutline = autoOutline,
@@ -2890,12 +2860,14 @@ class AiChatViewModel(
         val reasoningBuf = StringBuilder()
         // 会话前缀：正常发送路径已由 [prepareSessionPrefix] 冻结好并传入；
         // 重新生成 / 编辑重发不新增用户消息，这里只读取已冻结的前缀（不做任何写入）。
-        val p = prefix ?: readSessionPrefix(sid)
+        // 历史章节块的排除章节取本轮消息所在章节（取不到时按普通聊天的「当前章节」回落）。
+        val roundChapterId = chatRepository.getMessage(replyToUserId)?.chapterId?.takeIf { it > 0L }
+        val p = prefix ?: readSessionPrefix(sid, excludeChapterId = roundChapterId)
         // 生成态的复位交由 [launchGenerating] 的 finally 统一处理（用 generationToken 判定归属）
-        // 历史统一按「前情提要」块发送，与生成路径同构，两种请求共享同一段前缀缓存。
         // historyEndId 指向本轮用户消息时把它排除在外；指向助手消息（「编辑回答后继续」）时纳入
         val priorEndId = if (historyEndId == replyToUserId) historyEndId else historyEndId + 1
-        val priorContext = generationHistory(sid, priorEndId, modelId).prior
+        // 历史对话块：按本会话已生效的角色开关，从截止位置之前的消息重新生成（不含本轮输入与未完成回复）
+        val history = buildHistoryDialogue(p, sid, priorEndId)
         val request = SendChatRequest(
             sessionId = sid,
             modelId = modelId,
@@ -2909,10 +2881,12 @@ class AiChatViewModel(
             stylePrefix = p.style,
             prefixText = p.custom,
             referencePrefix = p.reference,
-            priorContext = priorContext,
+            historyPrefix = history.text,
+            historySummary = if (p.historySummaryOn) p.historySummaryBlock else "",
+            historyContent = if (p.historyContentOn) p.historyContentBlock else "",
             // 本轮所属章节：沿用该用户消息落库时的章节，重新生成 / 编辑重发不会跳到别的章节
-            chapterId = chatRepository.getMessage(replyToUserId)?.chapterId ?: 0L,
-            logContext = logContext
+            chapterId = roundChapterId ?: 0L,
+            logContext = logContext.copy(rounds = history.rounds)
         )
         sendChatMessage(request).collect { event ->
             when (event) {
@@ -2954,8 +2928,14 @@ class AiChatViewModel(
      *
      * @param applyAdaptive 是否顺带执行「适配性筛选」。生成路径传 false：
      *   生成时正文与梗概可能不同步（同时生成梗概时用的是新梗概），故由调用方以实际使用的梗概单独匹配。
+     * @param excludeChapterId 本次请求所在的章节：计算「历史梗概 / 历史正文」时排除它；
+     *   为空时按普通聊天的「当前章节」回落（没有当前章节则不排除任何已绑定章节）。
      */
-    private suspend fun prepareSessionPrefix(sid: Long, applyAdaptive: Boolean = true): PreparedPrefix {
+    private suspend fun prepareSessionPrefix(
+        sid: Long,
+        applyAdaptive: Boolean = true,
+        excludeChapterId: Long? = null
+    ): PreparedPrefix {
         val contextOn = prefs.prefixContextEnabled.first()
         val outlineOn = prefs.prefixOutlineEnabled.first()
         val session = chatRepository.getSession(sid)
@@ -2963,8 +2943,16 @@ class AiChatViewModel(
         var sp = SessionPrefix.decode(original)
         val firstTime = !sp.initialized
         if (firstTime) {
-            // 首次建立前缀时把设置里的「自定义前缀」取一次，之后冻结在本会话内
-            sp = sp.copy(custom = prefs.prefixCustomText.first().trim(), initialized = true)
+            // 首次建立前缀时把设置里的「自定义前缀」与「历史对话前缀」开关取一次，之后冻结在本会话内
+            sp = sp.copy(
+                custom = prefs.prefixCustomText.first().trim(),
+                initialized = true,
+                historySummaryOn = prefs.prefixHistorySummary.first(),
+                historyContentOn = prefs.prefixHistoryContent.first(),
+                historyMessageOn = prefs.prefixHistoryMessage.first(),
+                historyAiOn = prefs.prefixHistoryAi.first(),
+                historyUserOn = prefs.prefixHistoryUser.first()
+            )
         }
         // 文风块冻结在会话前缀的首块：读到可用文风后不再随档案编辑 / 换绑变化；
         // 为空（未绑定 / 当时读取失败）时继续尝试，避免会话建立后绑定文风却一直不生效
@@ -3126,6 +3114,14 @@ class AiChatViewModel(
             }
         }
         val appended = sp.renderEntries(newBooks, newOutlines, newChapters)
+        // 历史梗概 / 历史正文：每次发送按本会话已绑定章节重算（不冻结成快照）。
+        // 排除本次请求所在章节（生成时为正在生成的章节；普通聊天取当前章节，没有则排除 0）。
+        val historyExcludeChapterId = excludeChapterId ?: currentRoundChapterId()
+        val historyBlocks = if (sp.historySummaryOn || sp.historyContentOn) {
+            buildHistoryChapterBlocks(sid, session, historyExcludeChapterId)
+        } else {
+            HistoryChapterBlocks()
+        }
         return PreparedPrefix(
             custom = sp.custom,
             style = sp.style,
@@ -3136,7 +3132,14 @@ class AiChatViewModel(
             contextLog = contextLog,
             newReference = if (appended.isBlank()) "" else "以下是新增参考资料，请在写作时参考：\n$appended",
             autoOutlineMaterial = autoOutlineMaterial,
-            sessionPrefix = sp
+            sessionPrefix = sp,
+            historySummaryOn = sp.historySummaryOn,
+            historyContentOn = sp.historyContentOn,
+            historyMessageOn = sp.historyMessageOn,
+            historyAiOn = sp.historyAiOn,
+            historyUserOn = sp.historyUserOn,
+            historySummaryBlock = if (sp.historySummaryOn) historyBlocks.summary else "",
+            historyContentBlock = if (sp.historyContentOn) historyBlocks.content else ""
         )
     }
 
@@ -3169,17 +3172,26 @@ class AiChatViewModel(
         return if (text.isBlank()) "" else "以下是新增大纲资料，请在写作时参考：\n$text"
     }
 
-    /** 只读取已冻结的会话前缀（重新生成 / 编辑重发 / 生成梗概正文等不新增用户消息的场景），不做任何写入 */
-    private suspend fun readSessionPrefix(sid: Long): PreparedPrefix {
+    /**
+     * 只读取已冻结的会话前缀（重新生成 / 编辑重发 / 生成梗概正文等不新增用户消息的场景），不做任何写入。
+     * 历史梗概 / 历史正文与其他历史内容一样按当前数据库状态重算，排除 [excludeChapterId]。
+     */
+    private suspend fun readSessionPrefix(sid: Long, excludeChapterId: Long? = null): PreparedPrefix {
         val contextOn = prefs.prefixContextEnabled.first()
         val outlineOn = prefs.prefixOutlineEnabled.first()
-        val sp = SessionPrefix.decode(chatRepository.getSession(sid)?.prefix.orEmpty())
+        val session = chatRepository.getSession(sid)
+        val sp = SessionPrefix.decode(session?.prefix.orEmpty())
         val checkedIds =
             (if (chapterAllSelected.value) contextChapterIds() else selectedChapterIds.value).toList()
         val contextLog = if (contextOn && sp.chapters.isNotEmpty()) {
             sp.chapters.joinToString("\n\n") { it.text }
         } else {
             renderCheckedChapters(checkedIds)
+        }
+        val historyBlocks = if (sp.historySummaryOn || sp.historyContentOn) {
+            buildHistoryChapterBlocks(sid, session, excludeChapterId ?: currentRoundChapterId())
+        } else {
+            HistoryChapterBlocks()
         }
         return PreparedPrefix(
             custom = sp.custom,
@@ -3189,7 +3201,39 @@ class AiChatViewModel(
             outlineOn = outlineOn,
             outlineEntries = if (outlineOn) sp.outlines else emptyList(),
             contextLog = contextLog,
-            sessionPrefix = sp
+            sessionPrefix = sp,
+            historySummaryOn = sp.historySummaryOn,
+            historyContentOn = sp.historyContentOn,
+            historyMessageOn = sp.historyMessageOn,
+            historyAiOn = sp.historyAiOn,
+            historyUserOn = sp.historyUserOn,
+            historySummaryBlock = if (sp.historySummaryOn) historyBlocks.summary else "",
+            historyContentBlock = if (sp.historyContentOn) historyBlocks.content else ""
+        )
+    }
+
+    /**
+     * 「历史对话前缀」的历史章节块：本会话绑定过的章节（消息所在章节 + 会话绑定章节），
+     * 排除本次请求所在章节 [excludeChapterId]，同一章节去重，按书籍中的章节顺序排列。
+     * 逐章读取当前数据库内容（每次发送重算，不冻结成快照）：梗概 / 正文为空的章节直接跳过。
+     * 返回的块正文每章都带章节标题，便于模型区分。
+     */
+    private suspend fun buildHistoryChapterBlocks(
+        sid: Long,
+        session: ChatSession?,
+        excludeChapterId: Long
+    ): HistoryChapterBlocks {
+        val ids = HistoryChapters.pickIds(
+            messageChapterIds = chatRepository.getMessages(sid).map { it.chapterId },
+            sessionChapterId = session?.chapterId,
+            excludeChapterId = excludeChapterId
+        )
+        if (ids.isEmpty()) return HistoryChapterBlocks()
+        val ordered = HistoryChapters.order(ids.mapNotNull { bookRepository.getChapter(it) })
+        if (ordered.isEmpty()) return HistoryChapterBlocks()
+        return HistoryChapterBlocks(
+            summary = HistoryChapters.renderSummary(ordered),
+            content = HistoryChapters.renderContent(ordered)
         )
     }
 
@@ -3268,7 +3312,17 @@ class AiChatViewModel(
         /** 「适配性筛选」本轮新命中的大纲资料（挂在检索片段之后、用户提示词之前），无新增时为空 */
         val autoOutlineMaterial: String = "",
         /** 会话前缀快照：供长期记忆去重与写回使用（重新生成路径无新消息，用不到） */
-        val sessionPrefix: SessionPrefix = SessionPrefix()
+        val sessionPrefix: SessionPrefix = SessionPrefix(),
+        /** 「历史对话前缀」开关（已冻结在本会话前缀里，修改设置只对新建会话生效） */
+        val historySummaryOn: Boolean = false,
+        val historyContentOn: Boolean = false,
+        val historyMessageOn: Boolean = false,
+        val historyAiOn: Boolean = false,
+        val historyUserOn: Boolean = false,
+        /** 本次实际注入的历史梗概块正文（不含抬头，空串表示不注入） */
+        val historySummaryBlock: String = "",
+        /** 本次实际注入的历史正文块正文（不含抬头，空串表示不注入） */
+        val historyContentBlock: String = ""
     )
 
     /** 长期记忆检索结果：本轮实际注入的参考资料文本 + 其中新片段的去重键（写回会话前缀用） */
@@ -3289,12 +3343,19 @@ class AiChatViewModel(
     )
 
     /**
-     * 生成请求携带的历史对话：以「前情提要」参考资料文本发出（不再作为对话轮次），
-     * [rounds] 仍供「提交日志」的上下文日志回显。
+     * 本轮实际注入的历史对话：System 块完整文本（含抬头，日志直接回显它）与日志轮次。
+     * 消息内容每次发送按数据库现状重算，不落进 [SessionPrefix]。
      */
-    private data class GenerationHistory(
-        val prior: String = "",
+    private data class HistoryDialogue(
+        /** 实际作为 System 块注入的完整文本（含「【历史对话】」抬头），日志直接回显它 */
+        val text: String = "",
         val rounds: List<PromptLogRound> = emptyList()
+    )
+
+    /** 历史章节块正文（不含「【历史梗概】/【历史正文】」抬头）：按本会话绑定章节重算 */
+    private data class HistoryChapterBlocks(
+        val summary: String = "",
+        val content: String = ""
     )
 
     /** 生成路径落库的「用户消息」标记：把生成轮次与普通对话区分开 */

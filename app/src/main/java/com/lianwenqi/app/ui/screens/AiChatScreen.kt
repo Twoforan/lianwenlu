@@ -3032,6 +3032,36 @@ private fun LogTextNode(title: String, text: String) {
 }
 
 /**
+ * 历史梗概 / 历史正文按章节拆成「第N章梗概 / 第N章正文」节点。
+ * 日志块以「【章节】标题」开头、章与章之间以空行分隔，但梗概 / 正文内部也可能自带空行，
+ * 因此按行扫描章节抬头切分，而不是按空行切分；找不到章节抬头时整体作为一个节点。
+ */
+private fun splitHistoryChapterNodes(text: String, label: String): List<Pair<String, String>> {
+    val nodes = mutableListOf<Pair<String, String>>()
+    var chapter: String? = null
+    val body = StringBuilder()
+    fun flush() {
+        val title = chapter ?: return
+        nodes += title to body.toString().trim()
+        body.clear()
+    }
+    text.lineSequence().forEach { line ->
+        if (line.startsWith("【章节】")) {
+            flush()
+            chapter = line.removePrefix("【章节】").trim().ifBlank { "未命名章节" }
+        } else if (chapter != null) {
+            body.appendLine(line)
+        }
+    }
+    flush()
+    return if (nodes.isEmpty()) {
+        listOf("历史$label" to text.trim())
+    } else {
+        nodes.map { (title, content) -> "${title}$label" to content }
+    }
+}
+
+/**
  * 「查看日志」弹窗（标题「提交日志」）：按「预设日志 → 上下文日志 → 本轮提示词日志」
  * 三层回显本轮发送时的提示词，所有节点默认收起、逐层展开。
  */
@@ -3079,29 +3109,31 @@ private fun PromptLogDialog(log: PromptLog?, onClose: () -> Unit) {
                         }
                     }
 
-                    // 二、上下文日志：历史上已发送过的轮次
+                    // 二、上下文日志：「历史对话前缀」本轮实际注入的内容
+                    // 历史梗概 / 历史正文按章节拆成可展开节点（第N章梗概 / 第N章正文），
+                    // 与实际注入顺序一致：先各章梗概，再各章正文，最后历史对话
                     LogSectionTitle("上下文日志")
-                    if (log.rounds.isEmpty()) {
+                    if (log.historySummary.isNotBlank()) {
+                        splitHistoryChapterNodes(log.historySummary, "梗概").forEach { (title, content) ->
+                            LogTextNode(title, content)
+                        }
+                    }
+                    if (log.historyContent.isNotBlank()) {
+                        splitHistoryChapterNodes(log.historyContent, "正文").forEach { (title, content) ->
+                            LogTextNode(title, content)
+                        }
+                    }
+                    if (log.historyDialogue.isNotBlank()) LogTextNode("历史对话", log.historyDialogue)
+                    if (log.historySummary.isBlank() &&
+                        log.historyContent.isBlank() &&
+                        log.historyDialogue.isBlank()
+                    ) {
                         Text(
-                            "（无历史轮次）",
+                            "（无历史内容）",
                             modifier = Modifier.padding(vertical = 4.dp),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                    } else {
-                        log.rounds.forEachIndexed { i, round ->
-                            LogNode("第${i + 1}轮") {
-                                Text(
-                                    "用户：${round.user.ifBlank { "（空）" }}",
-                                    style = MaterialTheme.typography.bodySmall
-                                )
-                                Spacer(Modifier.height(4.dp))
-                                Text(
-                                    "助手：${round.assistant.ifBlank { "（空）" }}",
-                                    style = MaterialTheme.typography.bodySmall
-                                )
-                            }
-                        }
                     }
 
                     // 三、本轮提示词日志：本轮新拼入的部分

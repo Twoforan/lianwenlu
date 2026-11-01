@@ -66,12 +66,31 @@ class PrefixManageViewModel(private val container: AppContainer) : ViewModel() {
     val chapterFirstRound: StateFlow<Boolean> =
         prefs.aiChapterFirstRound.stateIn(viewModelScope, SharingStarted.Eagerly, true)
 
+    /** 历史对话前缀：历史梗概 / 历史正文（默认关闭，新建会话生效） */
+    val historySummaryOn: StateFlow<Boolean> =
+        prefs.prefixHistorySummary.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    val historyContentOn: StateFlow<Boolean> =
+        prefs.prefixHistoryContent.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    /** 历史对话前缀：每轮消息父开关与角色子开关（默认关闭，新建会话生效） */
+    val historyMessageOn: StateFlow<Boolean> =
+        prefs.prefixHistoryMessage.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    val historyAiOn: StateFlow<Boolean> =
+        prefs.prefixHistoryAi.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    val historyUserOn: StateFlow<Boolean> =
+        prefs.prefixHistoryUser.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
     fun setContextEnabled(v: Boolean) = viewModelScope.launch { prefs.setPrefixContextEnabled(v) }
     fun setOutlineEnabled(v: Boolean) = viewModelScope.launch { prefs.setPrefixOutlineEnabled(v) }
     fun setCustomText(v: String) = viewModelScope.launch { prefs.setPrefixCustomText(v) }
     fun setAdaptiveFilter(v: Boolean) = viewModelScope.launch { prefs.setPrefixAdaptiveFilterEnabled(v) }
     fun setOutlineFirstRound(v: Boolean) = viewModelScope.launch { prefs.setAiOutlineFirstRound(v) }
     fun setChapterFirstRound(v: Boolean) = viewModelScope.launch { prefs.setAiChapterFirstRound(v) }
+    fun setHistorySummaryOn(v: Boolean) = viewModelScope.launch { prefs.setPrefixHistorySummary(v) }
+    fun setHistoryContentOn(v: Boolean) = viewModelScope.launch { prefs.setPrefixHistoryContent(v) }
+    fun setHistoryMessageOn(v: Boolean) = viewModelScope.launch { prefs.setPrefixHistoryMessage(v) }
+    fun setHistoryAiOn(v: Boolean) = viewModelScope.launch { prefs.setPrefixHistoryAi(v) }
+    fun setHistoryUserOn(v: Boolean) = viewModelScope.launch { prefs.setPrefixHistoryUser(v) }
 }
 
 /**
@@ -88,6 +107,11 @@ fun PrefixManageScreen(onBack: () -> Unit) {
     val outlineFirstRound by vm.outlineFirstRound.collectAsState()
     val chapterFirstRound by vm.chapterFirstRound.collectAsState()
     val savedText by vm.customText.collectAsState()
+    val historySummaryOn by vm.historySummaryOn.collectAsState()
+    val historyContentOn by vm.historyContentOn.collectAsState()
+    val historyMessageOn by vm.historyMessageOn.collectAsState()
+    val historyAiOn by vm.historyAiOn.collectAsState()
+    val historyUserOn by vm.historyUserOn.collectAsState()
     // 输入框用本地状态，避免每次写入 DataStore 后回传造成光标跳动
     var editing by remember { mutableStateOf<String?>(null) }
 
@@ -185,6 +209,97 @@ fun PrefixManageScreen(onBack: () -> Unit) {
                     )
                 }
                 Switch(checked = chapterFirstRound, onCheckedChange = { vm.setChapterFirstRound(it) })
+            }
+            Spacer(Modifier.height(12.dp))
+            HorizontalDivider()
+            Spacer(Modifier.height(16.dp))
+            Text("历史对话前缀")
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "开关在建会话时冻结，配置修改后新建会话生效。" +
+                    "历史梗概 / 历史正文读取本会话已绑定过的章节（排除本次请求所在章节），" +
+                    "按书籍中的章节顺序排列、同章去重，空梗概 / 空正文的章节跳过，正文使用完整内容；" +
+                    "两者在每次发送时按章节当前内容重算，章节更新会反映到下一次请求。" +
+                    "每轮消息只在每次发送时按角色开关重新生成（不冻结为固定快照），" +
+                    "消息增长或变化可能影响前缀缓存。全部关闭时请求不再携带本会话历史消息。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("历史梗概")
+                    Text(
+                        "加入本会话已绑定章节（不含本次请求章节）的梗概；没有梗概的章节跳过",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(checked = historySummaryOn, onCheckedChange = { vm.setHistorySummaryOn(it) })
+            }
+            Spacer(Modifier.height(12.dp))
+            HorizontalDivider()
+            Spacer(Modifier.height(12.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("历史正文")
+                    Text(
+                        "加入本会话已绑定章节（不含本次请求章节）的完整正文；没有正文的章节跳过",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(checked = historyContentOn, onCheckedChange = { vm.setHistoryContentOn(it) })
+            }
+            Spacer(Modifier.height(12.dp))
+            HorizontalDivider()
+            Spacer(Modifier.height(12.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("每轮消息")
+                    Text(
+                        "每次发送时按本会话消息重新生成历史对话块；关闭后不注入任何消息内容",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(checked = historyMessageOn, onCheckedChange = { vm.setHistoryMessageOn(it) })
+            }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(start = 24.dp)
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("AI 回复")
+                    Text(
+                        "加入历史中当前生效的 AI 回答（废弃的重新生成版本不加入）",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = historyAiOn,
+                    enabled = historyMessageOn,
+                    onCheckedChange = { vm.setHistoryAiOn(it) }
+                )
+            }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(start = 24.dp)
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("用户回复")
+                    Text(
+                        "加入历史中的用户消息；不含本轮正在发送的输入",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = historyUserOn,
+                    enabled = historyMessageOn,
+                    onCheckedChange = { vm.setHistoryUserOn(it) }
+                )
             }
             Spacer(Modifier.height(12.dp))
             HorizontalDivider()

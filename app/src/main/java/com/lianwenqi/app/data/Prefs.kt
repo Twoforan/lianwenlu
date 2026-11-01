@@ -132,8 +132,12 @@ class Prefs(private val context: Context) {
         // 「文风样式」勾选框（默认关闭）：勾选后生成梗概自动给句子打标，生成正文时抽样注入
         val genStyleEnabled = booleanPreferencesKey("gen_style_enabled")
 
-        // 生成工具（生成梗概 / 生成正文）的请求是否携带本会话历史对话（默认关闭）
-        val genCarryHistory = booleanPreferencesKey("gen_carry_history")
+        // 「历史对话前缀」：历史梗概 / 历史正文 / 每轮消息（AI 回复、用户回复），均默认关闭
+        val prefixHistorySummary = booleanPreferencesKey("prefix_history_summary")
+        val prefixHistoryContent = booleanPreferencesKey("prefix_history_content")
+        val prefixHistoryMessage = booleanPreferencesKey("prefix_history_message")
+        val prefixHistoryAi = booleanPreferencesKey("prefix_history_ai")
+        val prefixHistoryUser = booleanPreferencesKey("prefix_history_user")
 
         // 编辑器「本章标签」区的展开状态（默认收起，记住上次选择）
         val summaryTagsExpanded = booleanPreferencesKey("summary_tags_expanded")
@@ -263,13 +267,25 @@ class Prefs(private val context: Context) {
     val genStyleEnabled: Flow<Boolean> =
         context.dataStore.data.map { it[K.genStyleEnabled] ?: false }
 
-    /**
-     * 生成工具（生成梗概 / 生成正文）的请求是否携带本会话历史对话（默认关闭）。
-     * 关闭：只复用与聊天请求逐字一致的前置块，缓存命中长度恒定；
-     * 开启：在前置块之后追加本会话历史，随轮次累积，命中率更高（生成上下文包含历史对话）。
-     */
-    val genCarryHistory: Flow<Boolean> =
-        context.dataStore.data.map { it[K.genCarryHistory] ?: false }
+    /** 「历史对话前缀」：历史梗概（本会话消息涉及章节，排除当前章）是否冻结进前缀（默认关闭） */
+    val prefixHistorySummary: Flow<Boolean> =
+        context.dataStore.data.map { it[K.prefixHistorySummary] ?: false }
+
+    /** 「历史对话前缀」：历史正文（本会话消息涉及章节，排除当前章）是否冻结进前缀（默认关闭） */
+    val prefixHistoryContent: Flow<Boolean> =
+        context.dataStore.data.map { it[K.prefixHistoryContent] ?: false }
+
+    /** 「历史对话前缀」：每轮消息总开关（默认关闭） */
+    val prefixHistoryMessage: Flow<Boolean> =
+        context.dataStore.data.map { it[K.prefixHistoryMessage] ?: false }
+
+    /** 「历史对话前缀」：每轮消息里是否注入 AI 回复（默认关闭） */
+    val prefixHistoryAi: Flow<Boolean> =
+        context.dataStore.data.map { it[K.prefixHistoryAi] ?: false }
+
+    /** 「历史对话前缀」：每轮消息里是否注入用户回复（默认关闭） */
+    val prefixHistoryUser: Flow<Boolean> =
+        context.dataStore.data.map { it[K.prefixHistoryUser] ?: false }
 
     /** 编辑器「本章标签」区的展开状态（默认收起）：可只看梗概不看标签，并记住上次选择。 */
     val summaryTagsExpanded: Flow<Boolean> =
@@ -438,7 +454,11 @@ class Prefs(private val context: Context) {
     }
     suspend fun setGenContentWithSummary(v: Boolean) = writePrefs { it[K.genContentWithSummary] = v }
     suspend fun setGenStyleEnabled(v: Boolean) = writePrefs { it[K.genStyleEnabled] = v }
-    suspend fun setGenCarryHistory(v: Boolean) = writePrefs { it[K.genCarryHistory] = v }
+    suspend fun setPrefixHistorySummary(v: Boolean) = writePrefs { it[K.prefixHistorySummary] = v }
+    suspend fun setPrefixHistoryContent(v: Boolean) = writePrefs { it[K.prefixHistoryContent] = v }
+    suspend fun setPrefixHistoryMessage(v: Boolean) = writePrefs { it[K.prefixHistoryMessage] = v }
+    suspend fun setPrefixHistoryAi(v: Boolean) = writePrefs { it[K.prefixHistoryAi] = v }
+    suspend fun setPrefixHistoryUser(v: Boolean) = writePrefs { it[K.prefixHistoryUser] = v }
     suspend fun setSummaryTagsExpanded(v: Boolean) = writePrefs { it[K.summaryTagsExpanded] = v }
 
     /** 记录某个对话分组被用户展开 / 收起 */

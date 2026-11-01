@@ -24,7 +24,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Article
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.AlertDialog
@@ -135,9 +134,6 @@ class AiToolsViewModel(private val container: AppContainer) : ViewModel() {
     val genContentWithSummary: StateFlow<Boolean> =
         prefs.genContentWithSummary.stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
-    val genCarryHistory: StateFlow<Boolean> =
-        prefs.genCarryHistory.stateIn(viewModelScope, SharingStarted.Eagerly, false)
-
     fun setGenSummaryWordRange(min: Int, max: Int) =
         viewModelScope.launch { prefs.setGenSummaryWordRange(min, max) }
 
@@ -147,8 +143,6 @@ class AiToolsViewModel(private val container: AppContainer) : ViewModel() {
         viewModelScope.launch { prefs.setGenContentWordRange(min, max) }
 
     fun setGenContentWithSummary(v: Boolean) = viewModelScope.launch { prefs.setGenContentWithSummary(v) }
-
-    fun setGenCarryHistory(v: Boolean) = viewModelScope.launch { prefs.setGenCarryHistory(v) }
 
     /** 完整表单新建书籍，返回新书 id */
     suspend fun createBookFull(r: BookFormResult): Long = bookRepository.createBook(
@@ -520,7 +514,6 @@ private fun AiGenerateSettingsScreen(vm: AiToolsViewModel, onBack: () -> Unit) {
     val limitScope by vm.genSummaryLimitScope.collectAsState()
     val contentRange by vm.genContentWordRange.collectAsState()
     val withSummary by vm.genContentWithSummary.collectAsState()
-    val carryHistory by vm.genCarryHistory.collectAsState()
 
     Scaffold(
         containerColor = GenBg,
@@ -579,16 +572,6 @@ private fun AiGenerateSettingsScreen(vm: AiToolsViewModel, onBack: () -> Unit) {
                     "关闭时若本章没有梗概会提示先填写",
                 checked = withSummary,
                 onCheckedChange = { vm.setGenContentWithSummary(it) }
-            )
-
-            // 生成工具携带本会话历史消息
-            GenToggleCard(
-                icon = Icons.Filled.History,
-                title = "生成工具携带本会话历史消息",
-                desc = "开启后「生成梗概 / 生成正文」的请求会带上本会话的历史对话，生成内容会受历史对话影响，" +
-                    "但前缀缓存命中随轮次累积；关闭则只复用与聊天一致的前置块，命中长度恒定",
-                checked = carryHistory,
-                onCheckedChange = { vm.setGenCarryHistory(it) }
             )
         }
     }

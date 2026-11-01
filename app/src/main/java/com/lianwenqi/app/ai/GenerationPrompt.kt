@@ -24,10 +24,12 @@ const val CONTENT_FALLBACK_INPUT = "请开始撰写本章正文。"
 const val REFERENCE_BLOCK_HEADER = "以下是参考资料，请在写作时参考：\n"
 
 /**
- * 「前情提要」块抬头：生成请求携带的本会话历史不再作为「对话轮次」发出，
- * 而是渲染成这一段参考资料，避免模型把它当成自己「正在续写的回答」而反复复用上一轮成品。
+ * 「历史对话前缀」各块抬头：由「前缀词管理 → 历史对话前缀」按开关渲染，
+ * 排在稳定前缀之后、本轮用户输入之前，避免把历史当成正在续写的回答。
  */
-const val PRIOR_CONTEXT_HEADER = "【前情提要】\n以下为历史对话，请作为本章的前情提要参考：\n"
+const val HISTORY_SUMMARY_HEADER = "【历史梗概】\n以下为本会话历史章节的梗概，请作为前情参考：\n"
+const val HISTORY_CONTENT_HEADER = "【历史正文】\n以下为本会话历史章节的正文，请作为前情参考：\n"
+const val HISTORY_DIALOGUE_HEADER = "【历史对话】\n以下为本会话的历史消息，请作为前情参考：\n"
 
 /**
  * 生成任务的开头：有章名时点明「现在撰写的是『第2章』」，无章名时退回「为当前章节」。
@@ -40,7 +42,7 @@ private fun taskHead(chapterTitle: String, action: String): String =
  * 生成请求与聊天请求共用的前段块：文风约束（会话内冻结）→ 自定义前缀 → 「以下是参考资料」。
  * 顺序与 [com.lianwenqi.app.data.SendChatMessageUseCase] 组装聊天请求时完全一致，
  * 用来让两边命中同一段供应商侧前缀缓存；生成专用块（[buildSummaryTurns] / [buildContentTurns]）
- * 在本函数结果之后追加（需要携带历史对话时，历史插在两者中间）。
+ * 在本函数结果之后追加（需要携带历史对话前缀时，历史块插在两者中间）。
  *
  * 注：AI 工具已改为原生工具调用（tools 参数），不再把格式提示词塞进前缀。
  */
@@ -155,7 +157,7 @@ fun buildSummaryTurns(
 /**
  * 生成正文的 messages，块顺序固定为：
  * 系统写作指令 → 本章梗概槽位 → 大纲 / 人物设定槽位 → 记忆检索参考资料块（仅启用时）→ 用户即时输入。
- * （调用方可在本块之前插入「前情提要」参考资料块，见 [PRIOR_CONTEXT_HEADER]。）
+ * （调用方可在本块之前插入「历史梗概 / 历史正文 / 历史对话」块，见 [HISTORY_SUMMARY_HEADER] 等。）
  *
  * 文风约束块不在这里：它已冻结进会话前缀，由 [buildGenerationPrefixTurns] 排在最前载入。
  *
