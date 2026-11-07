@@ -36,7 +36,9 @@ class OutlineDiffService(
         val model = modelLoader(request.modelId)
             ?: return OutlineDiffOutcome.Failed("未找到所选模型，请先在设置中检查模型配置")
 
-        val maxOutput = model.maxTokens.takeIf { it > 0 }?.coerceIn(512, 4096) ?: 2048
+        // 输出上限只取模型设置：不限（<=0）时不携带 max_tokens，
+        // 避免推理模型的思考过程占满一个应用侧硬编码的小上限而被截断
+        val maxOutput = model.maxTokens.takeIf { it > 0 }?.coerceIn(512, 4096) ?: 0
         val aiRequest = AiRequest(
             turns = listOf(ChatTurn(ChatRole.USER, OutlineDiffPrompt.user(request))),
             model = model.name,

@@ -170,7 +170,7 @@ class VolumeCompressionService(
         batch: CompressionBatch
     ): BatchExtractionOutcome {
         val model = preparation.model
-        val extractionCapacity = preparation.extractionCapacity
+        val sentMaxTokens = sentMaxTokens(preparation)
         val requestAi = AiRequest(
             turns = listOf(
                 ChatTurn(
@@ -180,7 +180,7 @@ class VolumeCompressionService(
             ),
             model = model.name,
             temperature = COMPRESSION_TEMPERATURE,
-            maxTokens = extractionCapacity.outputTokens,
+            maxTokens = sentMaxTokens,
             systemPrompt = VolumeCompressionPrompt.EXTRACTION_SYSTEM
         )
 
@@ -199,8 +199,7 @@ class VolumeCompressionService(
                 break
             }
             rawContent = result.content
-            val hitOutputLimit = extractionCapacity.outputTokens > 0 &&
-                result.completionTokens >= extractionCapacity.outputTokens
+            val hitOutputLimit = sentMaxTokens > 0 && result.completionTokens >= sentMaxTokens
             when (
                 val parse = VolumeCompressionCodec.parseExtraction(
                     result.content,
@@ -294,6 +293,7 @@ class VolumeCompressionService(
             )
         }
         val intermediateTarget = capacityPlanner.intermediateTarget(finalTarget)
+        val sentMaxTokens = sentMaxTokens(preparation)
         val mergeRoundPlan = CompressionMergePlanner.plan(
             initialNodes = mergeNodes,
             mergeInputBudgetTokens = mergeInputBudget,
@@ -378,7 +378,7 @@ class VolumeCompressionService(
                     ),
                     model = preparation.model.name,
                     temperature = COMPRESSION_TEMPERATURE,
-                    maxTokens = intermediateTarget,
+                    maxTokens = sentMaxTokens,
                     systemPrompt = VolumeCompressionPrompt.MERGE_SYSTEM
                 )
                 val result = chat(preparation.model, requestAi)
@@ -407,7 +407,7 @@ class VolumeCompressionService(
                         plan, mergeNodes, usage, mergeUsage
                     )
                 }
-                val hitOutputLimit = intermediateTarget > 0 && result.completionTokens >= intermediateTarget
+                val hitOutputLimit = sentMaxTokens > 0 && result.completionTokens >= sentMaxTokens
                 when (
                     val merged = VolumeCompressionCodec.validateMergedText(
                         result.content,
@@ -461,7 +461,7 @@ class VolumeCompressionService(
             ),
             model = preparation.model.name,
             temperature = COMPRESSION_TEMPERATURE,
-            maxTokens = finalTarget,
+            maxTokens = sentMaxTokens,
             systemPrompt = VolumeCompressionPrompt.MERGE_SYSTEM
         )
         val finalResult = chat(preparation.model, finalRequest)
@@ -487,7 +487,7 @@ class VolumeCompressionService(
                 plan, mergeNodes, usage, mergeUsage
             )
         }
-        val finalHitLimit = finalTarget > 0 && finalResult.completionTokens >= finalTarget
+        val finalHitLimit = sentMaxTokens > 0 && finalResult.completionTokens >= sentMaxTokens
         val finalContent = when (
             val validated = VolumeCompressionCodec.validateMergedText(
                 finalResult.content,
@@ -511,6 +511,14 @@ class VolumeCompressionService(
             mergeUsage = mergeUsage
         )
     }
+
+    /**
+     * 压缩请求实际发送的输出上限：只取模型自身的「最大输出 token」设置。
+     * <= 0 表示不限，请求不携带 max_tokens；容量规划值只用于分批与预估，
+     * 不能当作硬截断，否则推理模型的思考过程会占满由估算得出的小上限。
+     */
+    private fun sentMaxTokens(preparation: CompressionPreparation): Int =
+        preparation.maxOutputTokens.coerceAtLeast(0)
 
     /** 只写候选版本，绝不确认生效；书 / 卷 / 章节归属由 F1 Repository 校验 */
     suspend fun finalizeCandidate(

@@ -274,7 +274,7 @@ class VolumeCompressionServiceTest {
     }
 
     @Test
-    fun `输出字数设置决定最终整合的目标篇幅`() = runBlocking {
+    fun `输出字数只作为提示词里的篇幅约束而不限制 max_tokens`() = runBlocking {
         val run = run(
             chapters = listOf(chapter(1L, 1, "梗概")),
             onChat = singleBatchChat(ids = listOf(1L), label = "第1章")
@@ -282,12 +282,12 @@ class VolumeCompressionServiceTest {
         val outcome = run.service.compress(request(targetOutputChars = 1200))
         assertTrue(outcome is VolumeCompressionOutcome.Success)
         val finalRequest = run.requests.last()
-        assertEquals(1200, finalRequest.maxTokens)
+        assertEquals(4096, finalRequest.maxTokens)
         assertTrue(finalRequest.turns.first().content.contains("必须约 1200 字"))
     }
 
     @Test
-    fun `输出字数超过模型上限时按模型上限收敛`() = runBlocking {
+    fun `输出字数超过模型上限时目标篇幅按模型上限收敛`() = runBlocking {
         val run = run(
             chapters = listOf(chapter(1L, 1, "梗概")),
             model = model(maxTokens = 2048),
@@ -296,6 +296,21 @@ class VolumeCompressionServiceTest {
         val outcome = run.service.compress(request(targetOutputChars = 8000))
         assertTrue(outcome is VolumeCompressionOutcome.Success)
         assertEquals(2048, run.requests.last().maxTokens)
+        assertTrue(run.requests.last().turns.first().content.contains("必须约 2048 字"))
+    }
+
+    @Test
+    fun `模型输出不限时压缩请求不携带输出上限`() = runBlocking {
+        val run = run(
+            chapters = listOf(chapter(1L, 1, "梗概")),
+            model = model(maxTokens = 0),
+            onChat = singleBatchChat(ids = listOf(1L), label = "第1章")
+        )
+        val outcome = run.service.compress(request(targetOutputChars = 1200))
+        assertTrue(outcome is VolumeCompressionOutcome.Success)
+        assertTrue(run.requests.isNotEmpty())
+        assertEquals(0, run.requests.first().maxTokens)
+        assertEquals(0, run.requests.last().maxTokens)
     }
 
     @Test
