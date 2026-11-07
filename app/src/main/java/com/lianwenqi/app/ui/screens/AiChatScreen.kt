@@ -140,6 +140,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.lianwenqi.app.ai.GenerationDialog
 import com.lianwenqi.app.ai.MemoryScopePick
+import com.lianwenqi.app.ai.RefreshRetrievalChoice
 import com.lianwenqi.app.ai.SummaryFailureChoice
 import com.lianwenqi.app.data.GEN_KIND_SUMMARY
 import com.lianwenqi.app.data.PromptLog
@@ -2934,6 +2935,37 @@ private fun GenerationDialogHost(
             pick = d.pick,
             onDismiss = { vm.cancelGeneration() },
             onConfirm = { ids -> vm.confirmGenerationMemoryScope(ids) }
+        )
+
+        // 编辑 / 重新生成：是否重新做记忆检索与文风抽样
+        is GenerationDialog.AskRefreshRetrieval -> AlertDialog(
+            onDismissRequest = { vm.resolveRefreshRetrieval(RefreshRetrievalChoice.CANCEL) },
+            title = { Text("是否重新检索") },
+            text = {
+                Column {
+                    Text("这是对已有轮次的编辑 / 重新生成，上一轮已经注入过以下内容：")
+                    Spacer(Modifier.height(6.dp))
+                    if (d.memory) Text("· 记忆检索：从本书正文召回的参考片段")
+                    if (d.style) Text("· 文风样本：用于模仿表达方式的样本片段")
+                    Spacer(Modifier.height(6.dp))
+                    Text("重新检索会重新执行上面各项；沿用上次则完全使用上一轮的内容，不再重新检索与抽样。")
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { vm.resolveRefreshRetrieval(RefreshRetrievalChoice.REFRESH) }) {
+                    Text("重新检索")
+                }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(onClick = { vm.resolveRefreshRetrieval(RefreshRetrievalChoice.REUSE) }) {
+                        Text("沿用上次")
+                    }
+                    TextButton(onClick = { vm.resolveRefreshRetrieval(RefreshRetrievalChoice.CANCEL) }) {
+                        Text("取消")
+                    }
+                }
+            }
         )
 
         is GenerationDialog.SummaryFailed -> AlertDialog(

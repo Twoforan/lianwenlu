@@ -89,6 +89,12 @@ sealed interface GenerationDialog {
     /** 开启「记忆检索是否限定范围」时，确认启用检索后选择检索章节 */
     data class PickMemoryScope(val pick: MemoryScopePick) : GenerationDialog
 
+    /**
+     * 编辑 / 重新生成正文前，询问是否重新做记忆检索与文风样本抽样。
+     * [memory] / [style] 为 true 表示该项上次有结果、可以选择「沿用上次」。
+     */
+    data class AskRefreshRetrieval(val memory: Boolean, val style: Boolean) : GenerationDialog
+
     /** 梗概子调用失败：显式三选项（重试梗概 / 使用已有梗概 / 取消） */
     data class SummaryFailed(val hasExisting: Boolean) : GenerationDialog
 
@@ -110,3 +116,9 @@ sealed interface GenerationOutcome {
 
 /** 梗概子调用失败时用户的三选项 */
 enum class SummaryFailureChoice { RETRY, USE_EXISTING, CANCEL }
+
+/**
+ * 编辑 / 重新生成正文时，对「记忆检索 / 文风样本」的处理方式。
+ * [REUSE] 完全沿用上一轮注入的内容，不再调用检索与抽样；[REFRESH] 重新执行。
+ */
+enum class RefreshRetrievalChoice { REFRESH, REUSE, CANCEL }

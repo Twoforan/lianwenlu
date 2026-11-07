@@ -15,6 +15,7 @@ import com.lianwenqi.app.ai.GenerationPlan
 import com.lianwenqi.app.ai.MemoryScopeChapter
 import com.lianwenqi.app.ai.MemoryScopePick
 import com.lianwenqi.app.ai.MemoryScopeVolume
+import com.lianwenqi.app.ai.RefreshRetrievalChoice
 import com.lianwenqi.app.ai.RetrievalMode
 import com.lianwenqi.app.ai.SUMMARY_FALLBACK_INPUT
 import com.lianwenqi.app.ai.CONTENT_FALLBACK_INPUT
@@ -528,6 +529,7 @@ class AiChatViewModel(
     private var generationCancelled = false
     private var generationOutlinePick: CompletableDeferred<List<Long>?>? = null
     private var generationMemoryScopeAsk: CompletableDeferred<Set<Long>?>? = null
+    private var generationRefreshAsk: CompletableDeferred<RefreshRetrievalChoice?>? = null
     private var generationSummaryFailed: CompletableDeferred<SummaryFailureChoice>? = null
 
     /** 生成任务令牌：任务收尾时据此判断是否仍需复位状态，避免旧任务清掉新任务的状态 */
@@ -838,11 +840,41 @@ class AiChatViewModel(
             ""
         }
 
-        val memoryRef = if (plan.memoryRetrieval == RetrievalMode.ON) {
-            generationStage.value = "记忆检索中"
-            buildMemoryBlock(plan, chapterId, summary, memoryCap, memoryScope, sp)
-        } else {
-            MemoryRef()
+        // 编辑已有轮次 / 重新生成：先问是否重新做记忆检索与文风抽样。
+        // 上一轮结果存在时可选「沿用上次」，避免每次都无声重跑一遍检索与抽样。
+        val roundUserId = editingId.takeIf { it > 0L } ?: regenerateUserId.takeIf { it > 0L }
+        val previous = roundUserId?.let { previousGenerationExtras(sid, it) } ?: PreviousGenExtras()
+        val canReuseMemory = plan.memoryRetrieval == RetrievalMode.ON && previous.memory.isNotBlank()
+        val canReuseStyle = summaryTagsEnabled && previous.styleSamples.isNotBlank()
+        var reuseMemory: String? = null
+        var reuseStyle: String? = null
+        if (roundUserId != null && (canReuseMemory || canReuseStyle)) {
+            when (askRefreshRetrieval(canReuseMemory, canReuseStyle)) {
+                RefreshRetrievalChoice.REFRESH -> Unit
+                RefreshRetrievalChoice.REUSE -> {
+                    if (canReuseMemory) reuseMemory = previous.memory
+                    if (canReuseStyle) reuseStyle = previous.styleSamples
+                }
+                RefreshRetrievalChoice.CANCEL, null -> return
+            }
+            // 弹窗把状态降级成收集阶段：确认后立刻回到执行阶段，避免期间生成按钮重新可用
+            _generationState.value = FlowState.Executing
+            Log.d(
+                TAG,
+                "gen-edit reuse memory=${reuseMemory != null} style=${reuseStyle != null} " +
+                    "prevMemory=${previous.memory.length}chars prevStyle=${previous.styleSamples.length}chars"
+            )
+        }
+        val reusedMemory = reuseMemory
+        val reusedStyle = reuseStyle
+
+        val memoryRef = when {
+            reusedMemory != null -> MemoryRef(text = reusedMemory)
+            plan.memoryRetrieval == RetrievalMode.ON -> {
+                generationStage.value = "记忆检索中"
+                buildMemoryBlock(plan, chapterId, summary, memoryCap, memoryScope, sp)
+            }
+            else -> MemoryRef()
         }
         if (memoryRef.freshKeys.isNotEmpty()) {
             sp = sp.copy(autoMemoryKeys = sp.autoMemoryKeys + memoryRef.freshKeys)
@@ -852,15 +884,18 @@ class AiChatViewModel(
         // 只有勾选「文风样式」才做梗概标签分析（复用有效关联 / 缺失过期时重新分析）；
         // 未勾选时不分析、不抽样、不注入句子参考块，正文按原流程生成
         val styleProfileId = styleProfileIdOfChapter(chapterId)
-        val chapterTags = if (summaryTagsEnabled) {
-            generationStage.value = "分析梗概中"
-            ensureSummaryTags(chapterId, summary, modelId)
-        } else {
-            emptyList()
+        val chapterTags = when {
+            !summaryTagsEnabled -> emptyList()
+            // 沿用上一轮结果时不触发分析模型，只取仍然有效的已有标签
+            reusedStyle != null -> existingSummaryTags(chapterId, summary, styleProfileId)
+            else -> {
+                generationStage.value = "分析梗概中"
+                ensureSummaryTags(chapterId, summary, modelId)
+            }
         }
         // 文风样本抽样：未勾选「文风样式」时完全不抽；勾选后只从当前书籍绑定档案里按标签权重随机抽样。
-        // 抽样失败 / 无结果继续正常生成
-        val stylePick = if (summaryTagsEnabled && styleProfileId > 0L && summary.isNotBlank()) {
+        // 沿用上一轮结果时不再抽样。抽样失败 / 无结果继续正常生成
+        val stylePick = if (reusedStyle == null && summaryTagsEnabled && styleProfileId > 0L && summary.isNotBlank()) {
             try {
                 // 传入未去重的句段标签：标签出现次数也参与权重计算
                 container.styleSampleRetriever.pick(
@@ -883,7 +918,7 @@ class AiChatViewModel(
             emptyList()
         }
         val summarySentenceBlock = buildSummarySentenceTagBlock(sentenceSamples)
-        val styleSamplesBlock = buildStyleSampleBlock(stylePick?.hits.orEmpty())
+        val styleSamplesBlock = reusedStyle ?: buildStyleSampleBlock(stylePick?.hits.orEmpty())
         // 只记录抽样摘要（不打印完整样本与提示词），遵循现有日志规范
         Log.d(
             TAG,
@@ -894,6 +929,7 @@ class AiChatViewModel(
                 "chunks=${stylePick?.candidateChunks} matched=${stylePick?.matchedChunks}" +
                 " hits=${stylePick?.hits?.map { it.chunkId }}" +
                 " injected=${stylePick?.hits?.size ?: 0}" +
+                " reused=${reusedStyle != null}" +
                 (stylePick?.reason?.takeIf { it.isNotBlank() }?.let { " reason=$it" } ?: "")
         )
         // 正文专用块：文风约束已冻结在会话前缀首块（见 [prepareSessionPrefix]），这里不再重复注入
@@ -1016,6 +1052,8 @@ class AiChatViewModel(
         generationOutlinePick = null
         generationMemoryScopeAsk?.complete(null)
         generationMemoryScopeAsk = null
+        generationRefreshAsk?.complete(null)
+        generationRefreshAsk = null
         generationSummaryFailed?.complete(SummaryFailureChoice.CANCEL)
         generationSummaryFailed = null
         _generationDialog.value = null
@@ -1098,6 +1136,8 @@ class AiChatViewModel(
         generationOutlinePick = null
         generationMemoryScopeAsk?.complete(null)
         generationMemoryScopeAsk = null
+        generationRefreshAsk?.complete(null)
+        generationRefreshAsk = null
         generationSummaryFailed?.complete(SummaryFailureChoice.CANCEL)
         generationSummaryFailed = null
         _generationDialog.value = null
@@ -1186,6 +1226,31 @@ class AiChatViewModel(
                 if (_generationDialog.value is GenerationDialog.PickMemoryScope) _generationDialog.value = null
             }
         }
+    }
+
+    /**
+     * 编辑 / 重新生成正文前，询问是否重新做记忆检索与文风样本抽样。
+     * 返回 null 表示用户取消本次生成；[RefreshRetrievalChoice.REUSE] 表示沿用上一轮已注入的内容。
+     */
+    private suspend fun askRefreshRetrieval(memory: Boolean, style: Boolean): RefreshRetrievalChoice? {
+        val deferred = CompletableDeferred<RefreshRetrievalChoice?>()
+        generationRefreshAsk = deferred
+        _generationState.value = FlowState.CollectingConfig
+        _generationDialog.value = GenerationDialog.AskRefreshRetrieval(memory, style)
+        return try {
+            deferred.await()
+        } finally {
+            if (generationRefreshAsk === deferred) {
+                generationRefreshAsk = null
+                if (_generationDialog.value is GenerationDialog.AskRefreshRetrieval) _generationDialog.value = null
+            }
+        }
+    }
+
+    /** 编辑 / 重新生成时「是否重新检索」弹窗的应答 */
+    fun resolveRefreshRetrieval(choice: RefreshRetrievalChoice) {
+        generationRefreshAsk?.complete(choice)
+        generationRefreshAsk = null
     }
 
     private suspend fun askSummaryFailure(hasExisting: Boolean): SummaryFailureChoice? {
@@ -1449,6 +1514,32 @@ class AiChatViewModel(
     }
 
     /**
+     * 只取当前梗概已存在且仍有效的句段标签，**不触发分析模型**。
+     * 编辑 / 重新生成选择「沿用上次」时使用，让这条路径不再产生额外的模型调用。
+     */
+    private suspend fun existingSummaryTags(
+        chapterId: Long,
+        summary: String,
+        profileId: Long
+    ): List<ChapterSummaryTag> {
+        val text = summary.trim()
+        if (text.isBlank()) return emptyList()
+        return try {
+            val allowed = container.styleTagRepository.userTags() +
+                if (profileId > 0L) container.styleTagRepository.profileTags(profileId) else emptyList()
+            val tagIds = allowed.map { it.id }.toSet()
+            val hash = shortHash(text)
+            val segments = SummarySentenceSegmenter.segment(text, SummarySentenceSplitter.split(text))
+            container.styleTagRepository.summaryTags(chapterId)
+                .filter { SummaryTagValidity.isValidSegmentTag(it, hash, tagIds, segments) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            emptyList()
+        }
+    }
+
+    /**
      * 生成正文前的记忆检索参考块：以本章梗概（+ 选定标签）为 query 做向量检索，
      * 召回后复用 [SessionPrefix.freshMemoryHits] 去重（已提交过的片段不再重复注入）。
      * 只返回本轮新片段的文本与去重键，写回会话前缀由调用方在落库消息之后完成。
@@ -1496,6 +1587,23 @@ class AiChatViewModel(
             append("（以上片段来自本书已写正文，仅供写作参考，请勿照抄或复述。）")
         }
         return MemoryRef(text = text, freshKeys = fresh.map { shortHash(it) })
+    }
+
+    /** 上一轮生成实际注入的记忆片段 / 文风样本，编辑或重新生成时可原样沿用 */
+    private data class PreviousGenExtras(val memory: String = "", val styleSamples: String = "")
+
+    /**
+     * 读取某条「生成正文」轮次上一轮回答里实际注入的记忆检索结果与文风样本。
+     * 取当前生效的版本（没有生效标记时退回最后一个版本）；旧数据没有日志时返回空。
+     */
+    private suspend fun previousGenerationExtras(sid: Long, roundUserId: Long): PreviousGenExtras {
+        if (roundUserId <= 0L) return PreviousGenExtras()
+        val answers = chatRepository.getMessages(sid)
+            .filter { it.replyToId == roundUserId && it.role == ChatRole.ASSISTANT }
+        if (answers.isEmpty()) return PreviousGenExtras()
+        val answer = answers.lastOrNull { it.active } ?: answers.last()
+        val log = PromptLog.decode(answer.promptLog) ?: return PreviousGenExtras()
+        return PreviousGenExtras(memory = log.memory, styleSamples = log.styleSamples)
     }
 
     /** 生成路径落库的「用户消息」正文：输入框提示词 + 生成标记，用于在对话里区分生成轮次 */
@@ -2773,6 +2881,8 @@ class AiChatViewModel(
         generationOutlinePick = null
         generationMemoryScopeAsk?.complete(null)
         generationMemoryScopeAsk = null
+        generationRefreshAsk?.complete(null)
+        generationRefreshAsk = null
         generationSummaryFailed?.complete(SummaryFailureChoice.CANCEL)
         generationSummaryFailed = null
         _generationDialog.value = null
