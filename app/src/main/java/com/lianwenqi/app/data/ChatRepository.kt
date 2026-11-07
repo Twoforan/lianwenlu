@@ -29,6 +29,8 @@ class ChatRepository(private val db: AppDatabase) : ChatGateway {
     private val bookDao = db.bookDao()
     private val chapterDao = db.chapterDao()
     private val outlineDao = db.outlineDao()
+    private val volumeDao = db.volumeDao()
+    private val volumeSummaryDao = db.volumeSummaryDao()
 
     // ---------------- 对话 ----------------
 
@@ -171,7 +173,8 @@ class ChatRepository(private val db: AppDatabase) : ChatGateway {
         chapterIds: List<Long>,
         outlineIds: List<Long>,
         contentChapterIds: Set<Long>,
-        summaryChapterIds: Set<Long>
+        summaryChapterIds: Set<Long>,
+        volumeSummaryIds: List<Long>
     ): String {
         val sb = StringBuilder()
         bookIds.forEach { bid ->
@@ -198,6 +201,15 @@ class ChatRepository(private val db: AppDatabase) : ChatGateway {
                     }
                 }
             }
+        }
+        // 整卷梗概：独立上下文资产，排在章节材料之前；只注入仍生效、归属一致且属于所选书的版本
+        volumeSummaryIds.forEach { sid ->
+            val summary = volumeSummaryDao.getById(sid) ?: return@forEach
+            if (!summary.isActive || summary.bookId !in bookIds) return@forEach
+            val volume = volumeDao.getById(summary.volumeId) ?: return@forEach
+            if (volume.bookId != summary.bookId) return@forEach
+            sb.append("【").append(volume.title).append("·整卷梗概】\n")
+                .append(summary.effectiveContent.trim()).append('\n')
         }
         chapterIds.forEach { cid ->
             val ch = chapterDao.getById(cid) ?: return@forEach
@@ -232,6 +244,21 @@ class ChatRepository(private val db: AppDatabase) : ChatGateway {
             fields.drop(1).forEach { f ->
                 append(f.first).append("：").append(f.second).append('\n')
             }
+        }
+    }
+
+    /**
+     * 单条整卷梗概条目（冻结进会话前缀用）：来源标记取真实分卷标题，内容取生效版本。
+     * 记录不存在 / 已不是生效版本 / 分卷归属不一致时返回 null，不冻结悬空内容。
+     */
+    suspend fun renderVolumeSummaryEntry(summaryId: Long): String? {
+        val summary = volumeSummaryDao.getById(summaryId) ?: return null
+        if (!summary.isActive) return null
+        val volume = volumeDao.getById(summary.volumeId) ?: return null
+        if (volume.bookId != summary.bookId) return null
+        return buildString {
+            append("【").append(volume.title).append("·整卷梗概】\n")
+            append(summary.effectiveContent.trim()).append('\n')
         }
     }
 

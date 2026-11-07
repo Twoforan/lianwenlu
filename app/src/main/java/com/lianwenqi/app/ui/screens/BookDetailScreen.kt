@@ -46,6 +46,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AddCircleOutline
+import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DeleteOutline
@@ -54,6 +55,7 @@ import androidx.compose.material.icons.filled.DriveFileMove
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -78,6 +80,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -88,7 +91,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.addPathNodes
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -106,6 +114,7 @@ import com.lianwenqi.app.data.OUTLINE_HEAD_LABEL
 import com.lianwenqi.app.data.decodeOutlineFields
 import com.lianwenqi.app.data.encodeOutlineFields
 import com.lianwenqi.app.data.entity.Volume
+import com.lianwenqi.app.data.entity.VolumeCompressionStatus
 import com.lianwenqi.app.data.entity.outlineCategoryLabel
 import com.lianwenqi.app.ui.appViewModel
 import com.lianwenqi.app.ui.components.BookCover
@@ -132,7 +141,35 @@ fun BookDetailScreen(
     val chapters by vm.chapters.collectAsState()
     val outline by vm.outline.collectAsState()
     val categories by vm.categories.collectAsState()
-    val pinnedCategories by vm.pinnedCategories.collectAsState()
+
+    // 整卷压缩：任务状态、候选与生效版都来自 F1 / F5 数据层，UI 不自行猜测
+    val compressionVm = appViewModel(key = "compression-$bookId") {
+        VolumeCompressionViewModel(it, bookId)
+    }
+    val compressionSessions by compressionVm.sessions.collectAsState()
+    val activeSummaries by compressionVm.activeSummaries.collectAsState()
+    val compressionFreshness by compressionVm.freshness.collectAsState()
+    var compressionTarget by remember { mutableStateOf<Volume?>(null) }
+    // 后台压缩跑完（进度弹窗可能已关闭）自动弹出候选结果，避免用户错过确认
+    val seenCompressionStatus = remember { mutableStateMapOf<Long, String>() }
+    LaunchedEffect(compressionSessions) {
+        compressionSessions.forEach { session ->
+            val status = session.statusEnumValue
+            val previous = seenCompressionStatus[session.id]
+            // 仍有任务在跑（例如刚点了重试）时不弹旧候选，等真正跑完再弹
+            val running = compressionSessions.any {
+                it.statusEnumValue == VolumeCompressionStatus.RUNNING ||
+                    it.statusEnumValue == VolumeCompressionStatus.PENDING
+            }
+            if (previous != null && previous != status &&
+                status == VolumeCompressionStatus.AWAITING_CONFIRMATION &&
+                compressionTarget == null && !running
+            ) {
+                volumes.firstOrNull { it.id == session.volumeId }?.let { compressionTarget = it }
+            }
+            seenCompressionStatus[session.id] = status
+        }
+    }
 
     var desc by remember { mutableStateOf(false) }
     var tab by remember { mutableStateOf(0) }
@@ -268,23 +305,44 @@ fun BookDetailScreen(
                     onRenameVolume = { v, t -> vm.renameVolume(v, t) },
                     onRenameChapter = { c, t -> vm.renameChapter(c, t) },
                     onSortVolumes = { sortTarget = SortTarget.Volumes },
-                    onBatchManage = { vid -> batchVolumeId = vid; batchManage = true }
+                    onBatchManage = { vid -> batchVolumeId = vid; batchManage = true },
+                    compressionLabel = { volumeId ->
+                        val summary = activeSummaries.firstOrNull { it.volumeId == volumeId }
+                        val volumeSessions = compressionSessions
+                            .filter { it.volumeId == volumeId }
+                            .sortedByDescending { it.createdAt }
+                        val latest = volumeSessions.firstOrNull()
+                        val active = volumeSessions.firstOrNull {
+                            it.statusEnumValue in listOf(
+                                VolumeCompressionStatus.PENDING,
+                                VolumeCompressionStatus.RUNNING,
+                                VolumeCompressionStatus.AWAITING_CONFIRMATION
+                            )
+                        }
+                        volumeCompressionLabel(
+                            CompressionUiSeed(active, summary, latest),
+                            summary?.let { compressionFreshness[it.id] }
+                        )
+                    },
+                    onCompressVolume = { compressionTarget = it }
                 )
             } else {
                 OutlineTab(
                     bookId = bookId,
                     outline = outline,
                     categories = categories,
-                    pinnedCategories = pinnedCategories,
                     loadFields = { c -> vm.outlineFields(c) ?: defaultOutlineFields(c) },
                     onSaveFields = { c, names -> vm.saveOutlineFields(c, names) },
                     onAddCategory = { vm.addCategory(it) },
                     onDeleteCategory = { vm.deleteCategory(it) },
                     onRenameCategory = { k, n -> vm.renameCategory(k, n) },
-                    onTogglePinned = { vm.togglePinnedCategory(it) },
+                    onToggleCategoryPinned = { vm.toggleCategoryPinned(it) },
+                    onToggleCategoryUpdatable = { vm.toggleCategoryUpdatable(it) },
                     onSave = { vm.saveOutline(it) },
                     onDelete = { vm.deleteOutline(it) },
-                    onMove = { item, cat -> vm.moveOutline(item, cat) }
+                    onMove = { item, cat -> vm.moveOutline(item, cat) },
+                    onToggleUpdatable = { vm.toggleOutlineUpdatable(it) },
+                    onTogglePinned = { vm.toggleOutlinePinned(it) }
                 )
             }
         }
@@ -296,6 +354,16 @@ fun BookDetailScreen(
             title = "新建章节 · 选择分卷",
             actions = volumes.map { v -> v.title to { vm.createChapter(v.id); showNewChapter = false } },
             onDismiss = { showNewChapter = false }
+        )
+    }
+
+    // 分卷整卷压缩入口：配置 → 进度 → 候选 → 整卷梗概页
+    compressionTarget?.let { volume ->
+        VolumeCompressionHost(
+            volume = volume,
+            chapters = chapters.filter { it.volumeId == volume.id },
+            vm = compressionVm,
+            onDismiss = { compressionTarget = null }
         )
     }
 }
@@ -315,7 +383,10 @@ private fun CatalogTab(
     onRenameChapter: (Chapter, String) -> Unit,
     onSortVolumes: () -> Unit,
     /** 批量管理：传入触发章节所属分卷 id（null 表示未分卷），只管理该卷章节 */
-    onBatchManage: (Long?) -> Unit
+    onBatchManage: (Long?) -> Unit,
+    /** 分卷菜单里的整卷梗概标签（由真实状态映射） */
+    compressionLabel: (Long) -> String,
+    onCompressVolume: (Volume) -> Unit
 ) {
     // 默认只展开「上次最新编辑章节」所属的分卷，其他分卷收起；
     // 用户手动展开 / 收起后记入 collapsedOverride，之后不再随数据变化重置
@@ -347,11 +418,14 @@ private fun CatalogTab(
                     modifier = Modifier
                         .fillMaxWidth()
                         .background(MaterialTheme.colorScheme.surfaceVariant)
-                        .clickable {
-                            collapsedOverride =
-                                if (isOpen) collapsed + volume.id
-                                else collapsed - volume.id
-                        }
+                        .combinedClickable(
+                            onClick = {
+                                collapsedOverride =
+                                    if (isOpen) collapsed + volume.id
+                                    else collapsed - volume.id
+                            },
+                            onLongClick = { menuTarget = volume }
+                        )
                         .padding(start = 10.dp, end = 2.dp, top = 2.dp, bottom = 2.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -427,6 +501,10 @@ private fun CatalogTab(
         is Volume -> ActionMenuDialog(
             title = target.title,
             actions = listOf(
+                compressionLabel(target.id) to {
+                    onCompressVolume(target)
+                    menuTarget = null
+                },
                 "排序" to { onSortVolumes(); menuTarget = null },
                 "重命名" to { renameTarget = target; menuTarget = null },
                 "删除分卷" to { deleteVolumeTarget = target; menuTarget = null }
@@ -504,16 +582,18 @@ private fun OutlineTab(
     bookId: Long,
     outline: List<OutlineItem>,
     categories: List<String>,
-    pinnedCategories: Set<String>,
     loadFields: suspend (String) -> List<String>,
     onSaveFields: (String, List<String>) -> Unit,
     onAddCategory: (String) -> Unit,
     onDeleteCategory: (String) -> Unit,
     onRenameCategory: (String, String) -> Unit,
-    onTogglePinned: (String) -> Unit,
+    onToggleCategoryPinned: (String) -> Unit,
+    onToggleCategoryUpdatable: (String) -> Unit,
     onSave: (OutlineItem) -> Unit,
     onDelete: (Long) -> Unit,
-    onMove: (OutlineItem, String) -> Unit
+    onMove: (OutlineItem, String) -> Unit,
+    onToggleUpdatable: (OutlineItem) -> Unit,
+    onTogglePinned: (OutlineItem) -> Unit
 ) {
     var category by remember { mutableStateOf(categories.firstOrNull().orEmpty()) }
     var editing by remember { mutableStateOf<OutlineItem?>(null) }
@@ -526,6 +606,18 @@ private fun OutlineTab(
     var itemToDelete by remember { mutableStateOf<OutlineItem?>(null) }
     // 待移动到其他标签的条目
     var itemToMove by remember { mutableStateOf<OutlineItem?>(null) }
+
+    // 标签上的图钉：该分类下所有条目都已常驻化；闪电同理，用于整类批量切换的菜单文案
+    val pinnedCategories = remember(outline) {
+        outline.groupBy { it.category }
+            .filterValues { list -> list.isNotEmpty() && list.all { it.pinned } }
+            .keys
+    }
+    val updatableCategories = remember(outline) {
+        outline.groupBy { it.category }
+            .filterValues { list -> list.isNotEmpty() && list.all { it.updatable } }
+            .keys
+    }
 
     // 标签被删除后，回落到第一个标签
     LaunchedEffect(categories) {
@@ -544,12 +636,13 @@ private fun OutlineTab(
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 categories.forEach { key ->
-                    // 长按标签弹出「常驻化 / 编辑名称 / 删除」菜单
+                    // 长按标签弹出「常驻化 / 可更新 / 编辑名称 / 删除」菜单
                     Box {
                         CategoryChip(
                             label = outlineCategoryLabel(key),
                             selected = key == category,
                             pinned = key in pinnedCategories,
+                            updatable = key in updatableCategories,
                             onClick = { category = key },
                             onLongClick = { labelMenu = key }
                         )
@@ -561,7 +654,14 @@ private fun OutlineTab(
                                 text = { Text(if (key in pinnedCategories) "取消常驻化" else "常驻化") },
                                 onClick = {
                                     labelMenu = null
-                                    onTogglePinned(key)
+                                    onToggleCategoryPinned(key)
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text(if (key in updatableCategories) "取消可更新" else "可更新") },
+                                onClick = {
+                                    labelMenu = null
+                                    onToggleCategoryUpdatable(key)
                                 }
                             )
                             DropdownMenuItem(
@@ -611,7 +711,9 @@ private fun OutlineTab(
                     item = item,
                     onEdit = { editing = item; showEditor = true },
                     onMove = { itemToMove = item },
-                    onDelete = { itemToDelete = item }
+                    onDelete = { itemToDelete = item },
+                    onTogglePinned = { onTogglePinned(item) },
+                    onToggleUpdatable = { onToggleUpdatable(item) }
                 )
             }
             item(key = "new") {
@@ -701,13 +803,18 @@ private fun OutlineTab(
     }
 }
 
-/** 顶部分类标签（可长按删除）；[pinned] 为真时在标签前显示图钉图标表示已常驻化 */
+/**
+ * 顶部分类标签（可长按删除）。
+ * [pinned] 为真时显示图钉图标表示整类已常驻化，[updatable] 为真时显示闪电图标表示整类可更新，
+ * 两者互不影响、可同时出现。
+ */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun CategoryChip(
     label: String,
     selected: Boolean,
     pinned: Boolean = false,
+    updatable: Boolean = false,
     onClick: () -> Unit,
     onLongClick: () -> Unit
 ) {
@@ -734,6 +841,15 @@ private fun CategoryChip(
                 )
                 Spacer(Modifier.width(4.dp))
             }
+            if (updatable) {
+                Icon(
+                    Icons.Filled.Bolt,
+                    contentDescription = "可更新",
+                    modifier = Modifier.size(14.dp),
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Spacer(Modifier.width(4.dp))
+            }
             Text(
                 label,
                 style = MaterialTheme.typography.labelLarge,
@@ -744,13 +860,15 @@ private fun CategoryChip(
     }
 }
 
-/** 大纲条目卡片：默认最多三行，超出可点击展开；已完整展示时点击无反应 */
+/** 大纲条目卡片：默认最多三行，超出可点击展开；右侧图钉 / 闪电可点击切换常驻化与可更新 */
 @Composable
 private fun OutlineCard(
     item: OutlineItem,
     onEdit: () -> Unit,
     onMove: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    onTogglePinned: () -> Unit,
+    onToggleUpdatable: () -> Unit
 ) {
     val pairs = remember(item.content) { parseOutlineFields(item.content) }
     val head = pairs.firstOrNull()
@@ -765,7 +883,7 @@ private fun OutlineCard(
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
             .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
-            .clickable(enabled = canExpand) { expanded = !expanded }
+            .clickable { if (canExpand) expanded = !expanded }
             .padding(14.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -773,7 +891,7 @@ private fun OutlineCard(
                 shape = RoundedCornerShape(6.dp),
                 color = MaterialTheme.colorScheme.surface,
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                // 限制标签宽度，标题过长时省略，避免把右侧编辑/删除按钮挤出屏幕
+                // 限制标签宽度，标题过长时省略，避免把右侧操作按钮挤出屏幕
                 modifier = Modifier.weight(1f, fill = false)
             ) {
                 Text(
@@ -794,6 +912,21 @@ private fun OutlineCard(
             IconButton(onClick = onDelete) {
                 Icon(Icons.Filled.Delete, contentDescription = "删除", Modifier.size(18.dp))
             }
+            // 常驻化 / 可更新：空心为未开启，实心为已开启，互不影响可同时亮起
+            ToggleIcon(
+                active = item.pinned,
+                activeIcon = Icons.Filled.PushPin,
+                inactiveIcon = Icons.Outlined.PushPin,
+                contentDescription = if (item.pinned) "取消常驻化" else "常驻化",
+                onClick = onTogglePinned
+            )
+            ToggleIcon(
+                active = item.updatable,
+                activeIcon = Icons.Filled.Bolt,
+                inactiveIcon = HollowBolt,
+                contentDescription = if (item.updatable) "取消可更新" else "可更新",
+                onClick = onToggleUpdatable
+            )
         }
         if (body.isNotEmpty()) {
             Text(
@@ -816,6 +949,58 @@ private fun OutlineCard(
         }
     }
     Spacer(Modifier.height(10.dp))
+}
+
+/**
+ * 空心闪电：Material 的 Outlined.Bolt 与实心版是同一套实心轮廓，看起来仍是实心；
+ * 这里复用闪电路径改用描边绘制，未开启「可更新」时才是真正的空心。
+ */
+private val HollowBolt: ImageVector by lazy {
+    val path = addPathNodes(
+        "M11,21h-1l1-7H7.5c-0.58,0,-0.57,-0.32,-0.38,-0.66" +
+            "c0.19,-0.34,0.05,-0.08,0.07,-0.12C8.48,10.94,10.42,7.54,13,3h1" +
+            "l-1,7h3.5c0.49,0,0.56,0.33,0.47,0.51l-0.07,0.15" +
+            "C12.96,17.55,11,21,11,21z"
+    )
+    ImageVector.Builder(
+        name = "HollowBolt",
+        defaultWidth = 24.dp,
+        defaultHeight = 24.dp,
+        viewportWidth = 24f,
+        viewportHeight = 24f
+    ).addPath(
+        pathData = path,
+        fill = null,
+        stroke = SolidColor(Color.Black),
+        strokeLineWidth = 1.6f,
+        strokeLineCap = StrokeCap.Round,
+        strokeLineJoin = StrokeJoin.Round
+    ).build()
+}
+
+/** 条目标记图标：空心表示未开启，实心表示已开启（常驻化 / 可更新共用） */
+@Composable
+private fun ToggleIcon(
+    active: Boolean,
+    activeIcon: ImageVector,
+    inactiveIcon: ImageVector,
+    contentDescription: String,
+    onClick: () -> Unit
+) {
+    Box(
+        Modifier
+            .size(30.dp)
+            .clip(CircleShape)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            if (active) activeIcon else inactiveIcon,
+            contentDescription = contentDescription,
+            modifier = Modifier.size(17.dp),
+            tint = MaterialTheme.colorScheme.primary
+        )
+    }
 }
 
 /** 各分类未保存过「表」时的默认字段；第一项固定为只读的「显示标签」 */

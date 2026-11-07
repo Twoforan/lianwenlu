@@ -42,7 +42,8 @@ class SendChatMessageUseCaseTest {
             chapterIds: List<Long>,
             outlineIds: List<Long>,
             contentChapterIds: Set<Long>,
-            summaryChapterIds: Set<Long>
+            summaryChapterIds: Set<Long>,
+            volumeSummaryIds: List<Long>
         ): String {
             buildContextCallCount++
             return context

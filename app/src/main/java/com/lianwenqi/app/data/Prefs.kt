@@ -98,9 +98,10 @@ class Prefs(private val context: Context) {
         val readerPageMode = intPreferencesKey("reader_page_mode")
         val readerImmersive = booleanPreferencesKey("reader_immersive")
 
-        // 首轮全选大纲 / 首轮全选章节：仅把对应内容写进首轮前缀，后续轮次复用不再改写
+        // 首轮全选设置：章节梗概 / 章节正文 / 大纲，仅把对应内容写进首轮前缀，后续轮次复用不再改写
         val aiOutlineFirstRound = booleanPreferencesKey("ai_outline_first_round")
-        val aiChapterFirstRound = booleanPreferencesKey("ai_chapter_first_round")
+        val aiChapterSummaryFirstRound = booleanPreferencesKey("ai_chapter_summary_first_round")
+        val aiChapterContentFirstRound = booleanPreferencesKey("ai_chapter_content_first_round")
 
         // AI 工具页：写入大纲工具是否启用（默认启用）
         val aiToolOutlineEnabled = booleanPreferencesKey("ai_tool_outline_enabled")
@@ -179,9 +180,17 @@ class Prefs(private val context: Context) {
         val rBgType = stringPreferencesKey("reader_bg_type")
         val rBgImage = stringPreferencesKey("reader_bg_image")
 
+        // 分卷压缩全局默认配置（JSON；损坏时由 VolumeCompressionConfig 回落到默认值）
+        val compressionConfig = stringPreferencesKey("compression_config")
+
         // 用户导入的字体 / 背景图，元素格式 "显示名|绝对路径"
         val rImportedFonts = stringSetPreferencesKey("reader_imported_fonts")
         val rImportedImages = stringSetPreferencesKey("reader_imported_images")
+    }
+
+    /** 分卷压缩全局默认配置；只在「保存为默认配置」或设置页修改时写入 */
+    val compressionConfig: Flow<VolumeCompressionConfig> = context.dataStore.data.map {
+        VolumeCompressionConfig.decode(it[K.compressionConfig] ?: "")
     }
 
     val nightMode: Flow<Boolean> = context.dataStore.data.map { it[K.nightMode] ?: false }
@@ -215,8 +224,13 @@ class Prefs(private val context: Context) {
     /** 首轮全选大纲：仅首轮把大纲写进前缀（默认关闭） */
     val aiOutlineFirstRound: Flow<Boolean> = context.dataStore.data.map { it[K.aiOutlineFirstRound] ?: false }
 
-    /** 首轮全选章节：仅首轮把章节（梗概）写进前缀（默认开启，与旧版新建会话自动全选章节保持一致） */
-    val aiChapterFirstRound: Flow<Boolean> = context.dataStore.data.map { it[K.aiChapterFirstRound] ?: true }
+    /** 首轮全选章节梗概：新建会话时默认勾选除所在章外全部章节的梗概（默认开启） */
+    val aiChapterSummaryFirstRound: Flow<Boolean> =
+        context.dataStore.data.map { it[K.aiChapterSummaryFirstRound] ?: true }
+
+    /** 首轮全选章节正文：新建会话时默认勾选除所在章外全部章节的正文（默认关闭） */
+    val aiChapterContentFirstRound: Flow<Boolean> =
+        context.dataStore.data.map { it[K.aiChapterContentFirstRound] ?: false }
 
     /** 「写入大纲工具」是否启用（默认启用；关闭后不出现在聊天页工具多选里） */
     val aiToolOutlineEnabled: Flow<Boolean> = context.dataStore.data.map { it[K.aiToolOutlineEnabled] ?: true }
@@ -419,6 +433,10 @@ class Prefs(private val context: Context) {
         )
     }
 
+    suspend fun setCompressionConfig(config: VolumeCompressionConfig) = writePrefs {
+        it[K.compressionConfig] = VolumeCompressionConfig.encode(config)
+    }
+
     suspend fun setNightMode(v: Boolean) = writePrefs { it[K.nightMode] = v }
     /** 记录说明书导入/更新结果：书籍 id + 本次导入时的 App 版本号 + 说明书内容签名 */
     suspend fun setManualMeta(bookId: Long, version: Int, signature: String) = writePrefs {
@@ -433,7 +451,10 @@ class Prefs(private val context: Context) {
     suspend fun setActiveModelId(v: Long) = writePrefs { it[K.activeModelId] = v }
     suspend fun setReaderImmersive(v: Boolean) = writePrefs { it[K.readerImmersive] = v }
     suspend fun setAiOutlineFirstRound(v: Boolean) = writePrefs { it[K.aiOutlineFirstRound] = v }
-    suspend fun setAiChapterFirstRound(v: Boolean) = writePrefs { it[K.aiChapterFirstRound] = v }
+    suspend fun setAiChapterSummaryFirstRound(v: Boolean) =
+        writePrefs { it[K.aiChapterSummaryFirstRound] = v }
+    suspend fun setAiChapterContentFirstRound(v: Boolean) =
+        writePrefs { it[K.aiChapterContentFirstRound] = v }
     suspend fun setAiToolOutlineEnabled(v: Boolean) = writePrefs { it[K.aiToolOutlineEnabled] = v }
     suspend fun setAiToolChapterEnabled(v: Boolean) = writePrefs { it[K.aiToolChapterEnabled] = v }
     suspend fun setAiChatTools(v: Set<String>) = writePrefs { it[K.aiChatTools] = v }
@@ -604,6 +625,24 @@ class Prefs(private val context: Context) {
     }
 
     private fun aiContextKey(bookId: Long) = stringPreferencesKey("ai_ctx_$bookId")
+
+    // ---------------- 卷梗概前序卷推荐记忆 ----------------
+
+    /** 某本书按「目标卷」记录的用户手动排除卷（JSON，见 VolumeSummarySelection） */
+    suspend fun aiVolumeSummaryReco(bookId: Long): Map<Long, Set<Long>> {
+        val raw = context.dataStore.data.first()[aiVolumeSummaryRecoKey(bookId)] ?: return emptyMap()
+        return com.lianwenqi.app.data.volume.VolumeSummarySelection.decodeRecommendations(raw)
+    }
+
+    suspend fun setAiVolumeSummaryReco(bookId: Long, store: Map<Long, Set<Long>>) {
+        writePrefs {
+            it[aiVolumeSummaryRecoKey(bookId)] =
+                com.lianwenqi.app.data.volume.VolumeSummarySelection.encodeRecommendations(store)
+        }
+    }
+
+    private fun aiVolumeSummaryRecoKey(bookId: Long) =
+        stringPreferencesKey("ai_vol_summary_reco_$bookId")
 
     // ---------------- 大纲字段表 ----------------
 

@@ -22,12 +22,17 @@ import com.lianwenqi.app.data.OutlineRepository
 import com.lianwenqi.app.data.Prefs
 import com.lianwenqi.app.data.StyleRepository
 import com.lianwenqi.app.data.StyleTagRepository
+import com.lianwenqi.app.data.VolumeSummaryRepository
 import com.lianwenqi.app.data.style.StyleAnalysisService
 import com.lianwenqi.app.data.style.StyleSampleRetriever
 import com.lianwenqi.app.data.style.StyleTaggingService
 import com.lianwenqi.app.data.style.StyleConstraintLoader
 import com.lianwenqi.app.data.style.StyleProfileSaver
 import com.lianwenqi.app.data.style.StyleProfileUpdater
+import com.lianwenqi.app.data.volume.OutlineDiffService
+import com.lianwenqi.app.data.volume.VolumeCompressionCoordinator
+import com.lianwenqi.app.data.volume.VolumeCompressionService
+import com.lianwenqi.app.data.volume.VolumeOutlineUpdateCoordinator
 import com.lianwenqi.app.update.UpdateChecker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -41,11 +46,58 @@ class AppContainer(val app: Application) {
     val database: AppDatabase = AppDatabase.get(app)
     val aiClient: AiClient = AiClient()
     val prefs: Prefs = Prefs(app)
-    val bookRepository: BookRepository = BookRepository(database)
+
+    /** 应用级协程域：压缩任务、启动恢复与后台向量化都在此执行，不随页面销毁中断 */
+    val appScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     val backupRepository: BackupRepository = BackupRepository(database, app, prefs)
     val chatRepository: ChatRepository = ChatRepository(database)
     val outlineRepository: OutlineRepository = OutlineRepository(database)
     val configRepository: ConfigRepository = ConfigRepository(database, aiClient)
+    /** 整卷梗概版本仓库（F1）；压缩引擎只写入候选，不自动确认生效 */
+    val volumeSummaryRepository: VolumeSummaryRepository = VolumeSummaryRepository(database)
+    /** 统一整卷压缩引擎：F2 场景使用章节梗概来源 */
+    val volumeCompressionService: VolumeCompressionService = VolumeCompressionService.forSynopsis(
+        db = database,
+        config = configRepository,
+        ai = aiClient,
+        summaries = volumeSummaryRepository
+    )
+    /** F3：章节正文来源，复用同一压缩引擎与候选写入链路 */
+    val volumeContentCompressionService: VolumeCompressionService =
+        VolumeCompressionService.forContent(
+            db = database,
+            config = configRepository,
+            ai = aiClient,
+            summaries = volumeSummaryRepository
+        )
+    /** F5：压缩任务协调器（排队、去重、逐批落库、恢复、取消与 usage 汇总） */
+    val volumeCompressionCoordinator: VolumeCompressionCoordinator = VolumeCompressionCoordinator(
+        db = database,
+        summaries = volumeSummaryRepository,
+        synopsisService = volumeCompressionService,
+        contentService = volumeContentCompressionService,
+        scope = appScope
+    )
+    /** 删书 / 删卷前先安全取消压缩任务，再由仓库事务清理任务记录 */
+    val bookRepository: BookRepository = BookRepository(
+        db = database,
+        beforeDeleteBook = { bookId -> volumeCompressionCoordinator.cancelAndDeleteForBook(bookId) },
+        beforeDeleteVolume = { bookId, volumeId ->
+            volumeCompressionCoordinator.cancelAndDeleteForVolume(bookId, volumeId)
+        }
+    )
+    /** F6：压缩确认后的大纲差异分析，复用模型网关与压缩任务 usage 统计 */
+    val outlineDiffService: OutlineDiffService = OutlineDiffService.create(configRepository, aiClient)
+    val volumeOutlineUpdateCoordinator: VolumeOutlineUpdateCoordinator =
+        VolumeOutlineUpdateCoordinator(
+            db = database,
+            prefs = prefs,
+            outlines = outlineRepository,
+            summaries = volumeSummaryRepository,
+            diffService = outlineDiffService,
+            compression = volumeCompressionCoordinator,
+            scope = appScope
+        )
     val styleRepository: StyleRepository = StyleRepository(database)
     /** 文风分析：复用现有模型配置与 [AiClient]，不另建 API 客户端 */
     val styleAnalysisService: StyleAnalysisService = StyleAnalysisService(configRepository, aiClient)
@@ -79,9 +131,6 @@ class AppContainer(val app: Application) {
     /** 本地推理引擎的懒加载持有者：模型 200MB+，首次真正推理时才开始加载 */
     val localEngineHolder: LocalEngineHolder = LocalEngineHolder(localModelStore)
 
-    /** 应用级协程域：A2 开启后正文保存触发的后台静默向量化在此执行 */
-    val appScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-
     /**
      * 向量化能力：按「向量化工具」设置分发到厂商 Embedding API 或本地 GGUF 工具。
      * 上层（MemoryRepository）只依赖这个接口，因此切到本地工具后
@@ -112,6 +161,11 @@ class LianWenQiApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         container = AppContainer(this)
+        // 先把上次进程中断的压缩任务标记为可恢复，再恢复排队中的任务
+        container.appScope.launch {
+            container.volumeCompressionCoordinator.recoverInterrupted()
+            container.volumeOutlineUpdateCoordinator.recoverInterrupted()
+        }
         // 首次启动时把内置《使用说明书》导入书架，之后可选中它向 AI 提问本 App 的用法
         container.appScope.launch {
             ManualSeeder.ensureSeeded(this@LianWenQiApplication, container.prefs)

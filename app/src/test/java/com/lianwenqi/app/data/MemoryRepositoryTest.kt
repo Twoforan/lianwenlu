@@ -133,6 +133,8 @@ class MemoryRepositoryTest {
         override fun observeValidByBook(bookId: Long): Flow<List<Chapter>> =
             flowOf(chapters.filter { it.bookId == bookId })
         override suspend fun getValidByBook(bookId: Long) = chapters.filter { it.bookId == bookId }
+        override suspend fun getValidByVolume(bookId: Long, volumeId: Long) =
+            chapters.filter { it.bookId == bookId && it.volumeId == volumeId }
         override suspend fun validIdsByBook(bookId: Long) =
             chapters.filter { it.bookId == bookId }.map { it.id }
         override fun observeById(id: Long): Flow<Chapter?> = error("未使用")

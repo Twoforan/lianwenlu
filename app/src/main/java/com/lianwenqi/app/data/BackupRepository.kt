@@ -11,6 +11,9 @@ import com.lianwenqi.app.data.entity.OutlineItem
 import com.lianwenqi.app.data.entity.StyleProfile
 import com.lianwenqi.app.data.entity.StyleSourceType
 import com.lianwenqi.app.data.entity.Volume
+import com.lianwenqi.app.data.entity.VolumeSummary
+import com.lianwenqi.app.data.entity.VolumeSummarySourceType
+import com.lianwenqi.app.data.entity.VolumeSummaryStatus
 import com.lianwenqi.app.data.entity.defaultOutlineKeys
 import com.lianwenqi.app.util.buildTitle
 import kotlinx.serialization.Serializable
@@ -53,7 +56,41 @@ data class BackupBook(
      * 绑定的文风档案在 [BackupStyleProfile.id] 中的值；0 表示未绑定。
      * 旧备份没有该字段，按 0（未绑定）处理。
      */
-    val styleId: Long = 0
+    val styleId: Long = 0,
+    /**
+     * 整卷梗概：只含当前生效版与最近一条归档版（候选属于未确认的压缩任务，不进备份）。
+     * 旧备份没有该字段，按空列表处理。
+     */
+    val volumeSummaries: List<BackupVolumeSummary> = emptyList()
+)
+
+/**
+ * 备份文件里的整卷梗概。
+ * 章节与分卷都按「备份内排序后的下标」引用：恢复时重新分配主键，必须按新 id 重映射；
+ * [sourceChapterHashes] 保留生成时的内容指纹，恢复后用新章节 id + 原指纹重算 revision，
+ * 从而保证恢复后的「过期」判断仍然准确。
+ */
+@Serializable
+data class BackupVolumeSummary(
+    /** 所属分卷在 [BackupBook.volumes] 排序后的下标 */
+    val volumeIndex: Int = 0,
+    /** ACTIVE / ARCHIVED（CANDIDATE 不导出） */
+    val status: String = VolumeSummaryStatus.ACTIVE,
+    val sourceType: String = VolumeSummarySourceType.SYNOPSIS,
+    val modelContent: String = "",
+    val userContent: String = "",
+    /** 参与章节在 [BackupBook.chapters] 排序后的下标 */
+    val sourceChapterIndexes: List<Int> = emptyList(),
+    /** 与 [sourceChapterIndexes] 一一对应的内容指纹 */
+    val sourceChapterHashes: List<String> = emptyList(),
+    val sourceChapterCount: Int = 0,
+    val processedChapterCount: Int = 0,
+    val modelId: Long = 0,
+    val modelName: String = "",
+    /** 是否为当前生效版本；每卷至多一条为 true */
+    val current: Boolean = false,
+    val createdAt: Long = 0,
+    val updatedAt: Long = 0
 )
 
 /** 备份文件里的文风档案：只保留分析结果与来源元数据，不含样本文本 */
@@ -95,7 +132,11 @@ data class BackupOutline(
     val tag: String = "",
     val title: String,
     val content: String = "",
-    val sortOrder: Int = 0
+    val sortOrder: Int = 0,
+    /** 是否参与卷梗概后的大纲更新（v23 新增，旧备份默认关闭） */
+    val updatable: Boolean = false,
+    /** 是否常驻化（v24 改为条目级，旧备份默认关闭） */
+    val pinned: Boolean = false
 )
 
 /** 备份包内容：app + format 作为「符合规则」的校验标识 */
@@ -129,6 +170,7 @@ class BackupRepository(
     private val groupDao = db.bookGroupDao()
     private val memoryChunkDao = db.memoryChunkDao()
     private val styleDao = db.styleProfileDao()
+    private val volumeSummaryDao = db.volumeSummaryDao()
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -256,6 +298,9 @@ class BackupRepository(
             val fields = distinctCategories.mapNotNull { category ->
                 prefs.outlineFields(book.id, category)?.let { category to it }
             }.toMap()
+            // 只导出有效章节：旧版本删分卷留下的孤儿章节不能被带进备份、在恢复后复活
+            val validChapters = chapterDao.getValidByBook(book.id).sortedBy { it.sortOrder }
+            val chapterIndex = validChapters.mapIndexed { index, chapter -> chapter.id to index }.toMap()
             BackupBook(
                 title = book.title,
                 intro = book.intro,
@@ -267,7 +312,7 @@ class BackupRepository(
                 updatedAt = book.updatedAt,
                 volumes = volumes.map { BackupVolume(it.title, it.sortOrder) },
                 // 只导出有效章节：旧版本删分卷留下的孤儿章节不能被带进备份、在恢复后复活
-                chapters = chapterDao.getValidByBook(book.id).sortedBy { it.sortOrder }.map { chapter ->
+                chapters = validChapters.map { chapter ->
                     BackupChapter(
                         title = chapter.title,
                         summary = chapter.summary,
@@ -284,13 +329,15 @@ class BackupRepository(
                         tag = item.tag,
                         title = item.title,
                         content = item.content,
-                        sortOrder = item.sortOrder
+                        sortOrder = item.sortOrder,
+                        updatable = item.updatable,
+                        pinned = item.pinned
                     )
                 },
                 outlineCategories = distinctCategories,
-                pinnedOutlineCategories = prefs.pinnedOutlineCategories(book.id).toList(),
                 outlineFields = fields,
-                styleId = book.styleId
+                styleId = book.styleId,
+                volumeSummaries = exportVolumeSummaries(volumes, volumeIndex, validChapters, chapterIndex)
             )
         }
         return BackupPayload(
@@ -313,11 +360,55 @@ class BackupRepository(
         )
     }
 
+    /**
+     * 导出卷梗概：每卷只导出当前生效版 + 最近一条归档版（候选不导出）。
+     * 参与章节按「备份内章节下标」记录；章节已被删除时该条参与记录被丢弃，计数按实际导出重算。
+     */
+    private suspend fun exportVolumeSummaries(
+        volumes: List<Volume>,
+        volumeIndex: Map<Long, Int>,
+        validChapters: List<Chapter>,
+        chapterIndex: Map<Long, Int>
+    ): List<BackupVolumeSummary> {
+        val result = mutableListOf<BackupVolumeSummary>()
+        volumes.forEach { volume ->
+            val current = volumeSummaryDao.activeByVolume(volume.id)
+            val archived = volumeSummaryDao.archivedByVolume(volume.id).take(VolumeSummary.MAX_ARCHIVED)
+            (listOfNotNull(current) + archived).forEach { summary ->
+                val mapped = summary.sourceChapterIdList()
+                    .zip(summary.sourceChapterHashList())
+                    .mapNotNull { (chapterId, hash) -> chapterIndex[chapterId]?.let { it to hash } }
+                result += BackupVolumeSummary(
+                    volumeIndex = volumeIndex.getValue(volume.id),
+                    status = summary.status,
+                    sourceType = summary.sourceType,
+                    modelContent = summary.modelContent,
+                    userContent = summary.userContent,
+                    sourceChapterIndexes = mapped.map { it.first },
+                    sourceChapterHashes = mapped.map { it.second },
+                    sourceChapterCount = validChapters.count { it.volumeId == volume.id },
+                    processedChapterCount = mapped.size,
+                    modelId = summary.modelId,
+                    modelName = summary.modelName,
+                    current = summary.isCurrent == true,
+                    createdAt = summary.createdAt,
+                    updatedAt = summary.updatedAt
+                )
+            }
+        }
+        return result
+    }
+
     private suspend fun deleteBookRows(bookId: Long) {
         memoryChunkDao.deleteByBook(bookId)
         chapterDao.deleteByBook(bookId)
         volumeDao.deleteByBook(bookId)
         outlineDao.deleteByBook(bookId)
+        // 整本覆盖恢复前先清掉旧卷梗概，避免旧版本记录挂到新分卷上
+        volumeSummaryDao.deleteByBook(bookId)
+        // 压缩任务不随备份恢复：覆盖旧书时一并清理，避免把上次进程残留的假任务挂到新书上
+        db.volumeCompressionDao().deleteBatchesByBook(bookId)
+        db.volumeCompressionDao().deleteSessionsByBook(bookId)
         bookDao.deleteById(bookId)
     }
 
@@ -358,11 +449,15 @@ class BackupRepository(
         }
         var firstChapter: Pair<Long, String>? = null
         val chapters = book.chapters.sortedBy { it.sortOrder }
+        // 卷梗概按旧备份里的章节下标引用，恢复后必须换算成新章节 id
+        val chapterIds = mutableListOf<Long>()
+        val chapterCountByVolume = mutableMapOf<Long, Int>()
         chapters.forEachIndexed { index, chapter ->
+            val volumeId = chapter.volumeIndex?.let { volumeIds.getOrNull(it) }
             val id = chapterDao.insert(
                 Chapter(
                     bookId = bookId,
-                    volumeId = chapter.volumeIndex?.let { volumeIds.getOrNull(it) },
+                    volumeId = volumeId,
                     title = chapter.title,
                     summary = chapter.summary,
                     content = chapter.content,
@@ -371,6 +466,10 @@ class BackupRepository(
                     updatedAt = chapter.updatedAt.takeIf { it > 0 } ?: now
                 )
             )
+            chapterIds += id
+            if (volumeId != null) {
+                chapterCountByVolume[volumeId] = (chapterCountByVolume[volumeId] ?: 0) + 1
+            }
             if (firstChapter == null) firstChapter = id to chapter.title
         }
         // 备份里没有章节（用户清空过）时补一个默认章节，保证书本打开后仍有可编辑内容
@@ -392,21 +491,83 @@ class BackupRepository(
                     tag = item.tag,
                     title = item.title,
                     content = item.content,
-                    sortOrder = item.sortOrder
+                    sortOrder = item.sortOrder,
+                    updatable = item.updatable,
+                    // 旧备份只有分类级常驻化：恢复时下放到该分类下的条目
+                    pinned = item.pinned || item.category in book.pinnedOutlineCategories
                 )
             )
         }
-        // 大纲分类 / 字段模板 / 常驻化标记按新书 id 写回 DataStore
+        // 大纲分类 / 字段模板按新书 id 写回 DataStore
         if (book.outlineCategories.isNotEmpty()) {
             prefs.setOutlineCategories(bookId, book.outlineCategories)
-        }
-        if (book.pinnedOutlineCategories.isNotEmpty()) {
-            prefs.setPinnedOutlineCategories(bookId, book.pinnedOutlineCategories.toSet())
         }
         book.outlineFields.forEach { (category, fields) ->
             prefs.setOutlineFields(bookId, category, fields)
         }
+        restoreVolumeSummaries(bookId, volumeIds, chapterIds, chapterCountByVolume, book.volumeSummaries)
         return bookId
+    }
+
+    /**
+     * 恢复卷梗概：按新 volumeId / 新章节 id 重建关联，用「新章节 id + 备份里保留的生成时指纹」
+     * 重算 sourceRevision，因此恢复后的过期判断与压缩当时一致。
+     * 每卷只认定一条生效版（备份第一条 current 生效，其余降级为归档），内容为空的记录直接跳过。
+     */
+    private suspend fun restoreVolumeSummaries(
+        bookId: Long,
+        volumeIds: List<Long>,
+        chapterIds: List<Long>,
+        chapterCountByVolume: Map<Long, Int>,
+        summaries: List<BackupVolumeSummary>
+    ) {
+        if (summaries.isEmpty()) return
+        val currentTaken = mutableSetOf<Long>()
+        summaries.forEach { raw ->
+            val volumeId = volumeIds.getOrNull(raw.volumeIndex) ?: return@forEach
+            val storedStatus = VolumeSummaryStatus.normalize(raw.status)
+            if (storedStatus !in VolumeSummaryStatus.persisted) return@forEach
+            if (raw.modelContent.isBlank()) return@forEach
+
+            val sourceType = VolumeSummarySourceType.normalize(raw.sourceType)
+            val mapped = raw.sourceChapterIndexes.zip(raw.sourceChapterHashes)
+                .mapNotNull { (index, hash) -> chapterIds.getOrNull(index)?.let { it to hash } }
+            val chapterIdsJoined = mapped.joinToString(",") { it.first.toString() }
+            val hashesJoined = mapped.joinToString(",") { it.second }
+            val revision = VolumeSourceRevision.revision(
+                sourceType,
+                mapped.map { VolumeSourceRevision.Entry(it.first, it.second) }
+            )
+            val isCurrent = raw.current && storedStatus == VolumeSummaryStatus.ACTIVE &&
+                currentTaken.add(volumeId)
+            // 备份里的 current 标记与状态冲突时以标记为准：非 current 的 ACTIVE 一律降级为归档
+            val status = when {
+                isCurrent -> VolumeSummaryStatus.ACTIVE
+                storedStatus == VolumeSummaryStatus.ACTIVE -> VolumeSummaryStatus.ARCHIVED
+                else -> storedStatus
+            }
+            volumeSummaryDao.insert(
+                VolumeSummary(
+                    bookId = bookId,
+                    volumeId = volumeId,
+                    status = status,
+                    sourceType = sourceType,
+                    modelContent = raw.modelContent,
+                    userContent = raw.userContent,
+                    sourceRevision = revision,
+                    sourceChapterCount = chapterCountByVolume[volumeId] ?: 0,
+                    processedChapterCount = mapped.size,
+                    sourceChapterIds = chapterIdsJoined,
+                    sourceChapterHashes = hashesJoined,
+                    modelId = raw.modelId,
+                    modelName = raw.modelName,
+                    compressionSessionId = null,
+                    isCurrent = if (isCurrent) true else null,
+                    createdAt = raw.createdAt.takeIf { it > 0 } ?: System.currentTimeMillis(),
+                    updatedAt = raw.updatedAt.takeIf { it > 0 } ?: System.currentTimeMillis()
+                )
+            )
+        }
     }
 
     private fun writeZip(payload: BackupPayload, out: OutputStream) {

@@ -106,6 +106,8 @@ object ManualSeeder {
                 // 整章替换：先清空旧章节与其向量，再写入最新内容
                 db.chapterDao().deleteByBook(existing.id)
                 db.memoryChunkDao().deleteByBook(existing.id)
+                // 章节内容整本刷新后，基于旧内容的卷梗概全部失效，直接清掉避免误用
+                db.volumeSummaryDao().deleteByBook(existing.id)
                 existing.id
             } else {
                 // 已被用户删除：重新生成一本

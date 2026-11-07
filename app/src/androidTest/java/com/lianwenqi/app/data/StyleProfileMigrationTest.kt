@@ -9,6 +9,7 @@ import com.lianwenqi.app.data.entity.StyleProfile
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -42,7 +43,17 @@ class StyleProfileMigrationTest {
         createV15Database()
 
         val db = Room.databaseBuilder(context, AppDatabase::class.java, dbName)
-            .addMigrations(AppDatabase.MIGRATION_15_16, AppDatabase.MIGRATION_16_17)
+            .addMigrations(
+                AppDatabase.MIGRATION_15_16,
+                AppDatabase.MIGRATION_16_17,
+                AppDatabase.MIGRATION_17_18,
+                AppDatabase.MIGRATION_18_19,
+                AppDatabase.MIGRATION_19_20,
+                AppDatabase.MIGRATION_20_21,
+                AppDatabase.MIGRATION_21_22,
+                AppDatabase.MIGRATION_22_23,
+                AppDatabase.MIGRATION_23_24
+            )
             .allowMainThreadQueries()
             .build()
 
@@ -66,6 +77,9 @@ class StyleProfileMigrationTest {
                 assertEquals(listOf(1L), db.chapterDao().getValidByBook(1).map { it.id })
                 assertEquals(1, db.memoryChunkDao().getByBook(1).size)
                 assertEquals(1, db.outlineDao().getByBook(1).size)
+                // v23：旧大纲条目的「可更新」默认关闭；v24：常驻化默认关闭
+                assertFalse(db.outlineDao().getByBook(1).single().updatable)
+                assertFalse(db.outlineDao().getByBook(1).single().pinned)
                 assertEquals("旧模型", db.aiModelDao().getAll().single().name)
                 assertEquals(1, db.providerDao().getAll().size)
                 assertEquals("旧提示词", db.promptDao().getAll().single().title)

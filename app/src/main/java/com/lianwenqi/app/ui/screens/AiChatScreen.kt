@@ -152,11 +152,15 @@ import com.lianwenqi.app.data.entity.ChatRole
 import com.lianwenqi.app.data.entity.ChatSession
 import com.lianwenqi.app.data.entity.ContextSnapshot
 import com.lianwenqi.app.data.entity.decodeContextSnapshot
+import com.lianwenqi.app.data.CompressionSourceMode
 import com.lianwenqi.app.data.decodeOutlineFields
 import com.lianwenqi.app.data.entity.OutlineItem
 import com.lianwenqi.app.data.entity.outlineCategoryLabel
 import com.lianwenqi.app.data.entity.Provider
 import com.lianwenqi.app.data.entity.Volume
+import com.lianwenqi.app.data.entity.VolumeCompressionSession
+import com.lianwenqi.app.data.entity.VolumeCompressionStatus
+import com.lianwenqi.app.data.entity.VolumeSummary
 import com.lianwenqi.app.ui.appViewModel
 import com.lianwenqi.app.ui.components.BookFormResult
 import com.lianwenqi.app.ui.components.BookFormDialog
@@ -188,12 +192,13 @@ fun AiChatScreen(initialBookId: Long?) {
     val outline by vm.outline.collectAsState()
     val volumes by vm.volumes.collectAsState()
     val groups by vm.groups.collectAsState()
-    val pinnedCats by vm.pinnedOutlineCategories.collectAsState()
     val selBooks by vm.selectedBookIds.collectAsState()
     val selChapters by vm.selectedChapterIds.collectAsState()
     val selSummary by vm.summaryChapterIds.collectAsState()
     val selContent by vm.contentChapterIds.collectAsState()
     val selOutline by vm.selectedOutlineIds.collectAsState()
+    val selVolumeSummaries by vm.selectedVolumeSummaryIds.collectAsState()
+    val activeVolumeSummaries by vm.activeVolumeSummaries.collectAsState()
     val summaryAll by vm.summaryAllSelected.collectAsState()
     val contentAll by vm.contentAllSelected.collectAsState()
     val errorMsg by vm.errorMessage.collectAsState()
@@ -217,6 +222,8 @@ fun AiChatScreen(initialBookId: Long?) {
     val memoryToolReady by vm.memoryToolConfigured.collectAsState()
     // 对话分组的展开状态：默认全部收起，用户点开 / 收起后记住，下次进入沿用
     val expandedGroups by vm.expandedChatGroups.collectAsState()
+
+    VolumeSummaryDialogs(vm)
 
     var showBooks by remember { mutableStateOf(false) }
     var showChapters by remember { mutableStateOf(false) }
@@ -324,6 +331,13 @@ fun AiChatScreen(initialBookId: Long?) {
                     enabled = selBooks.isNotEmpty(),
                     label = { Text("仅正文") }
                 )
+                FilterChip(
+                    selected = activeVolumeSummaries.isNotEmpty() &&
+                        selVolumeSummaries.containsAll(activeVolumeSummaries.map { it.id }),
+                    onClick = { vm.toggleAllVolumeSummaryAssets() },
+                    enabled = activeVolumeSummaries.isNotEmpty(),
+                    label = { Text("卷梗概") }
+                )
             }
 
             HorizontalDivider()
@@ -348,6 +362,9 @@ fun AiChatScreen(initialBookId: Long?) {
                     ui = ui,
                     chapters = chapters,
                     outline = outline,
+                    volumeSummaryLabels = activeVolumeSummaries.associate { s ->
+                        s.id to "${volumes.firstOrNull { it.id == s.volumeId }?.title ?: "分卷"} · 整卷梗概"
+                    },
                     previewFor = { vm.previewFor(it) },
                     onEditUser = { vm.beginEditUserMessage(it) },
                     onRegenerate = { vm.regenerate(it) },
@@ -489,7 +506,13 @@ fun AiChatScreen(initialBookId: Long?) {
                 outline.firstOrNull { it.id == id }
                     ?.let { "${outlineCategoryLabel(it.category)}·${it.title}" } ?: "（大纲已删除）"
             }
-            val manifestCount = manifestChapters.size + manifestOutline.size
+            val manifestVolumeSummaries = selVolumeSummaries.map { id ->
+                activeVolumeSummaries.firstOrNull { it.id == id }
+                    ?.let { s -> "${volumes.firstOrNull { it.id == s.volumeId }?.title ?: "分卷"} · 整卷梗概" }
+                    ?: "（卷梗概已失效）"
+            }
+            val manifestCount =
+                manifestChapters.size + manifestOutline.size + manifestVolumeSummaries.size
 
             // 底部工具条：常用提示词 / AI工具，右侧文件清单；超出宽度可横向滑动
             Row(
@@ -561,6 +584,7 @@ fun AiChatScreen(initialBookId: Long?) {
                     state = manifestState,
                     chapterRows = manifestChapters,
                     outlineRows = manifestOutline,
+                    volumeSummaryRows = manifestVolumeSummaries,
                     preview = { vm.contextPreview() },
                     modifier = Modifier.padding(horizontal = 12.dp)
                 )
@@ -670,7 +694,6 @@ fun AiChatScreen(initialBookId: Long?) {
         OutlinePickerDialog(
             items = outline,
             selected = selOutline,
-            pinnedCategories = pinnedCats,
             onToggle = { vm.toggleOutline(it) },
             onToggleAll = { vm.toggleOutlines(it) },
             onDismiss = { showOutline = false }
@@ -823,7 +846,7 @@ fun AiChatScreen(initialBookId: Long?) {
     }
     // 生成流程的选择型弹窗 + 生成提示：会话里含「生成正文 / 生成梗概」轮次时，
     // 在这里点「重新生成」同样需要弹窗（限定梗概范围 / 记忆范围 / 梗概失败 / 提示），缺了会一直卡在收集阶段
-    GenerationDialogHost(vm = vm, outline = outline, pinnedCategories = pinnedCats)
+    GenerationDialogHost(vm = vm, outline = outline)
     if (showSessions) {
         var search by remember { mutableStateOf("") }
         // 分组筛选：null=全部，-1=未分组，其余为分组 id
@@ -1123,7 +1146,10 @@ private fun AiAssistantPanel(
     val selSummary by vm.summaryChapterIds.collectAsState()
     val selContent by vm.contentChapterIds.collectAsState()
     val selOutline by vm.selectedOutlineIds.collectAsState()
-    val pinnedCats by vm.pinnedOutlineCategories.collectAsState()
+    val selVolumeSummaries by vm.selectedVolumeSummaryIds.collectAsState()
+    val activeVolumeSummaries by vm.activeVolumeSummaries.collectAsState()
+    val volumeSummaryStale by vm.volumeSummaryStale.collectAsState()
+    val volumeSummaryTasks by vm.volumeSummaryTasks.collectAsState()
     val chapterAll by vm.chapterAllSelected.collectAsState()
     val summaryAll by vm.summaryAllSelected.collectAsState()
     val contentAll by vm.contentAllSelected.collectAsState()
@@ -1145,8 +1171,11 @@ private fun AiAssistantPanel(
     // 对话分组的展开状态：默认全部收起，用户点开 / 收起后记住，下次进入沿用
     val expandedGroups by vm.expandedChatGroups.collectAsState()
 
-    // 当前打开的章节不进入上下文
-    val contextChapters = chapters.filter { it.id != chapterId }
+    // 卷梗概的来源询问 / 候选确认 / 提示（导航栏与侧边面板共用同一套状态机）
+    VolumeSummaryDialogs(vm)
+
+    // 当前打开的章节同样可以选入上下文（梗概 / 正文都按需勾选）
+    val contextChapters = chapters
     val modelName = models.firstOrNull { it.id == activeModelId }?.displayName ?: "未选择模型"
 
     // 底部按钮对应的展开面板：context / outline / prompt
@@ -1327,6 +1356,9 @@ private fun AiAssistantPanel(
                     ui = ui,
                     chapters = chapters,
                     outline = outline,
+                    volumeSummaryLabels = activeVolumeSummaries.associate { s ->
+                        s.id to "${volumes.firstOrNull { it.id == s.volumeId }?.title ?: "分卷"} · 整卷梗概"
+                    },
                     previewFor = { vm.previewFor(it) },
                     onEditUser = { vm.beginEditUserMessage(it) },
                     onRegenerate = { vm.regenerate(it, onGeneratedSummary) },
@@ -1447,27 +1479,39 @@ private fun AiAssistantPanel(
                     selected = selChapters,
                     summarySelected = selSummary,
                     contentSelected = selContent,
+                    activeVolumeSummaries = activeVolumeSummaries,
+                    volumeSummaryStale = volumeSummaryStale,
+                    volumeSummaryTasks = volumeSummaryTasks,
+                    selectedVolumeSummaryIds = selVolumeSummaries,
+                    onToggleVolumeSummaryAsset = { vm.toggleVolumeSummaryContext(it) },
+                    onManualCompressVolumeSummary = { vm.manualCompressVolumeSummary(it) },
                     // 「全选」= 梗概与正文两列都全选
                     allSelected = summaryAll && contentAll,
                     summaryAll = summaryAll,
                     contentAll = contentAll,
+                    volumeSummaryAll = activeVolumeSummaries.isNotEmpty() &&
+                        activeVolumeSummaries.all { it.id in selVolumeSummaries },
                     onToggleAll = { vm.selectAllChapters() },
                     onToggleSummary = { vm.selectAllSummary() },
                     onToggleContent = { vm.selectAllContent() },
+                    onToggleVolumeSummaryAll = { vm.toggleAllVolumeSummaryAssets() },
                     onToggleChapterSummary = { vm.toggleChapterSummary(it) },
                     onToggleChapterContent = { vm.toggleChapterContent(it) },
                     onToggleVolumeSummary = { vm.toggleVolumeSummary(it) },
                     onToggleVolumeContent = { vm.toggleVolumeContent(it) }
                 )
 
-                "outline" -> OutlinePicker(
-                    items = outline,
-                    selected = selOutline,
-                    pinnedCategories = pinnedCats,
-                    onToggleAll = { vm.toggleOutlines(it) },
-                    onToggle = { vm.toggleOutline(it) },
-                    onToggleCategory = { vm.toggleOutlineCategory(it) }
-                )
+                "outline" -> {
+                    // 打开面板时重新读取大纲：书籍大纲页刚改过的「可更新 / 常驻化」标记要立即反映在这里
+                    LaunchedEffect(Unit) { vm.loadBookContext() }
+                    OutlinePicker(
+                        items = outline,
+                        selected = selOutline,
+                        onToggleAll = { vm.toggleOutlines(it) },
+                        onToggle = { vm.toggleOutline(it) },
+                        onToggleCategory = { vm.toggleOutlineCategory(it) }
+                    )
+                }
             }
             }
 
@@ -1535,10 +1579,14 @@ private fun AiAssistantPanel(
                     summaryChapterIds = selSummary.toList(),
                     contentChapterIds = selContent.toList(),
                     summaryAll = summaryAll,
-                    contentAll = contentAll
+                    contentAll = contentAll,
+                    volumeSummaryIds = selVolumeSummaries.toList()
                 ),
                 chapters = chapters,
                 outline = outline,
+                volumeSummaryLabels = activeVolumeSummaries.associate { s ->
+                    s.id to "${volumes.firstOrNull { it.id == s.volumeId }?.title ?: "分卷"} · 整卷梗概"
+                },
                 modifier = Modifier.padding(horizontal = 16.dp),
                 expandedState = manifestState,
                 onExpandedChange = { v ->
@@ -1717,7 +1765,7 @@ private fun AiAssistantPanel(
     }
 
     // 生成流程的选择型弹窗 + 生成提示（导航栏 AI 与侧边 AI 助手共用同一份实现）
-    GenerationDialogHost(vm = vm, outline = outline, pinnedCategories = pinnedCats)
+    GenerationDialogHost(vm = vm, outline = outline)
 
     // 「查看日志」：分「预设 / 上下文 / 本轮」三部分回显本轮发送时的提示词（默认收起，逐层展开）
     logTarget?.let { msg ->
@@ -2179,6 +2227,92 @@ private fun FloatingStatusBubble(text: String, modifier: Modifier = Modifier) {
     }
 }
 
+/**
+ * F7：卷梗概自动压缩的两个弹窗（来源询问 / 候选确认）+ 一次性提示。
+ * 候选只有「确认使用」才写入当前选择；取消或重新压缩都不会加入请求上下文。
+ */
+@Composable
+private fun VolumeSummaryDialogs(vm: AiChatViewModel) {
+    val ask by vm.volumeSummaryAsk.collectAsState()
+    val candidate by vm.volumeSummaryCandidate.collectAsState()
+    val message by vm.volumeSummaryMessage.collectAsState()
+    val context = LocalContext.current
+    LaunchedEffect(message) {
+        message?.let {
+            Toast.makeText(context, it, Toast.LENGTH_SHORT).show()
+            vm.clearVolumeSummaryMessage()
+        }
+    }
+    ask?.let { pending ->
+        AlertDialog(
+            onDismissRequest = { vm.cancelVolumeSummaryAsk() },
+            title = { Text("生成整卷梗概") },
+            text = {
+                Column {
+                    Text(
+                        "「${pending.volumeTitle}」尚未生成整卷梗概，请选择压缩依据：",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    listOf(CompressionSourceMode.SYNOPSIS, CompressionSourceMode.CONTENT)
+                        .forEach { source ->
+                            TextButton(
+                                onClick = { vm.chooseVolumeSummarySource(pending.volumeId, source) }
+                            ) {
+                                Text(CompressionSourceMode.label(source))
+                            }
+                        }
+                    Text(
+                        "将按当前压缩设置后台执行，完成后需你确认才会加入上下文。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { vm.cancelVolumeSummaryAsk() }) { Text("取消") }
+            }
+        )
+    }
+    candidate?.let { pending ->
+        var edited by remember(pending.summaryId) { mutableStateOf(pending.content) }
+        AlertDialog(
+            onDismissRequest = { vm.discardVolumeSummaryCandidate() },
+            title = { Text("确认「${pending.volumeTitle}」整卷梗概") },
+            text = {
+                Column {
+                    Text(
+                        "确认后才会把该卷梗概加入本轮上下文；取消不会加入。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = edited,
+                        onValueChange = { edited = it },
+                        modifier = Modifier.fillMaxWidth().heightIn(max = 220.dp)
+                    )
+                    TextButton(
+                        onClick = {
+                            vm.discardVolumeSummaryCandidate()
+                            vm.manualCompressVolumeSummary(pending.volumeId)
+                        }
+                    ) { Text("重新压缩") }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { vm.confirmVolumeSummaryCandidate(edited) }) {
+                    Text("确认使用")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { vm.discardVolumeSummaryCandidate() }) { Text("取消") }
+            }
+        )
+    }
+}
+
 /** 「梗概 / 正文」两列的固定宽度，保证分卷行与章节行左右对齐 */
 private val ContextColumnWidth = 56.dp
 
@@ -2190,12 +2324,24 @@ private fun ContextPicker(
     selected: Set<Long>,
     summarySelected: Set<Long>,
     contentSelected: Set<Long>,
+    /** 生效卷梗概（每卷最多一条）与过期标记（summaryId → 是否可能已过期） */
+    activeVolumeSummaries: List<VolumeSummary>,
+    volumeSummaryStale: Map<Long, Boolean>,
+    /** 正在进行的卷压缩任务（volumeId → 任务） */
+    volumeSummaryTasks: Map<Long, VolumeCompressionSession>,
+    /** 已确认选中的卷梗概版本 id，与章节材料彼此独立 */
+    selectedVolumeSummaryIds: Set<Long>,
+    onToggleVolumeSummaryAsset: (Long) -> Unit,
+    onManualCompressVolumeSummary: (Long) -> Unit,
     allSelected: Boolean,
     summaryAll: Boolean,
     contentAll: Boolean,
+    /** 所有已生成的整卷梗概是否已全部勾选 */
+    volumeSummaryAll: Boolean,
     onToggleAll: () -> Unit,
     onToggleSummary: () -> Unit,
     onToggleContent: () -> Unit,
+    onToggleVolumeSummaryAll: () -> Unit,
     onToggleChapterSummary: (Long) -> Unit,
     onToggleChapterContent: (Long) -> Unit,
     onToggleVolumeSummary: (Long) -> Unit,
@@ -2231,7 +2377,7 @@ private fun ContextPicker(
             Text("选择上下文", color = PickerInk, fontSize = 17.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.weight(1f))
             Text(
-                "已选 ${selected.size} 章",
+                "已选 ${selectedVolumeSummaryIds.size} 卷 · ${selected.size} 章",
                 color = PickerMuted,
                 fontSize = 12.sp,
                 maxLines = 1,
@@ -2247,6 +2393,7 @@ private fun ContextPicker(
             GenPill("全选", allSelected) { onToggleAll() }
             GenPill("梗概", summaryAll) { onToggleSummary() }
             GenPill("正文", contentAll) { onToggleContent() }
+            GenPill("卷梗概", volumeSummaryAll) { onToggleVolumeSummaryAll() }
         }
         // 两列含义表头：章节 / 梗概 / 正文（章节列不再有勾选框，勾梗概或正文即纳入该章）
         Row(
@@ -2277,6 +2424,16 @@ private fun ContextPicker(
                         onToggleContent = { onToggleVolumeContent(v.id) }
                     )
                     if (expanded) {
+                        val activeSummary = activeVolumeSummaries.firstOrNull { it.volumeId == v.id }
+                        val task = volumeSummaryTasks[v.id]
+                        GenVolumeSummaryRow(
+                            summary = activeSummary,
+                            stale = activeSummary?.let { volumeSummaryStale[it.id] == true } == true,
+                            task = task,
+                            checked = activeSummary != null && activeSummary.id in selectedVolumeSummaryIds,
+                            onToggle = { onToggleVolumeSummaryAsset(v.id) },
+                            onManualCompress = { onManualCompressVolumeSummary(v.id) }
+                        )
                         list.forEach { ch ->
                             GenChapterRow(
                                 label = ch.title,
@@ -2300,6 +2457,71 @@ private fun ContextPicker(
                     onToggleContent = { onToggleChapterContent(ch.id) }
                 )
             }
+        }
+    }
+}
+
+/**
+ * 分卷下的独立子项「整卷梗概」：不占章节的梗概 / 正文列，
+ * 状态区分已生成 / 可能过期 / 未生成 / 压缩中，未生成时提供手动生成入口。
+ */
+@Composable
+private fun GenVolumeSummaryRow(
+    summary: VolumeSummary?,
+    stale: Boolean,
+    task: VolumeCompressionSession?,
+    checked: Boolean,
+    onToggle: () -> Unit,
+    onManualCompress: () -> Unit
+) {
+    val compressing = task != null && task.status in VolumeCompressionStatus.inFlight
+    val awaitingConfirm = task?.status == VolumeCompressionStatus.AWAITING_CONFIRMATION
+    val status = when {
+        compressing -> {
+            val planned = task?.plannedBatchCount ?: 0
+            val progress = if (planned > 0) "${task?.completedBatchCount ?: 0}/$planned" else "…"
+            "压缩中 $progress"
+        }
+
+        awaitingConfirm -> "候选待确认"
+
+        summary != null -> buildString {
+            append(summary.effectiveContent.length).append(" 字")
+            if (stale) append(" · 可能已过期")
+        }
+
+        else -> "未生成"
+    }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(start = 26.dp, end = 12.dp, top = 4.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            Icons.Filled.Description,
+            contentDescription = null,
+            tint = PickerPurple,
+            modifier = Modifier.size(14.dp)
+        )
+        Spacer(Modifier.width(6.dp))
+        Column(Modifier.weight(1f)) {
+            Text("整卷梗概", color = PickerInk, fontSize = 13.sp, maxLines = 1)
+            Text(status, color = PickerMuted, fontSize = 11.sp, maxLines = 1)
+        }
+        if (summary == null && !compressing) {
+            Text(
+                "生成",
+                color = PickerPurple,
+                fontSize = 12.sp,
+                modifier = Modifier
+                    .clickable { onManualCompress() }
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
+            )
+        }
+        // 只有已生成的整卷梗概可以勾选；未生成时只保留「生成」入口
+        if (summary != null) {
+            GenCheckbox(checked = checked, onCheckedChange = { onToggle() })
         }
     }
 }
@@ -2404,7 +2626,6 @@ private fun GenChapterRow(
 private fun OutlinePicker(
     items: List<OutlineItem>,
     selected: Set<Long>,
-    pinnedCategories: Set<String>,
     onToggleAll: (Set<Long>) -> Unit,
     onToggle: (Long) -> Unit,
     onToggleCategory: (String) -> Unit
@@ -2415,8 +2636,8 @@ private fun OutlinePicker(
     var scopeFilter by remember { mutableIntStateOf(0) }
     val visible = items.filter {
         when (scopeFilter) {
-            1 -> it.category in pinnedCategories
-            2 -> it.category !in pinnedCategories
+            1 -> it.pinned
+            2 -> !it.pinned
             else -> true
         }
     }
@@ -2540,9 +2761,13 @@ private fun GenGroupRow(
     }
 }
 
-/** 大纲条目行：勾选框 + 标题 */
+/** 大纲条目行：点击勾选（常驻化 / 可更新标记不在此处展示） */
 @Composable
-private fun GenEntryRow(label: String, selected: Boolean, onToggle: () -> Unit) {
+private fun GenEntryRow(
+    label: String,
+    selected: Boolean,
+    onToggle: () -> Unit
+) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -2678,8 +2903,7 @@ private fun buildChatEntries(messages: List<ChatMessage>): List<ChatEntry> {
 @Composable
 private fun GenerationDialogHost(
     vm: AiChatViewModel,
-    outline: List<OutlineItem>,
-    pinnedCategories: Set<String>
+    outline: List<OutlineItem>
 ) {
     val dialog by vm.generationDialog.collectAsState()
     // 生成相关提示（超上限已截断 / 略短 / 失败 / 正在生成中 等）
@@ -2697,7 +2921,6 @@ private fun GenerationDialogHost(
             OutlinePickerDialog(
                 items = outline,
                 selected = picked,
-                pinnedCategories = pinnedCategories,
                 onToggle = { id -> picked = if (id in picked) picked - id else picked + id },
                 onToggleAll = { ids -> picked = if (ids.all { it in picked }) picked - ids else picked + ids },
                 onDismiss = { vm.cancelGeneration() },
@@ -3251,6 +3474,8 @@ private fun ChatMessageItem(
     ui: MessageUiState,
     chapters: List<Chapter>,
     outline: List<OutlineItem>,
+    /** 卷梗概 id → 展示名；历史消息里的旧版本失效时显示占位 */
+    volumeSummaryLabels: Map<Long, String> = emptyMap(),
     previewFor: suspend (ContextSnapshot) -> String,
     onEditUser: (ChatMessage) -> Unit,
     onRegenerate: (Long) -> Unit,
@@ -3356,6 +3581,7 @@ private fun ChatMessageItem(
                     snapshot = snapshot,
                     chapters = chapters,
                     outline = outline,
+                    volumeSummaryLabels = volumeSummaryLabels,
                     preview = { previewFor(snapshot) }
                 )
                 if (generating) {
@@ -3897,6 +4123,8 @@ private fun ContextManifest(
     snapshot: ContextSnapshot,
     chapters: List<Chapter>,
     outline: List<OutlineItem>,
+    /** 卷梗概 id → 「分卷标题 · 整卷梗概」，用于把快照里的卷梗概还原成文件清单行 */
+    volumeSummaryLabels: Map<Long, String> = emptyMap(),
     modifier: Modifier = Modifier,
     /** 外部受控的展开状态（0 收起 / 1 表格 / 2 txt）；为空时组件自管 */
     expandedState: Int? = null,
@@ -3914,7 +4142,10 @@ private fun ContextManifest(
         outline.firstOrNull { it.id == id }
             ?.let { "${outlineCategoryLabel(it.category)}·${it.title}" } ?: "（大纲已删除）"
     }
-    val total = chapterRows.size + outlineRows.size
+    val volumeSummaryRows = snapshot.volumeSummaryIds.map { id ->
+        volumeSummaryLabels[id] ?: "（卷梗概已失效）"
+    }
+    val total = chapterRows.size + outlineRows.size + volumeSummaryRows.size
     var innerState by remember { mutableIntStateOf(0) }
     val state = expandedState ?: innerState
     val setState: (Int) -> Unit = { v ->
@@ -3979,6 +4210,7 @@ private fun ContextManifest(
             state = state,
             chapterRows = chapterRows,
             outlineRows = outlineRows,
+            volumeSummaryRows = volumeSummaryRows,
             preview = preview
         )
     }
@@ -3993,6 +4225,7 @@ private fun ContextManifestContent(
     state: Int,
     chapterRows: List<ManifestChapterRow>,
     outlineRows: List<String>,
+    volumeSummaryRows: List<String>,
     preview: suspend () -> String,
     modifier: Modifier = Modifier
 ) {
@@ -4007,6 +4240,27 @@ private fun ContextManifestContent(
                     .heightIn(max = 200.dp)
                     .verticalScroll(rememberScrollState())
             ) {
+                if (volumeSummaryRows.isNotEmpty()) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                    ) {
+                        Text("整卷梗概", style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold)
+                    }
+                    volumeSummaryRows.forEach { label ->
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        Text(
+                            label,
+                            style = MaterialTheme.typography.bodySmall,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp)
+                        )
+                    }
+                }
                 if (chapterRows.isNotEmpty()) {
                     Row(
                         Modifier
@@ -4072,7 +4326,7 @@ private fun ContextManifestContent(
 
             2 -> {
                 var text by remember { mutableStateOf("") }
-                LaunchedEffect(chapterRows, outlineRows) { text = preview() }
+                LaunchedEffect(chapterRows, outlineRows, volumeSummaryRows) { text = preview() }
                 Text(
                     if (text.isBlank()) "（暂无可生成的上下文）" else text,
                     style = MaterialTheme.typography.bodySmall,
@@ -4353,7 +4607,6 @@ private fun ChapterPickerDialog(
 private fun OutlinePickerDialog(
     items: List<OutlineItem>,
     selected: Set<Long>,
-    pinnedCategories: Set<String>,
     onToggle: (Long) -> Unit,
     onToggleAll: (Set<Long>) -> Unit,
     onDismiss: () -> Unit,

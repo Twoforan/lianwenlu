@@ -147,7 +147,14 @@ data class OutlineItem(
     val title: String,
     val content: String = "",
     val sortOrder: Int = 0,
-    val updatedAt: Long = System.currentTimeMillis()
+    val updatedAt: Long = System.currentTimeMillis(),
+    /**
+     * 是否参与「卷梗概」压缩完成后的大纲更新（界面上显示闪电标记）。
+     * 与 [pinned] 是两条独立属性，可同时存在。
+     */
+    @ColumnInfo(defaultValue = "0") val updatable: Boolean = false,
+    /** 是否「常驻化」（界面上显示图钉标记），按条目独立设置 */
+    @ColumnInfo(defaultValue = "0") val pinned: Boolean = false
 )
 
 /**
@@ -223,6 +230,12 @@ data class AiModel(
     val maxTokens: Int = 8192,
     /** 最多携带的历史消息条数（上下文窗口）；0 表示不限（携带全部历史），否则取最近 N 条 */
     val maxContext: Int = 20,
+    /**
+     * 模型真实的 Token 上下文窗口；0 表示未知（禁止拿 [maxContext] 当 Token 数使用）。
+     * 整卷压缩等需要按 Token 分批的功能据此判定，缺省为 0。
+     */
+    @ColumnInfo(defaultValue = "0")
+    val contextWindow: Int = 0,
     val isDefault: Boolean = false,
     /** 预设提示词 */
     val systemPrompt: String = "",
@@ -305,9 +318,13 @@ data class ChatMessage(
 
 /**
  * 一条消息发送时的上下文选择快照。
- * 编码为「书籍id|章节id|大纲id|梗概章节id|正文章节id|章节全选|梗概全选|正文全选|v2」的紧凑字符串，
- * 存入 [ChatMessage.contextSnapshot]（旧格式为「书籍id|章节id|大纲id|含梗概|含正文|章节全选」，
- * 解析时按旧语义把全局开关展开到当时的章节列表）。
+ * 编码为「书籍id|章节id|大纲id|梗概章节id|正文章节id|章节全选|梗概全选|正文全选|卷梗概id|v3」的紧凑字符串，
+ * 存入 [ChatMessage.contextSnapshot]（v2 为「…|v2」，没有卷梗概字段；v1 为
+ * 「书籍id|章节id|大纲id|含梗概|含正文|章节全选」，解析时按旧语义把全局开关展开到当时的章节列表）。
+ *
+ * [volumeSummaryIds] 存的是 [com.lianwenqi.app.data.entity.VolumeSummary.id]（不是 volumeId）：
+ * 卷梗概有版本概念，记录具体生效版本才能精确回显「当时用的是哪一版」，
+ * 恢复选择时再按「仍存在、仍生效、属于当前书」过滤。
  */
 data class ContextSnapshot(
     val bookIds: List<Long> = emptyList(),
@@ -322,10 +339,13 @@ data class ContextSnapshot(
     /** 梗概是否全选：为真时忽略 [summaryChapterIds]，按当前书本的全部章节重新展开 */
     val summaryAll: Boolean = true,
     /** 正文是否全选：为真时忽略 [contentChapterIds]，按当前书本的全部章节重新展开 */
-    val contentAll: Boolean = true
+    val contentAll: Boolean = true,
+    /** 显式选中的整卷梗概版本 id（VolumeSummary.id），与章节材料彼此独立 */
+    val volumeSummaryIds: List<Long> = emptyList()
 ) {
     val isEmpty: Boolean
-        get() = bookIds.isEmpty() && chapterIds.isEmpty() && outlineIds.isEmpty()
+        get() = bookIds.isEmpty() && chapterIds.isEmpty() && outlineIds.isEmpty() &&
+            volumeSummaryIds.isEmpty()
 
     fun encode(): String = listOf(
         bookIds.joinToString(","),
@@ -336,7 +356,8 @@ data class ContextSnapshot(
         if (chapterAll) "1" else "0",
         if (summaryAll) "1" else "0",
         if (contentAll) "1" else "0",
-        "v2"
+        volumeSummaryIds.joinToString(","),
+        "v3"
     ).joinToString("|")
 }
 
@@ -346,6 +367,19 @@ fun decodeContextSnapshot(raw: String): ContextSnapshot {
     val parts = raw.split("|")
     fun ids(part: String?): List<Long> =
         part?.split(",")?.mapNotNull { it.trim().toLongOrNull() } ?: emptyList()
+    if (parts.getOrNull(9) == "v3") {
+        return ContextSnapshot(
+            bookIds = ids(parts[0]),
+            chapterIds = ids(parts[1]),
+            outlineIds = ids(parts[2]),
+            summaryChapterIds = ids(parts[3]),
+            contentChapterIds = ids(parts[4]),
+            chapterAll = parts.getOrNull(5) == "1",
+            summaryAll = parts.getOrNull(6) == "1",
+            contentAll = parts.getOrNull(7) == "1",
+            volumeSummaryIds = ids(parts[8])
+        )
+    }
     if (parts.getOrNull(8) == "v2") {
         return ContextSnapshot(
             bookIds = ids(parts[0]),
@@ -405,6 +439,8 @@ data class SessionPrefix(
      */
     val books: List<PrefixEntry> = emptyList(),
     val outlines: List<PrefixEntry> = emptyList(),
+    /** 已冻结进前缀的整卷梗概条目（F7）：排在章节材料之前、大纲之后 */
+    val volumeSummaries: List<PrefixEntry> = emptyList(),
     val chapters: List<PrefixEntry> = emptyList(),
     /**
      * 上一次发送时勾选的 id 集合（用于判断「本次是否为重新勾选」）：
@@ -413,6 +449,8 @@ data class SessionPrefix(
     val checkedBooks: List<Long> = emptyList(),
     val checkedOutlines: List<Long> = emptyList(),
     val checkedChapters: List<Long> = emptyList(),
+    /** 上一次发送时勾选的整卷梗概版本 id（F7） */
+    val checkedVolumeSummaries: List<Long> = emptyList(),
     /**
      * 已提交过「梗概 / 正文」的章节 id（只增不减）：
      * 前缀冻结、历史尾部追加都算已提交。用于判断本次新勾选的梗概 / 正文是否还需要注入，
@@ -429,6 +467,8 @@ data class SessionPrefix(
     val tailBooks: List<Long> = emptyList(),
     val tailOutlines: List<Long> = emptyList(),
     val tailChapters: List<Long> = emptyList(),
+    /** 已追加到历史尾端的整卷梗概版本 id（F7） */
+    val tailVolumeSummaries: List<Long> = emptyList(),
     /**
      * 「适配性筛选」动态命中的大纲条目 id（只增不减）：
      * 开启适配性筛选后，非常驻化分类下「显示标签」被本章梗概命中的条目，
@@ -476,17 +516,19 @@ data class SessionPrefix(
         renderEntries(
             books = if (includeChapters) books else emptyList(),
             outlines = if (includeOutlines) outlines else emptyList(),
-            chapters = if (includeChapters) chapters else emptyList()
+            chapters = if (includeChapters) chapters else emptyList(),
+            volumeSummaries = if (includeChapters) volumeSummaries else emptyList()
         )
 
     /**
-     * 按「书籍 → 大纲 → 章节」顺序拼接条目文本（大纲按相邻分类去重输出分类标题）。
+     * 按「书籍 → 大纲 → 整卷梗概 → 章节」顺序拼接条目文本（大纲按相邻分类去重输出分类标题）。
      * 既用于前置的参考资料预设，也用于「本轮新勾选内容」追加到历史对话尾端。
      */
     fun renderEntries(
         books: List<PrefixEntry>,
         outlines: List<PrefixEntry>,
-        chapters: List<PrefixEntry>
+        chapters: List<PrefixEntry>,
+        volumeSummaries: List<PrefixEntry> = emptyList()
     ): String {
         val sb = StringBuilder()
         books.forEach { sb.append(it.text) }
@@ -498,6 +540,7 @@ data class SessionPrefix(
             sb.append(entry.text)
             prevCategory = entry.category
         }
+        volumeSummaries.forEach { sb.append(it.text) }
         chapters.forEach { sb.append(it.text) }
         return sb.toString().trimEnd('\n')
     }

@@ -66,6 +66,16 @@ import com.lianwenqi.app.data.entity.Prompt
 import com.lianwenqi.app.data.entity.Provider
 import com.lianwenqi.app.data.entity.StyleTag
 import com.lianwenqi.app.data.entity.Volume
+import com.lianwenqi.app.data.entity.VolumeCompressionSession
+import com.lianwenqi.app.data.entity.VolumeCompressionStatus
+import com.lianwenqi.app.data.entity.VolumeSummary
+import com.lianwenqi.app.data.volume.CompressionEstimateResult
+import com.lianwenqi.app.data.volume.CompressionStartResult
+import com.lianwenqi.app.data.volume.OutlineScopeResolver
+import com.lianwenqi.app.data.volume.VolumeCompressionRequest
+import com.lianwenqi.app.data.volume.VolumeSummarySelection
+import com.lianwenqi.app.data.VolumeCompressionConfig
+import com.lianwenqi.app.data.CompressionSourceMode
 import com.lianwenqi.app.util.AI_CHAPTER_TOOL_PROMPT
 import com.lianwenqi.app.util.AI_OUTLINE_TOOL_PROMPT
 import com.lianwenqi.app.util.AI_TOOL_IMPORT_CHAPTER
@@ -170,12 +180,41 @@ class AiChatViewModel(
     private val _outline = MutableStateFlow<List<OutlineItem>>(emptyList())
     val outline: StateFlow<List<OutlineItem>> = _outline.asStateFlow()
 
-    /** 当前书籍被「常驻化」的大纲分类标签集合（供大纲选择筛选与适配性筛选判断） */
-    private val _pinnedOutlineCategories = MutableStateFlow<Set<String>>(emptySet())
-    val pinnedOutlineCategories: StateFlow<Set<String>> = _pinnedOutlineCategories.asStateFlow()
-
     private val _volumes = MutableStateFlow<List<Volume>>(emptyList())
     val volumes: StateFlow<List<Volume>> = _volumes.asStateFlow()
+
+    // ---------------- F7：整卷梗概上下文资产 ----------------
+
+    private val volumeSummaryRepository = container.volumeSummaryRepository
+    private val compressionCoordinator = container.volumeCompressionCoordinator
+
+    /** 当前书籍的生效卷梗概（每个分卷最多一条生效版本） */
+    private val _activeVolumeSummaries = MutableStateFlow<List<VolumeSummary>>(emptyList())
+    val activeVolumeSummaries: StateFlow<List<VolumeSummary>> = _activeVolumeSummaries.asStateFlow()
+
+    /** 生效卷梗概的过期标记：summaryId → 是否可能已过期（只提示，不自动取消选择） */
+    private val _volumeSummaryStale = MutableStateFlow<Map<Long, Boolean>>(emptyMap())
+    val volumeSummaryStale: StateFlow<Map<Long, Boolean>> = _volumeSummaryStale.asStateFlow()
+
+    /** 正在进行的卷压缩任务：volumeId → 任务（用于分卷行展示进度，不重复创建） */
+    private val _volumeSummaryTasks =
+        MutableStateFlow<Map<Long, VolumeCompressionSession>>(emptyMap())
+    val volumeSummaryTasks: StateFlow<Map<Long, VolumeCompressionSession>> =
+        _volumeSummaryTasks.asStateFlow()
+
+    /** 显式勾选的整卷梗概版本 id（VolumeSummary.id）；与章节材料完全独立 */
+    val selectedVolumeSummaryIds = MutableStateFlow<Set<Long>>(emptySet())
+
+    /** 自动压缩前需要用户选择来源的卷（「每次询问」） */
+    val volumeSummaryAsk = MutableStateFlow<VolumeSummaryAsk?>(null)
+
+    /** 压缩完成、等待确认的候选卷梗概 */
+    val volumeSummaryCandidate = MutableStateFlow<VolumeSummaryCandidate?>(null)
+
+    /** 卷梗概相关的一次性提示（未生成 / 无输入 / 已开始后台压缩等） */
+    val volumeSummaryMessage = MutableStateFlow<String?>(null)
+
+    private val summaryWatchJobs = mutableMapOf<Long, Job>()
 
     /** 会话列表筛选：所选书籍的分卷 / 章节 */
     private val _filterVolumes = MutableStateFlow<List<Volume>>(emptyList())
@@ -1599,7 +1638,8 @@ class AiChatViewModel(
             chapterIds = live.chapterIds,
             outlineIds = live.outlineIds,
             contentChapterIds = live.contentChapterIds.toSet(),
-            summaryChapterIds = live.summaryChapterIds.toSet()
+            summaryChapterIds = live.summaryChapterIds.toSet(),
+            volumeSummaryIds = live.volumeSummaryIds
         )
         return listOf(prefix.reference, context)
             .filter { it.isNotBlank() }
@@ -1979,13 +2019,43 @@ class AiChatViewModel(
             _chapters.value = emptyList()
             _outline.value = emptyList()
             _volumes.value = emptyList()
-            _pinnedOutlineCategories.value = emptySet()
+            _activeVolumeSummaries.value = emptyList()
+            _volumeSummaryStale.value = emptyMap()
+            selectedVolumeSummaryIds.value = emptySet()
         } else {
             _chapters.value = ids.flatMap { bookRepository.getChapters(it) }
             _outline.value = ids.flatMap { outlineRepository.getOutline(it) }
             _volumes.value = ids.flatMap { bookRepository.getVolumes(it) }
-            _pinnedOutlineCategories.value = ids.flatMap { prefs.pinnedOutlineCategories(it) }.toSet()
+            refreshVolumeSummaryState(ids)
         }
+    }
+
+    /** 读取当前书籍的生效卷梗概、过期标记与生效任务，并过滤掉已删除 / 换版的旧选择 */
+    private suspend fun refreshVolumeSummaryState(bookIds: List<Long>) {
+        val summaries = bookIds.flatMap { volumeSummaryRepository.activeListByBook(it) }
+        _activeVolumeSummaries.value = summaries
+        _volumeSummaryStale.value = summaries.associate { summary ->
+            summary.id to (volumeSummaryRepository.checkFreshness(summary.id)?.stale == true)
+        }
+        val tasks = mutableMapOf<Long, VolumeCompressionSession>()
+        bookIds.forEach { bookId ->
+            compressionCoordinator.sessions(bookId)
+                .filter { it.status in VolumeCompressionStatus.active }
+                .forEach { tasks[it.volumeId] = it }
+        }
+        _volumeSummaryTasks.value = tasks
+        val (kept, dropped) = VolumeSummarySelection.pruneSelected(
+            selectedSummaryIds = selectedVolumeSummaryIds.value,
+            bookId = bookIds.singleOrNull(),
+            activeSummaries = summaries
+        )
+        if (kept != selectedVolumeSummaryIds.value) {
+            selectedVolumeSummaryIds.value = kept
+            if (dropped > 0) {
+                volumeSummaryMessage.value = "有 $dropped 个整卷梗概已失效或不属于当前书籍，已从选择中移除"
+            }
+        }
+        tasks.values.forEach { watchVolumeSummaryTask(it.id, it.volumeId) }
     }
 
     /** 会话列表筛选：按书籍加载分卷 / 章节，用于「某卷 / 某章」筛选下拉 */
@@ -2030,23 +2100,64 @@ class AiChatViewModel(
     /** 套用「本书上次选中的章节 / 大纲与梗概正文勾选」 */
     private suspend fun restoreContextMemory() {
         val bookId = memoryBookId() ?: return
-        val mem = prefs.aiContextMemory(bookId) ?: return
-        val chapterIds = _chapters.value.map { it.id }.toSet()
-        val outlineIds = _outline.value.map { it.id }.toSet()
-        val all = contextChapterIds()
-        // 章节是否纳入上下文只看「梗概 / 正文」两列：任一列勾选即自动纳入
-        summaryChapterIds.value =
-            if (mem.summaryAll) all else mem.summaryChapterIds.filter { it in chapterIds }.toSet()
-        contentChapterIds.value =
-            if (mem.contentAll) all else mem.contentChapterIds.filter { it in chapterIds }.toSet()
-        syncSelectedChapters()
-        selectedOutlineIds.value = mem.outlineIds.filter { it in outlineIds }.toSet()
+        val mem = prefs.aiContextMemory(bookId)
+        if (mem != null) {
+            val chapterIds = _chapters.value.map { it.id }.toSet()
+            val outlineIds = _outline.value.map { it.id }.toSet()
+            val all = contextChapterIds()
+            // 章节是否纳入上下文只看「梗概 / 正文」两列：任一列勾选即自动纳入
+            summaryChapterIds.value =
+                if (mem.summaryAll) all else mem.summaryChapterIds.filter { it in chapterIds }.toSet()
+            contentChapterIds.value =
+                if (mem.contentAll) all else mem.contentChapterIds.filter { it in chapterIds }.toSet()
+            syncSelectedChapters()
+            selectedOutlineIds.value = mem.outlineIds.filter { it in outlineIds }.toSet()
+            // 卷梗概是独立资产：只保留仍生效、仍属于本书的版本；失效项提示但不阻塞其余选择
+            val (kept, dropped) = VolumeSummarySelection.pruneSelected(
+                selectedSummaryIds = mem.volumeSummaryIds.toSet(),
+                bookId = bookId,
+                activeSummaries = _activeVolumeSummaries.value
+            )
+            selectedVolumeSummaryIds.value = kept
+            if (dropped > 0) {
+                volumeSummaryMessage.value = "有 $dropped 个整卷梗概已失效，已从选择中移除"
+            }
+        }
         refreshAllFlags()
+        applyVolumeSummaryRecommendations()
     }
 
-    /** 当前章节上下文的「全部章节」：编辑器场景排除当前打开的章节 */
-    private fun contextChapterIds(): Set<Long> =
-        _chapters.value.filter { it.id != fixedChapterId }.map { it.id }.toSet()
+    /**
+     * 前序卷推荐：按「分卷 sortOrder,id」取当前创作卷之前、有当前生效卷梗概的分卷，首次进入默认勾选。
+     * 用户手动取消过的卷记入按目标卷持久化的排除集，之后不会再被自动勾上；
+     * 无法确定当前卷时不擅自推荐。
+     */
+    private suspend fun applyVolumeSummaryRecommendations() {
+        val bookId = memoryBookId() ?: return
+        val target = currentTargetVolumeId() ?: return
+        val summaries = volumeSummaryRepository.activeListByBook(bookId)
+        val excluded = prefs.aiVolumeSummaryReco(bookId)[target].orEmpty()
+        val recommended = VolumeSummarySelection.recommendedVolumeIds(
+            volumes = _volumes.value.filter { it.bookId == bookId },
+            activeSummaries = summaries,
+            targetVolumeId = target,
+            excludedVolumeIds = excluded
+        )
+        if (recommended.isEmpty()) return
+        val recommendedIds = summaries.filter { it.volumeId in recommended }.map { it.id }.toSet()
+        selectedVolumeSummaryIds.value = selectedVolumeSummaryIds.value + recommendedIds
+    }
+
+    /** 当前创作卷：固定章节 → 会话绑定章节；无法确定时返回 null（不推荐） */
+    private suspend fun currentTargetVolumeId(): Long? {
+        val chapterId = fixedChapterId
+            ?: _sessionId.value?.let { chatRepository.getSession(it)?.chapterId }
+            ?: return null
+        return _chapters.value.firstOrNull { it.id == chapterId }?.volumeId
+    }
+
+    /** 当前章节上下文的「全部章节」：当前打开的章节同样可以选入上下文 */
+    private fun contextChapterIds(): Set<Long> = _chapters.value.map { it.id }.toSet()
 
     /** 章节纳入上下文由「梗概 / 正文」两列决定：任一列勾选即自动提交该章节 */
     private fun syncSelectedChapters() {
@@ -2065,7 +2176,7 @@ class AiChatViewModel(
     private suspend fun watchContextChanges() {
         // combine 最多支持 5 个不同类型的数据源，分两组嵌套后再合并，避免类型推断失败
         val signal = combine(
-            combine(selectedChapterIds, selectedOutlineIds, summaryChapterIds) { _, _, _ -> Unit },
+            combine(selectedChapterIds, selectedOutlineIds, summaryChapterIds, selectedVolumeSummaryIds) { _, _, _, _ -> Unit },
             combine(contentChapterIds, chapterAllSelected, summaryAllSelected, contentAllSelected) { _, _, _, _ -> Unit }
         ) { _, _ -> Unit }
         signal.collect {
@@ -2080,7 +2191,8 @@ class AiChatViewModel(
                     contentChapterIds = contentChapterIds.value.toList(),
                     chapterAll = chapterAllSelected.value,
                     summaryAll = summaryAllSelected.value,
-                    contentAll = contentAllSelected.value
+                    contentAll = contentAllSelected.value,
+                    volumeSummaryIds = selectedVolumeSummaryIds.value.toList()
                 )
             )
         }
@@ -2089,6 +2201,9 @@ class AiChatViewModel(
     /** 单选一本书（选书弹窗改为单选）；再次传同一本时取消选择 */
     fun selectBook(id: Long?) {
         selectedBookIds.value = if (id == null) emptySet() else setOf(id)
+        selectedVolumeSummaryIds.value = emptySet()
+        volumeSummaryAsk.value = null
+        volumeSummaryCandidate.value = null
         loadBookContext()
     }
 
@@ -2209,9 +2324,262 @@ class AiChatViewModel(
         refreshAllFlags()
     }
 
-    /** 某卷下参与上下文的章节（排除编辑器当前打开的章节） */
+    /** 某卷下参与上下文的章节（当前打开的章节也可以勾选） */
     private fun volumeChapterIds(volumeId: Long): Set<Long> =
-        _chapters.value.filter { it.volumeId == volumeId && it.id != fixedChapterId }.map { it.id }.toSet()
+        _chapters.value.filter { it.volumeId == volumeId }.map { it.id }.toSet()
+
+    /** 一键勾选 / 取消所有已生成的整卷梗概；只处理已生效版本，不会隐式触发压缩 */
+    fun toggleAllVolumeSummaryAssets() {
+        val all = _activeVolumeSummaries.value.map { it.id }.toSet()
+        if (all.isEmpty()) {
+            volumeSummaryMessage.value = "当前还没有已生成的整卷梗概"
+            return
+        }
+        val select = !all.all { it in selectedVolumeSummaryIds.value }
+        selectedVolumeSummaryIds.value =
+            if (select) selectedVolumeSummaryIds.value + all
+            else selectedVolumeSummaryIds.value - all
+        _activeVolumeSummaries.value.forEach { summary ->
+            persistVolumeSummaryManualDecision(summary.volumeId, select)
+        }
+    }
+
+    // ---------------- F7：整卷梗概勾选 / 推荐 / 自动压缩 ----------------
+
+    /**
+     * 勾选 / 取消某卷的「整卷梗概」：只有已生成的生效版本可以勾选，
+     * 未生成的卷只提供「生成」入口，勾选不会隐式触发压缩。
+     */
+    fun toggleVolumeSummaryContext(volumeId: Long) {
+        val summary = VolumeSummarySelection.activeByVolume(_activeVolumeSummaries.value)[volumeId]
+        if (summary == null) {
+            volumeSummaryMessage.value = "该卷尚未生成整卷梗概，请先生成后再勾选"
+            return
+        }
+        val select = summary.id !in selectedVolumeSummaryIds.value
+        selectedVolumeSummaryIds.value =
+            if (select) selectedVolumeSummaryIds.value + summary.id
+            else selectedVolumeSummaryIds.value - summary.id
+        persistVolumeSummaryManualDecision(volumeId, select)
+    }
+
+    /** 手动生成入口：无论全局自动压缩开关如何，都先让用户选择来源再启动 */
+    fun manualCompressVolumeSummary(volumeId: Long) {
+        volumeSummaryAsk.value = VolumeSummaryAsk(volumeId, volumeTitle(volumeId))
+    }
+
+    /** 来源询问确认：未选择时取消，不创建任务、不改变选择 */
+    fun chooseVolumeSummarySource(volumeId: Long, source: String) {
+        volumeSummaryAsk.value = null
+        viewModelScope.launch { startVolumeSummaryCompression(volumeId, source) }
+    }
+
+    fun cancelVolumeSummaryAsk() {
+        volumeSummaryAsk.value = null
+    }
+
+    fun clearVolumeSummaryMessage() {
+        volumeSummaryMessage.value = null
+    }
+
+    /**
+     * 启动（或关联）整卷压缩：
+     * 先预估并拒绝无输入，同卷已有任务时只关联不重复创建；任务运行在应用级协程域，离开面板不取消。
+     */
+    private suspend fun startVolumeSummaryCompression(volumeId: Long, sourceType: String) {
+        val bookId = _volumes.value.firstOrNull { it.id == volumeId }?.bookId
+            ?: _activeVolumeSummaries.value.firstOrNull { it.volumeId == volumeId }?.bookId
+            ?: selectedBookIds.value.singleOrNull()
+            ?: return
+        val config = prefs.compressionConfig.first().normalized()
+        val modelId = config.compressionModelId
+            .takeIf { id -> models.value.any { it.id == id } }
+            ?: activeModelId.value.takeIf { id -> models.value.any { it.id == id } }
+            ?: models.value.firstOrNull()?.id
+            ?: 0L
+        if (modelId <= 0L) {
+            volumeSummaryMessage.value = "请先在设置中配置并选择一个模型"
+            return
+        }
+        compressionCoordinator.activeSession(volumeId)?.let { existing ->
+            watchVolumeSummaryTask(existing.id, volumeId)
+            if (existing.status == VolumeCompressionStatus.AWAITING_CONFIRMATION) {
+                showVolumeSummaryCandidate(existing)
+            } else {
+                volumeSummaryMessage.value = "该卷已有压缩任务，已关联进度"
+            }
+            return
+        }
+        val request = VolumeCompressionRequest(
+            bookId = bookId,
+            volumeId = volumeId,
+            modelId = modelId,
+            sourceType = sourceType,
+            maxInputChars = config.maxCharsPerRequest,
+            targetOutputChars = config.outputChars
+        )
+        when (val estimated = compressionCoordinator.estimate(request)) {
+            is CompressionEstimateResult.NoInput -> {
+                volumeSummaryMessage.value =
+                    "该卷没有可用的${CompressionSourceMode.label(sourceType)}输入，无法生成整卷梗概"
+            }
+
+            is CompressionEstimateResult.Failed -> {
+                volumeSummaryMessage.value = estimated.failure.message
+            }
+
+            is CompressionEstimateResult.Ready -> {
+                val scopeSnapshot = if (config.outlineUpdateEnabled) {
+                    resolveVolumeOutlineScope(bookId, config)
+                } else {
+                    ""
+                }
+                when (
+                    val started = compressionCoordinator.start(
+                        request = request,
+                        configSnapshot = VolumeCompressionConfig.encode(config),
+                        outlineScopeSnapshot = scopeSnapshot
+                    )
+                ) {
+                    is CompressionStartResult.Started -> {
+                        watchVolumeSummaryTask(started.sessionId, volumeId)
+                        val missing = estimated.audit.missingChapterCount
+                        val missingTip = if (missing > 0) "，跳过缺失章节 $missing 章" else ""
+                        volumeSummaryMessage.value =
+                            "已在后台生成整卷梗概（预估输入约 ${estimated.estimate.inputTokens} Token$missingTip）"
+                    }
+
+                    is CompressionStartResult.Existing -> {
+                        watchVolumeSummaryTask(started.sessionId, volumeId)
+                        volumeSummaryMessage.value = "该卷已有压缩任务，已关联进度"
+                    }
+
+                    is CompressionStartResult.Rejected ->
+                        volumeSummaryMessage.value = started.message
+                }
+            }
+        }
+    }
+
+    /** 大纲更新开启时，按最新条目冻结目标 ID 快照；关闭时返回空字符串，不产生大纲请求 */
+    private suspend fun resolveVolumeOutlineScope(
+        bookId: Long,
+        config: VolumeCompressionConfig
+    ): String = OutlineScopeResolver.resolve(
+        items = outlineRepository.getOutline(bookId),
+        scopeMode = config.outlineScopeMode
+    ).encodeIds()
+
+    /** 关联任务并观察进度：完成前不加入选择，候选必须由用户确认 */
+    private fun watchVolumeSummaryTask(sessionId: Long, volumeId: Long) {
+        if (summaryWatchJobs[sessionId]?.isActive == true) return
+        summaryWatchJobs[sessionId] = viewModelScope.launch {
+            compressionCoordinator.observeSession(sessionId).collect { session ->
+                if (session == null) return@collect
+                _volumeSummaryTasks.value = if (session.status in VolumeCompressionStatus.active) {
+                    _volumeSummaryTasks.value + (volumeId to session)
+                } else {
+                    _volumeSummaryTasks.value - volumeId
+                }
+                when (session.status) {
+                    VolumeCompressionStatus.AWAITING_CONFIRMATION ->
+                        showVolumeSummaryCandidate(session)
+
+                    VolumeCompressionStatus.FAILED -> {
+                        summaryWatchJobs.remove(sessionId)
+                        volumeSummaryMessage.value =
+                            "整卷梗概压缩失败：${session.errorMessage.ifBlank { "未知错误" }}"
+                    }
+
+                    VolumeCompressionStatus.CANCELLED,
+                    VolumeCompressionStatus.COMPLETED -> summaryWatchJobs.remove(sessionId)
+
+                    else -> Unit
+                }
+            }
+        }
+    }
+
+    private suspend fun showVolumeSummaryCandidate(session: VolumeCompressionSession) {
+        val candidateId = session.candidateSummaryId ?: return
+        if (volumeSummaryCandidate.value?.summaryId == candidateId) return
+        val detail = volumeSummaryRepository.getDetail(candidateId) ?: return
+        volumeSummaryCandidate.value = VolumeSummaryCandidate(
+            sessionId = session.id,
+            volumeId = session.volumeId,
+            volumeTitle = volumeTitle(session.volumeId),
+            summaryId = candidateId,
+            content = detail.effectiveContent
+        )
+    }
+
+    /**
+     * 确认候选：「确认使用」才把该卷加入当前选择；
+     * 编辑内容在确认生效后写入（候选本身不可编辑）。F6 大纲写入仍由独立授权触发。
+     */
+    fun confirmVolumeSummaryCandidate(editedContent: String) = viewModelScope.launch {
+        val candidate = volumeSummaryCandidate.value ?: return@launch
+        val detail = volumeSummaryRepository.getDetail(candidate.summaryId)
+        val ok = compressionCoordinator.confirmCandidate(candidate.sessionId)
+        if (!ok) {
+            volumeSummaryMessage.value = "确认失败，候选可能已失效，请重新生成"
+            return@launch
+        }
+        val active = volumeSummaryRepository.activeOfVolume(candidate.volumeId)
+        if (active == null) {
+            volumeSummaryMessage.value = "确认后未找到生效卷梗概"
+            return@launch
+        }
+        val trimmed = editedContent.trim()
+        if (trimmed.isNotBlank() && trimmed != detail?.modelContent?.trim()) {
+            volumeSummaryRepository.saveUserContent(active.id, trimmed)
+        }
+        volumeSummaryCandidate.value = null
+        refreshVolumeSummaryState(
+            selectedBookIds.value.toList().ifEmpty { listOf(active.bookId) }
+        )
+        selectedVolumeSummaryIds.value = selectedVolumeSummaryIds.value + active.id
+        volumeSummaryMessage.value = "已使用该卷梗概并加入上下文"
+        // F6：卷梗概确认与大纲写入是两次授权，只有配置开启时才在确认后发起分析；
+        // 询问模式只生成差异，不自动写入任何条目
+        val session = compressionCoordinator.session(candidate.sessionId)
+        val config = session?.configSnapshot?.let { VolumeCompressionConfig.decode(it) }
+        if (config?.outlineUpdateEnabled == true) {
+            container.volumeOutlineUpdateCoordinator.startAsync(candidate.sessionId)
+            if (config.outlineUpdateMode ==
+                com.lianwenqi.app.data.CompressionOutlineUpdateMode.ASK
+            ) {
+                volumeSummaryMessage.value =
+                    "已加入上下文；大纲差异待确认，可在分卷压缩页查看"
+            }
+        }
+    }
+
+    /** 取消 / 放弃候选：不改变选择，也不发出大纲请求 */
+    fun discardVolumeSummaryCandidate() = viewModelScope.launch {
+        val candidate = volumeSummaryCandidate.value ?: return@launch
+        compressionCoordinator.discardCandidate(candidate.sessionId)
+        volumeSummaryCandidate.value = null
+        volumeSummaryMessage.value = "已取消，该卷未加入上下文"
+    }
+
+    /** 用户手动选择 / 取消：写入按「书 + 目标卷」的记忆，避免下次推荐覆盖手动决定 */
+    private fun persistVolumeSummaryManualDecision(volumeId: Long, selected: Boolean) {
+        val bookId = memoryBookId() ?: return
+        viewModelScope.launch {
+            val target = currentTargetVolumeId() ?: return@launch
+            val store = prefs.aiVolumeSummaryReco(bookId).toMutableMap()
+            store[target] = VolumeSummarySelection.applyManualDecision(
+                excluded = store[target].orEmpty(),
+                volumeId = volumeId,
+                selected = selected
+            )
+            prefs.setAiVolumeSummaryReco(bookId, store)
+        }
+    }
+
+    private fun volumeTitle(volumeId: Long): String =
+        _volumes.value.firstOrNull { it.id == volumeId }?.title.orEmpty()
 
     fun selectAllOutline() {
         val all = _outline.value.map { it.id }.toSet()
@@ -2329,28 +2697,25 @@ class AiChatViewModel(
         return id
     }
 
-    /** 新建跟书会话后的默认上下文：章节与大纲分别按各自的「首轮全选」开关处理 */
+    /** 新建跟书会话后的默认上下文：章节梗概 / 章节正文 / 大纲按各自的「首轮全选」开关处理 */
     private suspend fun applyNewBookSessionDefaults(bookId: Long) {
         loadBookContextNow(bookId)
-        val all = contextChapterIds()
-        if (prefs.aiChapterFirstRound.first()) {
-            // 「首轮全选章节」：全选章节并把梗概全部纳入（正文默认不纳入）
-            summaryChapterIds.value = all
-            contentChapterIds.value = emptySet()
-        } else {
-            summaryChapterIds.value = emptySet()
-            contentChapterIds.value = emptySet()
-        }
+        // 首轮全选章节一律排除当前所在章，避免与本轮「本章」内容重复
+        val firstRound = _chapters.value
+            .filter { it.id != fixedChapterId }
+            .map { it.id }
+            .toSet()
+        summaryChapterIds.value = if (prefs.aiChapterSummaryFirstRound.first()) firstRound else emptySet()
+        contentChapterIds.value = if (prefs.aiChapterContentFirstRound.first()) firstRound else emptySet()
         syncSelectedChapters()
         refreshAllFlags()
         if (prefs.aiOutlineFirstRound.first()) {
             // 「首轮全选大纲」：把大纲写进首轮前缀，后续轮次靠前缀复用不再改写。
-            // 开启「适配性筛选」时改为只全选「常驻化」分类下的全部内容，
-            // 非常驻化分类的条目改由发送时按本章梗概动态匹配注入。
+            // 开启「适配性筛选」时改为只全选「常驻化」的条目，
+            // 非常驻化条目改由发送时按本章梗概动态匹配注入。
             val adaptive = prefs.prefixAdaptiveFilterEnabled.first()
-            val pinned = _pinnedOutlineCategories.value
             selectedOutlineIds.value = _outline.value
-                .filter { !adaptive || it.category in pinned }
+                .filter { !adaptive || it.pinned }
                 .map { it.id }
                 .toSet()
         } else {
@@ -2374,8 +2739,14 @@ class AiChatViewModel(
         // 切换会话同样先终止上一会话的在途任务，避免生成态 / 流式卡片跟到新会话
         abortInFlightWork()
         _sessionId.value = id
+        volumeSummaryAsk.value = null
+        volumeSummaryCandidate.value = null
         viewModelScope.launch {
-            chatRepository.getSession(id)?.bookId?.let { loadBookContext(it) }
+            chatRepository.getSession(id)?.bookId?.let { bookId ->
+                loadBookContextNow(bookId)
+                // 目标卷随会话绑定的章节变化：按新目标卷重新计算前序卷推荐（手动排除仍保留）
+                applyVolumeSummaryRecommendations()
+            }
         }
     }
 
@@ -2701,7 +3072,8 @@ class AiChatViewModel(
         contentChapterIds = contentChapterIds.value.toList(),
         chapterAll = chapterAllSelected.value,
         summaryAll = summaryAllSelected.value,
-        contentAll = contentAllSelected.value
+        contentAll = contentAllSelected.value,
+        volumeSummaryIds = selectedVolumeSummaryIds.value.toList()
     )
 
     /** 点击编辑某条已发送的消息：恢复它的正文与当时选好的上下文 */
@@ -2727,6 +3099,7 @@ class AiChatViewModel(
         selectedOutlineIds.value = snapshot.outlineIds.toSet()
         summaryChapterIds.value = snapshot.summaryChapterIds.toSet()
         contentChapterIds.value = snapshot.contentChapterIds.toSet()
+        selectedVolumeSummaryIds.value = snapshot.volumeSummaryIds.toSet()
         syncSelectedChapters()
         viewModelScope.launch {
             loadBookContextNow(snapshot.bookIds.firstOrNull())
@@ -2734,6 +3107,16 @@ class AiChatViewModel(
             if (snapshot.chapterAll) {
                 if (snapshot.summaryAll) summaryChapterIds.value = all
                 if (snapshot.contentAll) contentChapterIds.value = all
+            }
+            // 历史选择里的卷梗概：只保留仍生效、仍属于该书的版本，避免发送悬空内容
+            val (kept, dropped) = VolumeSummarySelection.pruneSelected(
+                selectedSummaryIds = snapshot.volumeSummaryIds.toSet(),
+                bookId = snapshot.bookIds.singleOrNull(),
+                activeSummaries = _activeVolumeSummaries.value
+            )
+            selectedVolumeSummaryIds.value = kept
+            if (dropped > 0) {
+                volumeSummaryMessage.value = "有 $dropped 个整卷梗概已失效，已从选择中移除"
             }
             syncSelectedChapters()
             refreshAllFlags()
@@ -2831,7 +3214,8 @@ class AiChatViewModel(
         chapterIds = snapshot.chapterIds,
         outlineIds = snapshot.outlineIds,
         contentChapterIds = snapshot.contentChapterIds.toSet(),
-        summaryChapterIds = snapshot.summaryChapterIds.toSet()
+        summaryChapterIds = snapshot.summaryChapterIds.toSet(),
+        volumeSummaryIds = snapshot.volumeSummaryIds
     )
 
     /**
@@ -2968,11 +3352,13 @@ class AiChatViewModel(
         // 本轮「重新勾选」的新条目（渲染后追加到历史对话尾端，成为历史的一部分）
         val newBooks = mutableListOf<PrefixEntry>()
         val newOutlines = mutableListOf<PrefixEntry>()
+        val newVolumeSummaries = mutableListOf<PrefixEntry>()
         val newChapters = mutableListOf<PrefixEntry>()
         var contextLog = ""
 
         if (contextOn) {
             val bookIds = selectedBookIds.value.toList()
+            val volumeSummaryIds = selectedVolumeSummaryIds.value.toList()
             val chapterIds =
                 (if (chapterAllSelected.value) contextChapterIds() else selectedChapterIds.value).toList()
             // 已提交过梗概 / 正文的章节：前缀冻结与历史尾部追加都算，
@@ -2984,6 +3370,10 @@ class AiChatViewModel(
                 bookIds.forEach { bid ->
                     chatRepository.renderBookEntry(bid)
                         ?.let { sp = sp.copy(books = sp.books.upsert(PrefixEntry(bid, it))) }
+                }
+                volumeSummaryIds.forEach { sid ->
+                    chatRepository.renderVolumeSummaryEntry(sid)
+                        ?.let { sp = sp.copy(volumeSummaries = sp.volumeSummaries.upsert(PrefixEntry(sid, it))) }
                 }
                 chapterIds.forEach { cid ->
                     val summaryOn = chapterSummaryOn(cid)
@@ -3016,6 +3406,20 @@ class AiChatViewModel(
                         }
                     }
                 }
+                volumeSummaryIds.filterNot { it in sp.checkedVolumeSummaries }.forEach { sid ->
+                    when {
+                        // 已冻结：重新勾选后对比内容原位替换（保持位置）
+                        sp.volumeSummaries.any { it.id == sid } ->
+                            chatRepository.renderVolumeSummaryEntry(sid)
+                                ?.let { sp = sp.copy(volumeSummaries = sp.volumeSummaries.upsert(PrefixEntry(sid, it))) }
+                        // 已追加过尾部：不重复追加
+                        sid in sp.tailVolumeSummaries -> Unit
+                        else -> chatRepository.renderVolumeSummaryEntry(sid)?.let { text ->
+                            newVolumeSummaries += PrefixEntry(sid, text)
+                            sp = sp.copy(tailVolumeSummaries = sp.tailVolumeSummaries + sid)
+                        }
+                    }
+                }
                 chapterIds.forEach { cid ->
                     val needSummary = chapterSummaryOn(cid) && cid !in summarySubmitted
                     val needContent = chapterContentOn(cid) && cid !in contentSubmitted
@@ -3035,20 +3439,34 @@ class AiChatViewModel(
             sp = sp.copy(
                 checkedBooks = bookIds,
                 checkedChapters = chapterIds,
+                checkedVolumeSummaries = volumeSummaryIds,
                 summaryChapters = summarySubmitted.toList(),
                 contentChapters = contentSubmitted.toList()
             )
-            // 日志回显要在首轮清空勾选之前快照：合并「已冻结在前缀里的 + 本轮尾部追加的」章节，
+            // 日志回显要在首轮清空勾选之前快照：合并「已冻结在前缀里的 + 本轮尾部追加的」卷梗概与章节，
             // 前缀化关闭时直接用当前勾选实时渲染（与请求实际注入的内容同源）
             contextLog = if (contextOn) {
-                val seen = LinkedHashSet<Long>()
-                val texts = mutableListOf<String>()
-                (sp.chapters + newChapters).forEach { entry ->
-                    if (seen.add(entry.id)) texts += entry.text
+                val volumeSeen = LinkedHashSet<Long>()
+                val volumeTexts = mutableListOf<String>()
+                (sp.volumeSummaries + newVolumeSummaries).forEach { entry ->
+                    if (volumeSeen.add(entry.id)) volumeTexts += entry.text
                 }
-                if (texts.isEmpty()) renderCheckedChapters(chapterIds) else texts.joinToString("\n\n")
+                val seen = LinkedHashSet<Long>()
+                val chapterTexts = mutableListOf<String>()
+                (sp.chapters + newChapters).forEach { entry ->
+                    if (seen.add(entry.id)) chapterTexts += entry.text
+                }
+                val rendered = if (chapterTexts.isEmpty()) {
+                    listOf(renderCheckedChapters(chapterIds))
+                } else {
+                    chapterTexts
+                }
+                (volumeTexts + rendered).filter { it.isNotBlank() }.joinToString("\n\n")
             } else {
-                renderCheckedChapters(chapterIds)
+                val volumeTexts = renderVolumeSummaryEntries(volumeSummaryIds)
+                (listOf(volumeTexts) + listOf(renderCheckedChapters(chapterIds)))
+                    .filter { it.isNotBlank() }
+                    .joinToString("\n\n")
             }
         }
 
@@ -3098,22 +3516,31 @@ class AiChatViewModel(
         if (session != null && sp.encode() != original) {
             chatRepository.updateSessionPrefix(sid, sp.encode())
         }
-        // 「首轮全选大纲 / 首轮全选章节」：对应内容已全部冻结进会话前缀，发完这一轮就把对应勾选清掉，
+        // 「首轮全选大纲 / 章节梗概 / 章节正文」：对应内容已全部冻结进会话前缀，发完这一轮就把对应勾选清掉，
         // 第二轮起默认不勾选（再次勾选才会作为「新增参考资料」追加，不会重复提交前缀里的内容）。
         // 只在对应前缀化开关开启时清空：关闭前缀化时勾选每轮都要实时注入，不能清。
         if (firstTime) {
-            if (contextOn && prefs.aiChapterFirstRound.first()) {
-                summaryChapterIds.value = emptySet()
-                contentChapterIds.value = emptySet()
-                syncSelectedChapters()
-                refreshAllFlags()
+            if (contextOn) {
+                var chaptersChanged = false
+                if (prefs.aiChapterSummaryFirstRound.first() && summaryChapterIds.value.isNotEmpty()) {
+                    summaryChapterIds.value = emptySet()
+                    chaptersChanged = true
+                }
+                if (prefs.aiChapterContentFirstRound.first() && contentChapterIds.value.isNotEmpty()) {
+                    contentChapterIds.value = emptySet()
+                    chaptersChanged = true
+                }
+                if (chaptersChanged) {
+                    syncSelectedChapters()
+                    refreshAllFlags()
+                }
             }
             if (outlineOn && prefs.aiOutlineFirstRound.first()) {
                 selectedOutlineIds.value = emptySet()
                 refreshAllFlags()
             }
         }
-        val appended = sp.renderEntries(newBooks, newOutlines, newChapters)
+        val appended = sp.renderEntries(newBooks, newOutlines, newChapters, newVolumeSummaries)
         // 历史梗概 / 历史正文：每次发送按本会话已绑定章节重算（不冻结成快照）。
         // 排除本次请求所在章节（生成时为正在生成的章节；普通聊天取当前章节，没有则排除 0）。
         val historyExcludeChapterId = excludeChapterId ?: currentRoundChapterId()
@@ -3151,13 +3578,12 @@ class AiChatViewModel(
 
     /**
      * 「适配性筛选」命中判定（聊天发送与生成正文共用同一套规则）：
-     * 非常驻化分类下、「显示标签」被 [summary] 命中的大纲条目 id；梗概为空时返回空。
+     * 未常驻化、「显示标签」被 [summary] 命中的大纲条目 id；梗概为空时返回空。
      */
     private fun adaptiveMatchedOutlineIds(summary: String): List<Long> {
         if (summary.isBlank()) return emptyList()
-        val pinned = _pinnedOutlineCategories.value
         return _outline.value
-            .filter { it.category !in pinned }
+            .filter { !it.pinned }
             .filter { item ->
                 val head = outlineHeadOf(item)
                 head.isNotBlank() && summary.contains(head)
@@ -3183,11 +3609,19 @@ class AiChatViewModel(
         val sp = SessionPrefix.decode(session?.prefix.orEmpty())
         val checkedIds =
             (if (chapterAllSelected.value) contextChapterIds() else selectedChapterIds.value).toList()
-        val contextLog = if (contextOn && sp.chapters.isNotEmpty()) {
+        val volumeSummaryLog = if (contextOn && sp.volumeSummaries.isNotEmpty()) {
+            sp.volumeSummaries.joinToString("\n\n") { it.text }
+        } else {
+            renderVolumeSummaryEntries(selectedVolumeSummaryIds.value.toList())
+        }
+        val chapterLog = if (contextOn && sp.chapters.isNotEmpty()) {
             sp.chapters.joinToString("\n\n") { it.text }
         } else {
             renderCheckedChapters(checkedIds)
         }
+        val contextLog = listOf(volumeSummaryLog, chapterLog)
+            .filter { it.isNotBlank() }
+            .joinToString("\n\n")
         val historyBlocks = if (sp.historySummaryOn || sp.historyContentOn) {
             buildHistoryChapterBlocks(sid, session, excludeChapterId ?: currentRoundChapterId())
         } else {
@@ -3237,6 +3671,14 @@ class AiChatViewModel(
         )
     }
 
+    /** 按当前勾选渲染整卷梗概（带真实分卷标题的来源标记），供「提交日志」回显 */
+    private suspend fun renderVolumeSummaryEntries(summaryIds: List<Long>): String {
+        if (summaryIds.isEmpty()) return ""
+        return summaryIds.mapNotNull { chatRepository.renderVolumeSummaryEntry(it)?.trimEnd('\n') }
+            .filter { it.isNotBlank() }
+            .joinToString("\n\n")
+    }
+
     /** 按当前勾选渲染章节上下文（梗概 / 正文），供「提交日志」回显 */
     private suspend fun renderCheckedChapters(chapterIds: List<Long>): String {
         val texts = mutableListOf<String>()
@@ -3284,6 +3726,8 @@ class AiChatViewModel(
             chapterIds = chapterIds,
             summaryChapterIds = summaryIds,
             contentChapterIds = contentIds,
+            // 卷梗概跟随「章节上下文前缀化」：开启时由冻结前缀承载，实时上下文不再重复注入
+            volumeSummaryIds = if (contextOn) emptyList() else snap.volumeSummaryIds,
             outlineIds = if (outlineOn) emptyList() else snap.outlineIds,
             chapterAll = if (contextOn) false else snap.chapterAll
         )
@@ -3478,6 +3922,18 @@ sealed interface PendingImport {
 
 /** 「正文有更新，是否向量化到最新章节？」弹窗的挂起请求（保留原发送参数，应答后继续发送） */
 data class MemoryVectorizeAsk(val overrideText: String?, val systemPrompt: String)
+
+/** 勾选未生成卷梗概、需要用户先选择压缩来源的挂起请求 */
+data class VolumeSummaryAsk(val volumeId: Long, val volumeTitle: String)
+
+/** 压缩完成、等待用户确认「使用 / 编辑后使用 / 取消」的候选卷梗概 */
+data class VolumeSummaryCandidate(
+    val sessionId: Long,
+    val volumeId: Long,
+    val volumeTitle: String,
+    val summaryId: Long,
+    val content: String
+)
 
 /** 记忆检索进行状态：界面据此显示「正在检索中」/「检索完成」 */
 enum class MemorySearchState {

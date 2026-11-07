@@ -44,6 +44,7 @@ import com.lianwenqi.app.ui.screens.StyleSampleManageScreen
 import com.lianwenqi.app.ui.screens.StyleSampleStyleScreen
 import com.lianwenqi.app.ui.screens.StyleSettingsScreen
 import com.lianwenqi.app.ui.screens.StyleTagLibraryScreen
+import com.lianwenqi.app.ui.screens.VolumeCompressionSettingsScreen
 
 object Routes {
     const val SHELL = "shell"
@@ -73,6 +74,8 @@ object Routes {
     const val STYLE_SAMPLE_STYLE = "stylesample/{sampleId}"
     const val UPDATE = "update"
     const val MANUAL = "manual"
+    /** 分卷压缩全局默认设置 */
+    const val COMPRESSION_SETTINGS = "compression"
 
     fun book(id: Long) = "book/$id"
     fun editor(bookId: Long, chapterId: Long) = "editor/$bookId/$chapterId"
@@ -101,7 +104,10 @@ fun RootNavHost() {
         composable(Routes.SHELL) { MainShell(rootNav) }
 
         composable(Routes.AI_TOOLS) {
-            AiToolsScreen(onBack = { rootNav.popBackStack() })
+            AiToolsScreen(
+                onBack = { rootNav.popBackStack() },
+                onOpenCompression = { rootNav.navigate(Routes.COMPRESSION_SETTINGS) }
+            )
         }
 
         composable(Routes.PREFIX_MANAGE) {
@@ -225,6 +231,10 @@ fun RootNavHost() {
 
         composable(Routes.MANUAL) {
             ManualGuideScreen(onBack = { rootNav.popBackStack() })
+        }
+
+        composable(Routes.COMPRESSION_SETTINGS) {
+            VolumeCompressionSettingsScreen(onBack = { rootNav.popBackStack() })
         }
 
         composable(

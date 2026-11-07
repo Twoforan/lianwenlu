@@ -20,8 +20,18 @@ data class BookSummary(
     val chapterCount: Int
 )
 
-/** 书籍领域：书籍、分卷、章节、书籍分组 */
-class BookRepository(private val db: AppDatabase) {
+/**
+ * 书籍领域：书籍、分卷、章节、书籍分组。
+ *
+ * [beforeDeleteBook] / [beforeDeleteVolume] 由 AppContainer 注入压缩任务协调器：
+ * 删除前先安全取消在途任务；即使没有注入，下面的事务也会直接清理任务表，
+ * 不会留下指向已删书 / 卷的孤儿任务。
+ */
+class BookRepository(
+    private val db: AppDatabase,
+    private val beforeDeleteBook: suspend (Long) -> Unit = {},
+    private val beforeDeleteVolume: suspend (Long, Long) -> Unit = { _, _ -> }
+) {
     private val bookDao = db.bookDao()
     private val volumeDao = db.volumeDao()
     private val chapterDao = db.chapterDao()
@@ -30,6 +40,10 @@ class BookRepository(private val db: AppDatabase) {
     private val styleProfileDao = db.styleProfileDao()
     // 删除章节 / 书籍 / 合并章节时需要同步清理其长期记忆向量块，避免已删内容仍被检索召回
     private val memoryChunkDao = db.memoryChunkDao()
+    // 整卷梗概独立于章节存储，删书 / 删卷时必须显式级联清理
+    private val volumeSummaryDao = db.volumeSummaryDao()
+    // 压缩任务与批次同样独立存储，删除书 / 卷时必须级联清理
+    private val volumeCompressionDao = db.volumeCompressionDao()
 
     // ---------------- 书架 ----------------
 
@@ -100,13 +114,21 @@ class BookRepository(private val db: AppDatabase) {
         bookId
     }
 
-    suspend fun deleteBook(bookId: Long) = db.withTransaction {
-        chapterDao.getByBook(bookId).forEach { chapterDao.deleteById(it.id) }
-        volumeDao.getByBook(bookId).forEach { volumeDao.deleteById(it.id) }
-        outlineDao.getByBook(bookId).forEach { outlineDao.deleteById(it.id) }
-        // 长期记忆向量块按书籍清理，防止删书后仍被检索召回
-        memoryChunkDao.deleteByBook(bookId)
-        bookDao.deleteById(bookId)
+    suspend fun deleteBook(bookId: Long) {
+        beforeDeleteBook(bookId)
+        db.withTransaction {
+            chapterDao.getByBook(bookId).forEach { chapterDao.deleteById(it.id) }
+            volumeDao.getByBook(bookId).forEach { volumeDao.deleteById(it.id) }
+            outlineDao.getByBook(bookId).forEach { outlineDao.deleteById(it.id) }
+            // 长期记忆向量块按书籍清理，防止删书后仍被检索召回
+            memoryChunkDao.deleteByBook(bookId)
+            // 卷梗概（含候选与归档）随书删除，避免留下指向已删卷的孤儿记录
+            volumeSummaryDao.deleteByBook(bookId)
+            // 压缩任务与批次随书清理（在途任务已在事务前由协调器取消）
+            volumeCompressionDao.deleteBatchesByBook(bookId)
+            volumeCompressionDao.deleteSessionsByBook(bookId)
+            bookDao.deleteById(bookId)
+        }
     }
 
     /**
@@ -257,19 +279,27 @@ class BookRepository(private val db: AppDatabase) {
      * 不会出现「卷没了、章节还在」的孤儿状态；删除后全书章节序号归一化为连续。
      * 返回被删除的章节数（分卷不存在时返回 0）。
      */
-    suspend fun deleteVolume(volumeId: Long): Int = db.withTransaction {
-        val volume = volumeDao.getById(volumeId) ?: return@withTransaction 0
+    suspend fun deleteVolume(volumeId: Long): Int {
+        val volume = volumeDao.getById(volumeId) ?: return 0
         val bookId = volume.bookId
-        val doomed = chapterDao.getByBook(bookId).filter { it.volumeId == volumeId }
-        doomed.forEach { memoryChunkDao.deleteByChapter(it.id) }
-        doomed.forEach { chapterDao.deleteById(it.id) }
-        volumeDao.deleteById(volumeId)
-        normalizeChapterOrder(bookId)
-        // 分卷序号同样归一化，避免目录顺序出现跳号
-        volumeDao.getByBook(bookId).forEachIndexed { i, v ->
-            if (v.sortOrder != i) volumeDao.setOrder(v.id, i)
+        beforeDeleteVolume(bookId, volumeId)
+        return db.withTransaction {
+            val doomed = chapterDao.getByBook(bookId).filter { it.volumeId == volumeId }
+            doomed.forEach { memoryChunkDao.deleteByChapter(it.id) }
+            doomed.forEach { chapterDao.deleteById(it.id) }
+            // 卷梗概属于该卷，随卷一起删除（候选与归档不残留）
+            volumeSummaryDao.deleteByVolume(volumeId)
+            // 该卷的压缩任务与批次一并清理
+            volumeCompressionDao.deleteBatchesByVolume(volumeId)
+            volumeCompressionDao.deleteSessionsByVolume(volumeId)
+            volumeDao.deleteById(volumeId)
+            normalizeChapterOrder(bookId)
+            // 分卷序号同样归一化，避免目录顺序出现跳号
+            volumeDao.getByBook(bookId).forEachIndexed { i, v ->
+                if (v.sortOrder != i) volumeDao.setOrder(v.id, i)
+            }
+            doomed.size
         }
-        doomed.size
     }
 
     suspend fun renameVolume(volume: Volume, title: String) = volumeDao.update(volume.copy(title = title))

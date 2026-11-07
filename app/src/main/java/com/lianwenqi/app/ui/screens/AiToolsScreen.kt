@@ -218,7 +218,7 @@ class AiToolsViewModel(private val container: AppContainer) : ViewModel() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AiToolsScreen(onBack: () -> Unit) {
+fun AiToolsScreen(onBack: () -> Unit, onOpenCompression: () -> Unit = {}) {
     val vm = appViewModel { AiToolsViewModel(it) }
     val outlineEnabled by vm.outlineToolEnabled.collectAsState()
     val chapterEnabled by vm.chapterToolEnabled.collectAsState()
@@ -454,6 +454,32 @@ fun AiToolsScreen(onBack: () -> Unit) {
                         Text("生成设置", fontWeight = FontWeight.SemiBold)
                         Text(
                             "生成梗概 / 生成正文的字数范围、限定范围与同时生成梗概",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Icon(
+                        Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            // 分卷压缩：整卷梗概的默认来源、完成后是否更新大纲，以及大纲更新范围
+            Card(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable(onClick = onOpenCompression)
+                        .padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("分卷压缩", fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "整卷梗概的默认来源、完成后是否更新大纲，以及大纲更新范围",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )

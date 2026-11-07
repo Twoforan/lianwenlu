@@ -187,7 +187,8 @@ interface ChatGateway {
         chapterIds: List<Long>,
         outlineIds: List<Long>,
         contentChapterIds: Set<Long>,
-        summaryChapterIds: Set<Long>
+        summaryChapterIds: Set<Long>,
+        volumeSummaryIds: List<Long>
     ): String
 
     suspend fun deactivateVariants(replyToId: Long)
@@ -323,7 +324,8 @@ class SendChatMessageUseCase(
             chapterIds = sel.chapterIds,
             outlineIds = sel.outlineIds,
             contentChapterIds = sel.contentChapterIds.toSet(),
-            summaryChapterIds = sel.summaryChapterIds.toSet()
+            summaryChapterIds = sel.summaryChapterIds.toSet(),
+            volumeSummaryIds = sel.volumeSummaryIds
         )
         // 会话前缀（字面文本，跨轮逐字节稳定）拼在实时上下文前面，共同作为「参考资料」
         val reference = listOf(request.referencePrefix, context)

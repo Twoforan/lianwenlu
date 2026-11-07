@@ -65,6 +65,30 @@ class BookDetailViewModel(
 
     fun deleteOutline(id: Long) = viewModelScope.launch { outlineRepository.deleteOutline(id) }
 
+    /** 切换条目的「可更新」标记；「仅可更新大纲」只处理带闪电标记的条目 */
+    fun toggleOutlineUpdatable(item: OutlineItem) = viewModelScope.launch {
+        outlineRepository.setOutlineUpdatable(item.id, !item.updatable)
+    }
+
+    /** 切换条目的「常驻化」标记 */
+    fun toggleOutlinePinned(item: OutlineItem) = viewModelScope.launch {
+        outlineRepository.setOutlinePinned(item.id, !item.pinned)
+    }
+
+    /** 整类切换「可更新」：未全部开启时全部开启，否则全部关闭 */
+    fun toggleCategoryUpdatable(category: String) = viewModelScope.launch {
+        val items = outlineRepository.getOutline(bookId).filter { it.category == category }
+        if (items.isEmpty()) return@launch
+        outlineRepository.setCategoryUpdatable(bookId, category, !items.all { it.updatable })
+    }
+
+    /** 整类切换「常驻化」：未全部开启时全部开启，否则全部关闭 */
+    fun toggleCategoryPinned(category: String) = viewModelScope.launch {
+        val items = outlineRepository.getOutline(bookId).filter { it.category == category }
+        if (items.isEmpty()) return@launch
+        outlineRepository.setCategoryPinned(bookId, category, !items.all { it.pinned })
+    }
+
     /** 把某个大纲条目移动到另一个分类标签下 */
     fun moveOutline(item: OutlineItem, category: String) = viewModelScope.launch {
         if (category == item.category) return@launch
@@ -77,27 +101,14 @@ class BookDetailViewModel(
     private val _categories = MutableStateFlow(defaultOutlineKeys)
     val categories: StateFlow<List<String>> = _categories.asStateFlow()
 
-    /** 被「常驻化」的分类标签集合 */
-    private val _pinnedCategories = MutableStateFlow<Set<String>>(emptySet())
-    val pinnedCategories: StateFlow<Set<String>> = _pinnedCategories.asStateFlow()
-
     init {
         viewModelScope.launch {
             refreshCategories()
-            _pinnedCategories.value = container.prefs.pinnedOutlineCategories(bookId)
         }
     }
 
     private suspend fun refreshCategories() {
         _categories.value = container.prefs.outlineCategories(bookId) ?: defaultOutlineKeys
-    }
-
-    /** 常驻化 / 取消常驻化一个分类标签 */
-    fun togglePinnedCategory(key: String) = viewModelScope.launch {
-        val current = container.prefs.pinnedOutlineCategories(bookId)
-        val next = if (key in current) current - key else current + key
-        container.prefs.setPinnedOutlineCategories(bookId, next)
-        _pinnedCategories.value = next
     }
 
     fun addCategory(label: String) = viewModelScope.launch {
@@ -114,11 +125,6 @@ class BookDetailViewModel(
         val current = container.prefs.outlineCategories(bookId) ?: defaultOutlineKeys
         container.prefs.setOutlineCategories(bookId, current - key)
         outlineRepository.deleteOutlineByCategory(bookId, key)
-        val pinned = container.prefs.pinnedOutlineCategories(bookId)
-        if (key in pinned) {
-            container.prefs.setPinnedOutlineCategories(bookId, pinned - key)
-            _pinnedCategories.value = pinned - key
-        }
         refreshCategories()
     }
 
@@ -132,13 +138,6 @@ class BookDetailViewModel(
         val fields = container.prefs.outlineFields(bookId, oldKey) ?: defaultOutlineFields(oldKey)
         container.prefs.setOutlineFields(bookId, name, fields)
         outlineRepository.renameOutlineCategory(bookId, oldKey, name)
-        // 常驻化状态跟随分类一起迁移
-        val pinned = container.prefs.pinnedOutlineCategories(bookId)
-        if (oldKey in pinned) {
-            val next = pinned - oldKey + name
-            container.prefs.setPinnedOutlineCategories(bookId, next)
-            _pinnedCategories.value = next
-        }
         refreshCategories()
     }
 

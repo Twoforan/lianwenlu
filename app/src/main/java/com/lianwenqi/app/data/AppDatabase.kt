@@ -20,7 +20,10 @@ import com.lianwenqi.app.data.dao.PromptDao
 import com.lianwenqi.app.data.dao.ProviderDao
 import com.lianwenqi.app.data.dao.StyleProfileDao
 import com.lianwenqi.app.data.dao.StyleTagDao
+import com.lianwenqi.app.data.dao.VolumeCompressionDao
 import com.lianwenqi.app.data.dao.VolumeDao
+import com.lianwenqi.app.data.dao.VolumeOutlineDao
+import com.lianwenqi.app.data.dao.VolumeSummaryDao
 import com.lianwenqi.app.data.entity.AiModel
 import com.lianwenqi.app.data.entity.Book
 import com.lianwenqi.app.data.entity.BookGroup
@@ -39,6 +42,11 @@ import com.lianwenqi.app.data.entity.StyleSampleTagLink
 import com.lianwenqi.app.data.entity.StyleTag
 import com.lianwenqi.app.data.entity.StyleTagCategory
 import com.lianwenqi.app.data.entity.Volume
+import com.lianwenqi.app.data.entity.VolumeCompressionBatchRecord
+import com.lianwenqi.app.data.entity.VolumeCompressionSession
+import com.lianwenqi.app.data.entity.VolumeOutlineSuggestion
+import com.lianwenqi.app.data.entity.VolumeOutlineUpdate
+import com.lianwenqi.app.data.entity.VolumeSummary
 
 @Database(
     entities = [
@@ -59,9 +67,14 @@ import com.lianwenqi.app.data.entity.Volume
         StyleSampleRecord::class,
         StyleSampleChunk::class,
         StyleSampleTagLink::class,
-        ChapterSummaryTag::class
+        ChapterSummaryTag::class,
+        VolumeSummary::class,
+        VolumeCompressionSession::class,
+        VolumeCompressionBatchRecord::class,
+        VolumeOutlineUpdate::class,
+        VolumeOutlineSuggestion::class
     ],
-    version = 19,
+    version = 24,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
@@ -79,6 +92,9 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun styleProfileDao(): StyleProfileDao
     abstract fun styleTagDao(): StyleTagDao
     abstract fun chapterSummaryTagDao(): ChapterSummaryTagDao
+    abstract fun volumeSummaryDao(): VolumeSummaryDao
+    abstract fun volumeCompressionDao(): VolumeCompressionDao
+    abstract fun volumeOutlineDao(): VolumeOutlineDao
 
     companion object {
         @Volatile
@@ -370,6 +386,257 @@ abstract class AppDatabase : RoomDatabase() {
         }
 
         /**
+         * v20：整卷梗概表 + 模型 Token 上下文窗口字段。
+         * 只新增表与列，不改旧数据：旧书升级后没有任何卷梗概，
+         * 书籍 / 分卷 / 章节 / 大纲 / 模型 / 会话 / 记忆全部原样保留。
+         *
+         * volume_summary 的唯一索引 (volumeId, isCurrent) 保证每卷至多一条生效版本：
+         * 只有生效版把 isCurrent 置 1，候选 / 归档一律 NULL，SQLite 唯一索引允许多个 NULL。
+         */
+        internal val MIGRATION_19_20 = object : Migration(19, 20) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS volume_summary (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "bookId INTEGER NOT NULL, " +
+                        "volumeId INTEGER NOT NULL, " +
+                        "status TEXT NOT NULL, " +
+                        "sourceType TEXT NOT NULL, " +
+                        "modelContent TEXT NOT NULL, " +
+                        "userContent TEXT NOT NULL, " +
+                        "sourceRevision TEXT NOT NULL, " +
+                        "sourceChapterCount INTEGER NOT NULL, " +
+                        "processedChapterCount INTEGER NOT NULL, " +
+                        "sourceChapterIds TEXT NOT NULL, " +
+                        "sourceChapterHashes TEXT NOT NULL, " +
+                        "modelId INTEGER NOT NULL DEFAULT 0, " +
+                        "modelName TEXT NOT NULL DEFAULT '', " +
+                        "compressionSessionId INTEGER, " +
+                        "isCurrent INTEGER, " +
+                        "createdAt INTEGER NOT NULL, " +
+                        "updatedAt INTEGER NOT NULL)"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_volume_summary_bookId ON volume_summary (bookId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_volume_summary_volumeId ON volume_summary (volumeId)")
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_volume_summary_compressionSessionId " +
+                        "ON volume_summary (compressionSessionId)"
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS index_volume_summary_volumeId_isCurrent " +
+                        "ON volume_summary (volumeId, isCurrent)"
+                )
+                // 模型真实 Token 上下文窗口；0 = 未知（不能拿 maxContext 顶替）
+                db.execSQL("ALTER TABLE ai_model ADD COLUMN contextWindow INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        /**
+         * v21：整卷压缩任务（会话 + 请求批次）。
+         * 只新增表，不改旧数据：旧书、卷梗概、聊天、模型全部保留。
+         *
+         * 批次表唯一索引 (sessionId, kind, batchIndex) 保证同一任务重跑同一请求时覆盖旧记录，
+         * usage 不会因为恢复 / 单批重试被重复累计。
+         */
+        internal val MIGRATION_20_21 = object : Migration(20, 21) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS volume_compression_session (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "bookId INTEGER NOT NULL, " +
+                        "volumeId INTEGER NOT NULL, " +
+                        "sourceType TEXT NOT NULL, " +
+                        "sourceRevision TEXT NOT NULL, " +
+                        "modelId INTEGER NOT NULL, " +
+                        "modelName TEXT NOT NULL, " +
+                        "configSnapshot TEXT NOT NULL, " +
+                        "status TEXT NOT NULL, " +
+                        "phase TEXT NOT NULL, " +
+                        "errorKind TEXT, " +
+                        "errorMessage TEXT NOT NULL, " +
+                        "plannedBatchCount INTEGER NOT NULL, " +
+                        "completedBatchCount INTEGER NOT NULL, " +
+                        "plannedRequestCount INTEGER NOT NULL, " +
+                        "actualRequestCount INTEGER NOT NULL, " +
+                        "estimatedInputTokens INTEGER NOT NULL, " +
+                        "estimatedOutputTokens INTEGER NOT NULL, " +
+                        "promptTokens INTEGER NOT NULL, " +
+                        "completionTokens INTEGER NOT NULL, " +
+                        "cachedTokens INTEGER NOT NULL, " +
+                        "requestsWithUsage INTEGER NOT NULL, " +
+                        "candidateSummaryId INTEGER, " +
+                        "previousSessionId INTEGER, " +
+                        "queuePosition INTEGER NOT NULL, " +
+                        "createdAt INTEGER NOT NULL, " +
+                        "startedAt INTEGER, " +
+                        "completedAt INTEGER, " +
+                        "updatedAt INTEGER NOT NULL)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_volume_compression_session_bookId " +
+                        "ON volume_compression_session (bookId)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_volume_compression_session_volumeId " +
+                        "ON volume_compression_session (volumeId)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_volume_compression_session_status " +
+                        "ON volume_compression_session (status)"
+                )
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS volume_compression_batch (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "sessionId INTEGER NOT NULL, " +
+                        "kind TEXT NOT NULL, " +
+                        "batchIndex INTEGER NOT NULL, " +
+                        "rangeLabel TEXT NOT NULL, " +
+                        "chapterIds TEXT NOT NULL, " +
+                        "inputHash TEXT NOT NULL, " +
+                        "status TEXT NOT NULL, " +
+                        "attempts INTEGER NOT NULL, " +
+                        "requestCount INTEGER NOT NULL, " +
+                        "promptTokens INTEGER NOT NULL, " +
+                        "completionTokens INTEGER NOT NULL, " +
+                        "cachedTokens INTEGER NOT NULL, " +
+                        "requestsWithUsage INTEGER NOT NULL, " +
+                        "extractionJson TEXT NOT NULL, " +
+                        "rawContent TEXT NOT NULL, " +
+                        "errorKind TEXT, " +
+                        "errorMessage TEXT NOT NULL, " +
+                        "createdAt INTEGER NOT NULL, " +
+                        "updatedAt INTEGER NOT NULL)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_volume_compression_batch_sessionId " +
+                        "ON volume_compression_batch (sessionId)"
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS " +
+                        "index_volume_compression_batch_sessionId_kind_batchIndex " +
+                        "ON volume_compression_batch (sessionId, kind, batchIndex)"
+                )
+            }
+        }
+
+        /**
+         * v22：F6 大纲范围快照与差异建议。
+         *
+         * - 只给 session 加一列，旧压缩任务的目标范围为空（表示没有大纲目标），行为不变；
+         * - 只新增两张表：一次分析（volume_outline_update）与逐条建议
+         *   （volume_outline_suggestion）。不新增任何大纲条目实体，
+         *   写入仍然只走 outline_item。
+         */
+        internal val MIGRATION_21_22 = object : Migration(21, 22) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE volume_compression_session " +
+                        "ADD COLUMN outlineScopeSnapshot TEXT NOT NULL DEFAULT ''"
+                )
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS volume_outline_update (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "sessionId INTEGER NOT NULL, " +
+                        "bookId INTEGER NOT NULL, " +
+                        "volumeId INTEGER NOT NULL, " +
+                        "mode TEXT NOT NULL, " +
+                        "status TEXT NOT NULL, " +
+                        "scopeIds TEXT NOT NULL, " +
+                        "scopeLabel TEXT NOT NULL, " +
+                        "summaryId INTEGER, " +
+                        "promptTokens INTEGER NOT NULL, " +
+                        "completionTokens INTEGER NOT NULL, " +
+                        "cachedTokens INTEGER NOT NULL, " +
+                        "requestCount INTEGER NOT NULL, " +
+                        "requestsWithUsage INTEGER NOT NULL, " +
+                        "rawResponse TEXT NOT NULL, " +
+                        "errorMessage TEXT NOT NULL, " +
+                        "note TEXT NOT NULL, " +
+                        "createdAt INTEGER NOT NULL, " +
+                        "updatedAt INTEGER NOT NULL)"
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS index_volume_outline_update_sessionId " +
+                        "ON volume_outline_update (sessionId)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_volume_outline_update_bookId " +
+                        "ON volume_outline_update (bookId)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_volume_outline_update_volumeId " +
+                        "ON volume_outline_update (volumeId)"
+                )
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS volume_outline_suggestion (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "updateId INTEGER NOT NULL, " +
+                        "sessionId INTEGER NOT NULL, " +
+                        "suggestionIndex INTEGER NOT NULL, " +
+                        "operation TEXT NOT NULL, " +
+                        "targetOutlineItemId INTEGER, " +
+                        "category TEXT NOT NULL, " +
+                        "title TEXT NOT NULL, " +
+                        "oldContent TEXT NOT NULL, " +
+                        "newContent TEXT NOT NULL, " +
+                        "reason TEXT NOT NULL, " +
+                        "confidence REAL NOT NULL, " +
+                        "relatedEvents TEXT NOT NULL, " +
+                        "expectedUpdatedAt INTEGER NOT NULL, " +
+                        "contentFingerprint TEXT NOT NULL, " +
+                        "status TEXT NOT NULL, " +
+                        "statusMessage TEXT NOT NULL, " +
+                        "selected INTEGER NOT NULL, " +
+                        "createdAt INTEGER NOT NULL, " +
+                        "updatedAt INTEGER NOT NULL)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_volume_outline_suggestion_updateId " +
+                        "ON volume_outline_suggestion (updateId)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_volume_outline_suggestion_sessionId " +
+                        "ON volume_outline_suggestion (sessionId)"
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS " +
+                        "index_volume_outline_suggestion_updateId_suggestionIndex " +
+                        "ON volume_outline_suggestion (updateId, suggestionIndex)"
+                )
+            }
+        }
+
+        /**
+         * v23：大纲条目新增「可更新」属性。
+         *
+         * 只给 outline_item 加一列，旧条目默认 0（不参与大纲更新），
+         * 由用户在条目上长按按需开启。
+         */
+        internal val MIGRATION_22_23 = object : Migration(22, 23) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE outline_item " +
+                        "ADD COLUMN updatable INTEGER NOT NULL DEFAULT 0"
+                )
+            }
+        }
+
+        /**
+         * v24：大纲条目新增「常驻化」属性。
+         *
+         * 常驻化由原来的「分类级」改为「条目级」：只给 outline_item 加一列，
+         * 旧条目默认 0（未常驻化），由用户在条目上点击图钉按需开启。
+         */
+        internal val MIGRATION_23_24 = object : Migration(23, 24) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE outline_item " +
+                        "ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0"
+                )
+            }
+        }
+
+        /**
          * 修复历史遗留的超长行：整本正文被冻结进会话前缀、超长提示词日志 / 正文等，
          * 单行超过 SQLite CursorWindow（2MB）上限后读取会抛 SQLiteBlobTooBigException 直接闪退。
          * 首次打开数据库时把超限文本截断到安全长度，之后用标记表跳过，避免每次启动全表扫描。
@@ -396,7 +663,7 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "lianwenqi.db"
-                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19).addCallback(REPAIR_OVERSIZED_ROWS).build().also { INSTANCE = it }
+                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20, MIGRATION_20_21, MIGRATION_21_22, MIGRATION_22_23, MIGRATION_23_24).addCallback(REPAIR_OVERSIZED_ROWS).build().also { INSTANCE = it }
             }
     }
 }

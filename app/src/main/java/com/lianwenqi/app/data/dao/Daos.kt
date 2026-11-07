@@ -179,6 +179,17 @@ interface ChapterDao {
     )
     suspend fun getValidByBook(bookId: Long): List<Chapter>
 
+    /**
+     * 某分卷内的有效章节（口径与 [getValidByBook] 一致：分卷必须存在且同属该书）。
+     * 整卷梗概的输入章节、章节总数与过期检测都以这里为准。
+     */
+    @Query(
+        "SELECT c.* FROM chapter c LEFT JOIN volume v ON v.id = c.volumeId " +
+            "WHERE c.bookId = :bookId AND c.volumeId = :volumeId AND v.id IS NOT NULL AND v.bookId = c.bookId " +
+            "ORDER BY c.sortOrder ASC, c.id ASC"
+    )
+    suspend fun getValidByVolume(bookId: Long, volumeId: Long): List<Chapter>
+
     /** 有效章节 id 集合，供记忆检索 / 向量化等只需要 id 的场景复用同一口径 */
     @Query(
         "SELECT c.id FROM chapter c LEFT JOIN volume v ON v.id = c.volumeId " +
@@ -250,11 +261,31 @@ interface OutlineDao {
     @Query("SELECT * FROM outline_item WHERE id = :id")
     suspend fun getById(id: Long): OutlineItem?
 
+    /** F6：按本次范围快照读取真实条目（身份只认 id，不按标题匹配） */
+    @Query("SELECT * FROM outline_item WHERE id IN (:ids)")
+    suspend fun getByIds(ids: List<Long>): List<OutlineItem>
+
     @Insert
     suspend fun insert(item: OutlineItem): Long
 
     @Update
     suspend fun update(item: OutlineItem)
+
+    /** 只切换「可更新」标记，不改内容与排序 */
+    @Query("UPDATE outline_item SET updatable = :updatable WHERE id = :id")
+    suspend fun setUpdatable(id: Long, updatable: Boolean)
+
+    /** 只切换「常驻化」标记，不改内容与排序 */
+    @Query("UPDATE outline_item SET pinned = :pinned WHERE id = :id")
+    suspend fun setPinned(id: Long, pinned: Boolean)
+
+    /** 整类批量切换「可更新」 */
+    @Query("UPDATE outline_item SET updatable = :updatable WHERE bookId = :bookId AND category = :category")
+    suspend fun setUpdatableByCategory(bookId: Long, category: String, updatable: Boolean)
+
+    /** 整类批量切换「常驻化」 */
+    @Query("UPDATE outline_item SET pinned = :pinned WHERE bookId = :bookId AND category = :category")
+    suspend fun setPinnedByCategory(bookId: Long, category: String, pinned: Boolean)
 
     @Query("DELETE FROM outline_item WHERE id = :id")
     suspend fun deleteById(id: Long)

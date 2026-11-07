@@ -1,5 +1,6 @@
 package com.lianwenqi.app.ui.screens
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -11,6 +12,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -62,9 +65,13 @@ class PrefixManageViewModel(private val container: AppContainer) : ViewModel() {
     val outlineFirstRound: StateFlow<Boolean> =
         prefs.aiOutlineFirstRound.stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
-    /** 首轮全选章节（默认开启） */
-    val chapterFirstRound: StateFlow<Boolean> =
-        prefs.aiChapterFirstRound.stateIn(viewModelScope, SharingStarted.Eagerly, true)
+    /** 首轮全选章节梗概（默认开启） */
+    val chapterSummaryFirstRound: StateFlow<Boolean> =
+        prefs.aiChapterSummaryFirstRound.stateIn(viewModelScope, SharingStarted.Eagerly, true)
+
+    /** 首轮全选章节正文（默认关闭） */
+    val chapterContentFirstRound: StateFlow<Boolean> =
+        prefs.aiChapterContentFirstRound.stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
     /** 历史对话前缀：历史梗概 / 历史正文（默认关闭，新建会话生效） */
     val historySummaryOn: StateFlow<Boolean> =
@@ -85,7 +92,10 @@ class PrefixManageViewModel(private val container: AppContainer) : ViewModel() {
     fun setCustomText(v: String) = viewModelScope.launch { prefs.setPrefixCustomText(v) }
     fun setAdaptiveFilter(v: Boolean) = viewModelScope.launch { prefs.setPrefixAdaptiveFilterEnabled(v) }
     fun setOutlineFirstRound(v: Boolean) = viewModelScope.launch { prefs.setAiOutlineFirstRound(v) }
-    fun setChapterFirstRound(v: Boolean) = viewModelScope.launch { prefs.setAiChapterFirstRound(v) }
+    fun setChapterSummaryFirstRound(v: Boolean) =
+        viewModelScope.launch { prefs.setAiChapterSummaryFirstRound(v) }
+    fun setChapterContentFirstRound(v: Boolean) =
+        viewModelScope.launch { prefs.setAiChapterContentFirstRound(v) }
     fun setHistorySummaryOn(v: Boolean) = viewModelScope.launch { prefs.setPrefixHistorySummary(v) }
     fun setHistoryContentOn(v: Boolean) = viewModelScope.launch { prefs.setPrefixHistoryContent(v) }
     fun setHistoryMessageOn(v: Boolean) = viewModelScope.launch { prefs.setPrefixHistoryMessage(v) }
@@ -105,7 +115,8 @@ fun PrefixManageScreen(onBack: () -> Unit) {
     val outlineEnabled by vm.outlineEnabled.collectAsState()
     val adaptiveFilter by vm.adaptiveFilter.collectAsState()
     val outlineFirstRound by vm.outlineFirstRound.collectAsState()
-    val chapterFirstRound by vm.chapterFirstRound.collectAsState()
+    val chapterSummaryFirstRound by vm.chapterSummaryFirstRound.collectAsState()
+    val chapterContentFirstRound by vm.chapterContentFirstRound.collectAsState()
     val savedText by vm.customText.collectAsState()
     val historySummaryOn by vm.historySummaryOn.collectAsState()
     val historyContentOn by vm.historyContentOn.collectAsState()
@@ -182,33 +193,78 @@ fun PrefixManageScreen(onBack: () -> Unit) {
             Spacer(Modifier.height(12.dp))
             HorizontalDivider()
             Spacer(Modifier.height(12.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            var firstRoundExpanded by remember { mutableStateOf(false) }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { firstRoundExpanded = !firstRoundExpanded }
+            ) {
                 Column(Modifier.weight(1f)) {
-                    Text("首轮全选大纲")
+                    Text("首轮全选设置")
                     Text(
-                        "新建「跟书」会话时默认勾选全部大纲。大纲在首轮发送时写入会话前缀并保持稳定；" +
-                            "首轮发送后勾选会自动取消，第二轮起默认不勾选，只有重新勾选才改写前缀。",
+                        "仅对新建「跟书」会话生效：对应内容在首轮发送时写入会话前缀，" +
+                            "发送后勾选自动取消，第二轮起默认不勾选。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                Switch(checked = outlineFirstRound, onCheckedChange = { vm.setOutlineFirstRound(it) })
+                Icon(
+                    if (firstRoundExpanded) Icons.Filled.KeyboardArrowUp
+                    else Icons.Filled.KeyboardArrowDown,
+                    contentDescription = if (firstRoundExpanded) "收起" else "展开"
+                )
             }
-            Spacer(Modifier.height(12.dp))
-            HorizontalDivider()
-            Spacer(Modifier.height(12.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("首轮全选章节")
-                    Text(
-                        "新建「跟书」会话时默认全选章节（梗概默认全部纳入、正文默认不纳入，" +
-                            "可在「选择上下文」里按卷 / 章节逐项调整）。章节在首轮发送时写入会话前缀；" +
-                            "首轮发送后勾选会自动取消，第二轮起默认不勾选，只有重新勾选才改写前缀。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+            if (firstRoundExpanded) {
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("首轮全选章节梗概（除所在章外）")
+                        Text(
+                            "新建会话时默认勾选除当前所在章外全部章节的梗概",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = chapterSummaryFirstRound,
+                        onCheckedChange = { vm.setChapterSummaryFirstRound(it) }
                     )
                 }
-                Switch(checked = chapterFirstRound, onCheckedChange = { vm.setChapterFirstRound(it) })
+                Spacer(Modifier.height(12.dp))
+                HorizontalDivider()
+                Spacer(Modifier.height(12.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("首轮全选章节正文（除所在章外）")
+                        Text(
+                            "新建会话时默认勾选除当前所在章外全部章节的正文（体积较大，默认关闭）",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = chapterContentFirstRound,
+                        onCheckedChange = { vm.setChapterContentFirstRound(it) }
+                    )
+                }
+                Spacer(Modifier.height(12.dp))
+                HorizontalDivider()
+                Spacer(Modifier.height(12.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("首轮全选大纲")
+                        Text(
+                            "新建会话时默认勾选全部大纲；开启「适配性筛选」时只勾选「常驻化」大纲",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = outlineFirstRound,
+                        onCheckedChange = { vm.setOutlineFirstRound(it) }
+                    )
+                }
             }
             Spacer(Modifier.height(12.dp))
             HorizontalDivider()
