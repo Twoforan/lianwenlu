@@ -81,6 +81,8 @@ class StylePromptInjectionTest {
 
         assertTrue(instruction.contains("文风标签句例"))
         assertTrue(instruction.contains("临时文风样本"))
+        assertTrue(instruction.contains("文风优先"))
+        assertTrue(reference.contains("第一优先表达依据"))
         assertTrue(reference.contains("【本章梗概·文风标签句例】"))
         assertTrue(reference.contains("标签：潜台词、压抑"))
         assertTrue(reference.contains("原文：他把杯子放下"))
@@ -88,6 +90,9 @@ class StylePromptInjectionTest {
         assertTrue(reference.contains("【临时文风样本】"))
         assertTrue(reference.contains("【临时文风样本使用规则】"))
         assertTrue(reference.contains("不得复制样本中的人物"))
+        // 收尾强调排在所有参考资料之后，紧贴用户输入，避免模型忽略样本
+        assertTrue(reference.contains("【文风执行要求】"))
+        assertTrue(reference.trimEnd().endsWith("不要输出文风分析过程。"))
     }
 
     @Test
@@ -105,6 +110,7 @@ class StylePromptInjectionTest {
         assertFalse(all.contains("【本章梗概·文风标签句例】"))
         assertFalse(all.contains("【临时文风样本】"))
         assertFalse(all.contains("【临时文风样本使用规则】"))
+        assertFalse(all.contains("【文风执行要求】"))
     }
 
     @Test
