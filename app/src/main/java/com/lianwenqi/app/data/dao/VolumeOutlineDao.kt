@@ -24,6 +24,18 @@ interface VolumeOutlineDao {
     @Query("SELECT * FROM volume_outline_update WHERE sessionId = :sessionId LIMIT 1")
     fun observeUpdate(sessionId: Long): Flow<VolumeOutlineUpdate?>
 
+    /** 书籍维度的分析状态：分卷入口需要据此展示「大纲差异化中」 */
+    @Query("SELECT * FROM volume_outline_update WHERE bookId = :bookId")
+    fun observeUpdatesByBook(bookId: Long): Flow<List<VolumeOutlineUpdate>>
+
+    /** 书籍维度的建议：分卷入口据此判断是否还有未处理建议 */
+    @Query(
+        "SELECT s.* FROM volume_outline_suggestion s " +
+            "INNER JOIN volume_outline_update u ON u.id = s.updateId " +
+            "WHERE u.bookId = :bookId"
+    )
+    fun observeSuggestionsByBook(bookId: Long): Flow<List<VolumeOutlineSuggestion>>
+
     @Insert
     suspend fun insertUpdate(update: VolumeOutlineUpdate): Long
 

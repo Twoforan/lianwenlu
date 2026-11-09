@@ -104,10 +104,7 @@ fun RootNavHost() {
         composable(Routes.SHELL) { MainShell(rootNav) }
 
         composable(Routes.AI_TOOLS) {
-            AiToolsScreen(
-                onBack = { rootNav.popBackStack() },
-                onOpenCompression = { rootNav.navigate(Routes.COMPRESSION_SETTINGS) }
-            )
+            AiToolsScreen(onBack = { rootNav.popBackStack() })
         }
 
         composable(Routes.PREFIX_MANAGE) {
@@ -353,7 +350,8 @@ private fun MainShell(rootNav: NavHostController) {
                     onOpenMemory = { rootNav.navigate(Routes.MEMORY) },
                     onOpenStyle = { rootNav.navigate(Routes.STYLE) },
                     onOpenManual = { rootNav.navigate(Routes.MANUAL) },
-                    onOpenUpdate = { rootNav.navigate(Routes.UPDATE) }
+                    onOpenUpdate = { rootNav.navigate(Routes.UPDATE) },
+                    onOpenCompression = { rootNav.navigate(Routes.COMPRESSION_SETTINGS) }
                 )
             }
         }

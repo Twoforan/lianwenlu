@@ -159,8 +159,6 @@ import com.lianwenqi.app.data.entity.OutlineItem
 import com.lianwenqi.app.data.entity.outlineCategoryLabel
 import com.lianwenqi.app.data.entity.Provider
 import com.lianwenqi.app.data.entity.Volume
-import com.lianwenqi.app.data.entity.VolumeCompressionSession
-import com.lianwenqi.app.data.entity.VolumeCompressionStatus
 import com.lianwenqi.app.data.entity.VolumeSummary
 import com.lianwenqi.app.ui.appViewModel
 import com.lianwenqi.app.ui.components.BookFormResult
@@ -1149,8 +1147,6 @@ private fun AiAssistantPanel(
     val selOutline by vm.selectedOutlineIds.collectAsState()
     val selVolumeSummaries by vm.selectedVolumeSummaryIds.collectAsState()
     val activeVolumeSummaries by vm.activeVolumeSummaries.collectAsState()
-    val volumeSummaryStale by vm.volumeSummaryStale.collectAsState()
-    val volumeSummaryTasks by vm.volumeSummaryTasks.collectAsState()
     val chapterAll by vm.chapterAllSelected.collectAsState()
     val summaryAll by vm.summaryAllSelected.collectAsState()
     val contentAll by vm.contentAllSelected.collectAsState()
@@ -1481,11 +1477,10 @@ private fun AiAssistantPanel(
                     summarySelected = selSummary,
                     contentSelected = selContent,
                     activeVolumeSummaries = activeVolumeSummaries,
-                    volumeSummaryStale = volumeSummaryStale,
-                    volumeSummaryTasks = volumeSummaryTasks,
                     selectedVolumeSummaryIds = selVolumeSummaries,
                     onToggleVolumeSummaryAsset = { vm.toggleVolumeSummaryContext(it) },
-                    onManualCompressVolumeSummary = { vm.manualCompressVolumeSummary(it) },
+                    // 默认只展开当前章节所在的分卷
+                    focusVolumeId = chapters.firstOrNull { it.id == chapterId }?.volumeId,
                     // 「全选」= 梗概与正文两列都全选
                     allSelected = summaryAll && contentAll,
                     summaryAll = summaryAll,
@@ -2325,15 +2320,13 @@ private fun ContextPicker(
     selected: Set<Long>,
     summarySelected: Set<Long>,
     contentSelected: Set<Long>,
-    /** 生效卷梗概（每卷最多一条）与过期标记（summaryId → 是否可能已过期） */
+    /** 生效卷梗概（每卷最多一条） */
     activeVolumeSummaries: List<VolumeSummary>,
-    volumeSummaryStale: Map<Long, Boolean>,
-    /** 正在进行的卷压缩任务（volumeId → 任务） */
-    volumeSummaryTasks: Map<Long, VolumeCompressionSession>,
     /** 已确认选中的卷梗概版本 id，与章节材料彼此独立 */
     selectedVolumeSummaryIds: Set<Long>,
     onToggleVolumeSummaryAsset: (Long) -> Unit,
-    onManualCompressVolumeSummary: (Long) -> Unit,
+    /** 默认展开的分卷（当前章节所在卷），其余分卷默认收起 */
+    focusVolumeId: Long?,
     allSelected: Boolean,
     summaryAll: Boolean,
     contentAll: Boolean,
@@ -2348,7 +2341,7 @@ private fun ContextPicker(
     onToggleVolumeSummary: (Long) -> Unit,
     onToggleVolumeContent: (Long) -> Unit
 ) {
-    // 各分卷的收起状态（默认展开）
+    // 各分卷的收起状态：默认只展开当前章节所在的分卷
     val collapsed = remember { mutableStateMapOf<Long, Boolean>() }
     Column(
         Modifier
@@ -2396,14 +2389,15 @@ private fun ContextPicker(
             GenPill("正文", contentAll) { onToggleContent() }
             GenPill("卷梗概", volumeSummaryAll) { onToggleVolumeSummaryAll() }
         }
-        // 两列含义表头：章节 / 梗概 / 正文（章节列不再有勾选框，勾梗概或正文即纳入该章）
+        // 三列含义表头：章节 / 卷梗概 / 正文 / 梗概（章节列不设勾选框，勾梗概或正文即纳入该章）
         Row(
             Modifier.fillMaxWidth().padding(start = 14.dp, end = 12.dp, bottom = 2.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text("章节", color = PickerMuted, fontSize = 12.sp, modifier = Modifier.weight(1f))
-            GenColumnLabel("梗概")
+            GenColumnLabel("卷梗概")
             GenColumnLabel("正文")
+            GenColumnLabel("梗概")
         }
         Column(Modifier.heightIn(max = 300.dp).verticalScroll(rememberScrollState())) {
             if (chapters.isEmpty()) {
@@ -2412,29 +2406,23 @@ private fun ContextPicker(
             volumes.forEach { v ->
                 val list = chapters.filter { it.volumeId == v.id }
                 if (list.isNotEmpty()) {
-                    val expanded = collapsed[v.id] != true
+                    val expanded = collapsed[v.id] ?: (v.id == focusVolumeId)
+                    val activeSummary = activeVolumeSummaries.firstOrNull { it.volumeId == v.id }
                     GenVolumeRow(
                         label = v.title,
                         picked = list.count { it.id in selected },
                         total = list.size,
                         expanded = expanded,
                         onToggleExpand = { collapsed[v.id] = expanded },
+                        volumeSummarySelected =
+                            activeSummary != null && activeSummary.id in selectedVolumeSummaryIds,
+                        onToggleVolumeSummary = { onToggleVolumeSummaryAsset(v.id) },
                         summarySelected = list.all { it.id in summarySelected },
                         contentSelected = list.all { it.id in contentSelected },
                         onToggleSummary = { onToggleVolumeSummary(v.id) },
                         onToggleContent = { onToggleVolumeContent(v.id) }
                     )
                     if (expanded) {
-                        val activeSummary = activeVolumeSummaries.firstOrNull { it.volumeId == v.id }
-                        val task = volumeSummaryTasks[v.id]
-                        GenVolumeSummaryRow(
-                            summary = activeSummary,
-                            stale = activeSummary?.let { volumeSummaryStale[it.id] == true } == true,
-                            task = task,
-                            checked = activeSummary != null && activeSummary.id in selectedVolumeSummaryIds,
-                            onToggle = { onToggleVolumeSummaryAsset(v.id) },
-                            onManualCompress = { onManualCompressVolumeSummary(v.id) }
-                        )
                         list.forEach { ch ->
                             GenChapterRow(
                                 label = ch.title,
@@ -2462,71 +2450,6 @@ private fun ContextPicker(
     }
 }
 
-/**
- * 分卷下的独立子项「整卷梗概」：不占章节的梗概 / 正文列，
- * 状态区分已生成 / 可能过期 / 未生成 / 压缩中，未生成时提供手动生成入口。
- */
-@Composable
-private fun GenVolumeSummaryRow(
-    summary: VolumeSummary?,
-    stale: Boolean,
-    task: VolumeCompressionSession?,
-    checked: Boolean,
-    onToggle: () -> Unit,
-    onManualCompress: () -> Unit
-) {
-    val compressing = task != null && task.status in VolumeCompressionStatus.inFlight
-    val awaitingConfirm = task?.status == VolumeCompressionStatus.AWAITING_CONFIRMATION
-    val status = when {
-        compressing -> {
-            val planned = task?.plannedBatchCount ?: 0
-            val progress = if (planned > 0) "${task?.completedBatchCount ?: 0}/$planned" else "…"
-            "压缩中 $progress"
-        }
-
-        awaitingConfirm -> "候选待确认"
-
-        summary != null -> buildString {
-            append(summary.effectiveContent.length).append(" 字")
-            if (stale) append(" · 可能已过期")
-        }
-
-        else -> "未生成"
-    }
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .padding(start = 26.dp, end = 12.dp, top = 4.dp, bottom = 4.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Icon(
-            Icons.Filled.Description,
-            contentDescription = null,
-            tint = PickerPurple,
-            modifier = Modifier.size(14.dp)
-        )
-        Spacer(Modifier.width(6.dp))
-        Column(Modifier.weight(1f)) {
-            Text("整卷梗概", color = PickerInk, fontSize = 13.sp, maxLines = 1)
-            Text(status, color = PickerMuted, fontSize = 11.sp, maxLines = 1)
-        }
-        if (summary == null && !compressing) {
-            Text(
-                "生成",
-                color = PickerPurple,
-                fontSize = 12.sp,
-                modifier = Modifier
-                    .clickable { onManualCompress() }
-                    .padding(horizontal = 8.dp, vertical = 4.dp)
-            )
-        }
-        // 只有已生成的整卷梗概可以勾选；未生成时只保留「生成」入口
-        if (summary != null) {
-            GenCheckbox(checked = checked, onCheckedChange = { onToggle() })
-        }
-    }
-}
-
 /** 表头列名（固定宽度、居中） */
 @Composable
 private fun GenColumnLabel(text: String) {
@@ -2543,7 +2466,7 @@ private fun GenColumnCheckbox(checked: Boolean, onToggle: () -> Unit) {
     }
 }
 
-/** 上下文里的分卷行（对齐设计稿）：折叠箭头 + 名称 + 已选数 + 梗概 / 正文两列 */
+/** 上下文里的分卷行（对齐设计稿）：折叠箭头 + 名称 + 已选数 + 卷梗概 / 正文 / 梗概三列 */
 @Composable
 private fun GenVolumeRow(
     label: String,
@@ -2551,6 +2474,8 @@ private fun GenVolumeRow(
     total: Int,
     expanded: Boolean,
     onToggleExpand: () -> Unit,
+    volumeSummarySelected: Boolean,
+    onToggleVolumeSummary: () -> Unit,
     summarySelected: Boolean,
     contentSelected: Boolean,
     onToggleSummary: () -> Unit,
@@ -2584,12 +2509,13 @@ private fun GenVolumeRow(
         )
         Spacer(Modifier.width(6.dp))
         Text("$picked/$total", color = PickerMuted, fontSize = 12.sp, maxLines = 1, softWrap = false)
-        GenColumnCheckbox(summarySelected, onToggleSummary)
+        GenColumnCheckbox(volumeSummarySelected, onToggleVolumeSummary)
         GenColumnCheckbox(contentSelected, onToggleContent)
+        GenColumnCheckbox(summarySelected, onToggleSummary)
     }
 }
 
-/** 上下文里的章节行：章节名 + 梗概 / 正文两列（任一列勾选即自动纳入该章） */
+/** 上下文里的章节行：章节名 + 空卷梗概列 + 正文 / 梗概两列（任一列勾选即自动纳入该章） */
 @Composable
 private fun GenChapterRow(
     label: String,
@@ -2617,8 +2543,10 @@ private fun GenChapterRow(
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f)
         )
-        GenColumnCheckbox(summary, onToggleSummary)
+        // 与分卷行三列对齐：卷梗概只作用于分卷，章节行留空
+        Spacer(Modifier.width(ContextColumnWidth))
         GenColumnCheckbox(content, onToggleContent)
+        GenColumnCheckbox(summary, onToggleSummary)
     }
 }
 

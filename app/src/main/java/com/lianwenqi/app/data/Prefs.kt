@@ -133,6 +133,9 @@ class Prefs(private val context: Context) {
         // 「文风样式」勾选框（默认关闭）：勾选后生成梗概自动给句子打标，生成正文时抽样注入
         val genStyleEnabled = booleanPreferencesKey("gen_style_enabled")
 
+        // 「思考过程强制使用英文」：开启后模型思考/reasoning 使用英文，正文输出仍为中文（默认关闭）
+        val genForceEnglishThinking = booleanPreferencesKey("gen_force_english_thinking")
+
         // 「历史对话前缀」：历史梗概 / 历史正文 / 每轮消息（AI 回复、用户回复），均默认关闭
         val prefixHistorySummary = booleanPreferencesKey("prefix_history_summary")
         val prefixHistoryContent = booleanPreferencesKey("prefix_history_content")
@@ -154,6 +157,8 @@ class Prefs(private val context: Context) {
         val memoryAutoVectorize = booleanPreferencesKey("memory_auto_vectorize")
         val memoryRetrievalEnabled = booleanPreferencesKey("memory_retrieval_enabled")
         val memoryScopeLimitEnabled = booleanPreferencesKey("memory_scope_limit_enabled")
+        val memoryScopeAskOncePerSession =
+            booleanPreferencesKey("memory_scope_ask_once_per_session")
         val memoryBlockQuota = intPreferencesKey("memory_block_quota")
         val memorySearchScope = stringPreferencesKey("memory_search_scope")
 
@@ -281,6 +286,13 @@ class Prefs(private val context: Context) {
     val genStyleEnabled: Flow<Boolean> =
         context.dataStore.data.map { it[K.genStyleEnabled] ?: false }
 
+    /**
+     * 「思考过程强制使用英文」（默认关闭）：
+     * 开启后所有请求都会追加一条系统要求 —— 模型思考过程使用英文，最终输出正文仍使用中文。
+     */
+    val genForceEnglishThinking: Flow<Boolean> =
+        context.dataStore.data.map { it[K.genForceEnglishThinking] ?: false }
+
     /** 「历史对话前缀」：历史梗概（本会话消息涉及章节，排除当前章）是否冻结进前缀（默认关闭） */
     val prefixHistorySummary: Flow<Boolean> =
         context.dataStore.data.map { it[K.prefixHistorySummary] ?: false }
@@ -327,6 +339,10 @@ class Prefs(private val context: Context) {
     /** 记忆检索是否限定范围：开启后每次勾选记忆检索都先选择章节范围（默认关闭） */
     val memoryScopeLimitEnabled: Flow<Boolean> =
         context.dataStore.data.map { it[K.memoryScopeLimitEnabled] ?: false }
+
+    /** 限定范围时是否只在本会话第一次勾选记忆检索时询问范围（默认关闭＝每次询问） */
+    val memoryScopeAskOncePerSession: Flow<Boolean> =
+        context.dataStore.data.map { it[K.memoryScopeAskOncePerSession] ?: false }
 
     /** 勾选记忆检索时自动续跑向量化（关闭则正文有更新时每次弹窗询问） */
     val memoryAutoVectorize: Flow<Boolean> =
@@ -475,6 +491,8 @@ class Prefs(private val context: Context) {
     }
     suspend fun setGenContentWithSummary(v: Boolean) = writePrefs { it[K.genContentWithSummary] = v }
     suspend fun setGenStyleEnabled(v: Boolean) = writePrefs { it[K.genStyleEnabled] = v }
+    suspend fun setGenForceEnglishThinking(v: Boolean) =
+        writePrefs { it[K.genForceEnglishThinking] = v }
     suspend fun setPrefixHistorySummary(v: Boolean) = writePrefs { it[K.prefixHistorySummary] = v }
     suspend fun setPrefixHistoryContent(v: Boolean) = writePrefs { it[K.prefixHistoryContent] = v }
     suspend fun setPrefixHistoryMessage(v: Boolean) = writePrefs { it[K.prefixHistoryMessage] = v }
@@ -496,6 +514,10 @@ class Prefs(private val context: Context) {
         it[K.memoryScopeLimitEnabled] = v
         // 关闭限定范围时取消勾选，避免仍按上一次选中的章节范围悄悄检索
         if (!v) it[K.memoryRetrievalEnabled] = false
+    }
+
+    suspend fun setMemoryScopeAskOncePerSession(v: Boolean) = writePrefs {
+        it[K.memoryScopeAskOncePerSession] = v
     }
 
     suspend fun setMemoryAutoVectorize(v: Boolean) = writePrefs {

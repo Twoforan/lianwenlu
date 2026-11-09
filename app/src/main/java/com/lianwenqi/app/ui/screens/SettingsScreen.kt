@@ -171,7 +171,8 @@ fun SettingsScreen(
     onOpenMemory: () -> Unit = {},
     onOpenStyle: () -> Unit = {},
     onOpenManual: () -> Unit = {},
-    onOpenUpdate: () -> Unit = {}
+    onOpenUpdate: () -> Unit = {},
+    onOpenCompression: () -> Unit = {}
 ) {
     val vm = appViewModel { SettingsViewModel(it) }
     val providers by vm.providers.collectAsState()
@@ -421,6 +422,31 @@ fun SettingsScreen(
                                 Text("AI工具")
                                 Text(
                                     "写入大纲等 AI 辅助工具",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Icon(
+                                Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Spacer(Modifier.height(12.dp))
+                        HorizontalDivider()
+                        Spacer(Modifier.height(12.dp))
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable(onClick = onOpenCompression)
+                                .padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text("分卷压缩")
+                                Text(
+                                    "整卷梗概的默认来源、完成后是否更新大纲，以及大纲更新范围",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -1004,6 +1030,7 @@ private fun AddModelDialog(
     var maxTokens by remember { mutableStateOf(8192) }
     var unlimited by remember { mutableStateOf(false) }
     var maxContext by remember { mutableStateOf(20) }
+    var contextWindowText by remember { mutableStateOf("") }
     var systemPrompt by remember { mutableStateOf("") }
     var reasoningEnabled by remember { mutableStateOf(true) }
     var reasoningLevel by remember { mutableStateOf(ReasoningLevel.DEFAULT.storage) }
@@ -1027,6 +1054,7 @@ private fun AddModelDialog(
                             temperature = temperature,
                             maxTokens = if (unlimited) 0 else maxTokens,
                             maxContext = maxContext,
+                            contextWindow = contextWindowText.toIntOrNull() ?: 0,
                             systemPrompt = systemPrompt,
                             reasoningEnabled = reasoningEnabled,
                             reasoningLevel = reasoningLevel,
@@ -1080,6 +1108,11 @@ private fun AddModelDialog(
             onUnlimitedChange = { unlimited = it }
         )
         MaxContextSetting(maxContext = maxContext, onContextChange = { maxContext = it })
+        Spacer(Modifier.height(8.dp))
+        ContextWindowSetting(
+            value = contextWindowText,
+            onValueChange = { contextWindowText = it }
+        )
         Spacer(Modifier.height(12.dp))
         ReasoningSetting(
             enabled = reasoningEnabled,
@@ -1112,6 +1145,9 @@ private fun ModelDetailDialog(
     var maxTokens by remember { mutableStateOf(if (model.maxTokens > 0) model.maxTokens else 8192) }
     var unlimited by remember { mutableStateOf(model.maxTokens <= 0) }
     var maxContext by remember { mutableStateOf(model.maxContext) }
+    var contextWindowText by remember {
+        mutableStateOf(model.contextWindow.takeIf { it > 0 }?.toString().orEmpty())
+    }
     var systemPrompt by remember { mutableStateOf(model.systemPrompt) }
     var reasoningEnabled by remember { mutableStateOf(model.reasoningEnabled) }
     var reasoningLevel by remember { mutableStateOf(model.reasoningLevel) }
@@ -1138,6 +1174,7 @@ private fun ModelDetailDialog(
                             temperature = temperature,
                             maxTokens = if (unlimited) 0 else maxTokens,
                             maxContext = maxContext,
+                            contextWindow = contextWindowText.toIntOrNull() ?: 0,
                             systemPrompt = systemPrompt,
                             reasoningEnabled = reasoningEnabled,
                             reasoningLevel = reasoningLevel
@@ -1174,6 +1211,11 @@ private fun ModelDetailDialog(
             onUnlimitedChange = { unlimited = it }
         )
         MaxContextSetting(maxContext = maxContext, onContextChange = { maxContext = it })
+        Spacer(Modifier.height(8.dp))
+        ContextWindowSetting(
+            value = contextWindowText,
+            onValueChange = { contextWindowText = it }
+        )
         Spacer(Modifier.height(12.dp))
         ReasoningSetting(
             enabled = reasoningEnabled,
@@ -1244,6 +1286,24 @@ private fun MaxTokensSetting(
             valueRange = 256f..32768f
         )
     }
+}
+
+/** 模型真实的 Token 上下文窗口（不是历史消息条数）；0 = 未知，分卷压缩需要它来安全分批 */
+@Composable
+private fun ContextWindowSetting(value: String, onValueChange: (String) -> Unit) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = { input -> onValueChange(input.filter { it.isDigit() }.take(9)) },
+        label = { Text("Token 上下文窗口（可选）") },
+        placeholder = { Text("如 128000；留空表示未知") },
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth()
+    )
+    Text(
+        "与上面的「最大上下文（条）」不同：这里填模型能容纳的 Token 总数，仅用于分卷压缩的安全分批。未知时整卷压缩会拒绝启动。",
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
 }
 
 /** 最大上下文：携带的历史消息条数；「不限」时存 0，发送全部历史 */

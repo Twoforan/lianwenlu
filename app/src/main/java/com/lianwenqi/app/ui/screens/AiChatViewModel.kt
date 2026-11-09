@@ -340,6 +340,12 @@ class AiChatViewModel(
     /** 勾选记忆检索后待确认的检索范围；非空时界面弹窗（开启「限定范围」时才出现） */
     val pendingMemoryScopePick = MutableStateFlow<MemoryScopePick?>(null)
 
+    /** 「仅本会话首次询问」：本会话是否已经确认过检索范围 */
+    private var memoryScopeAskedInSession = false
+
+    /** 选定范围时的向量化快照；之后新向量化 / 更新的章节会自动纳入检索 */
+    private var memoryScopeVectorSnapshot: Map<Long, Long> = emptyMap()
+
     /**
      * 切换记忆检索：
      * - 取消勾选：直接关闭持久勾选；
@@ -411,6 +417,8 @@ class AiChatViewModel(
         }
         val bookId = currentMemoryBookId() ?: return@launch
         memoryScopeSelection.value = MemoryScopeSelection(bookId, ids)
+        memoryScopeAskedInSession = true
+        memoryScopeVectorSnapshot = container.memoryRepository.vectorizedTimes(bookId)
         prefs.setMemoryRetrievalEnabled(true)
     }
 
@@ -424,6 +432,14 @@ class AiChatViewModel(
      */
     private suspend fun requestMemoryScopeOrEnable(bookId: Long) {
         if (prefs.memoryScopeLimitEnabled.first()) {
+            // 开启「仅本会话首次询问」且本会话已确认过范围：直接沿用，不再弹窗
+            if (prefs.memoryScopeAskOncePerSession.first() &&
+                memoryScopeAskedInSession &&
+                memoryScopeSelection.value?.bookId == bookId
+            ) {
+                prefs.setMemoryRetrievalEnabled(true)
+                return
+            }
             val pick = buildMemoryScopePick(bookId, onlyVectorized = true)
             if (pick != null) {
                 pendingMemoryScopePick.value = pick
@@ -742,7 +758,15 @@ class AiChatViewModel(
                     ?.chapterIds
                     ?.let { ids ->
                         val vectorized = container.memoryRepository.vectorizedChapterIds(memoryBookId).toSet()
-                        ids.filter { it in vectorized }.toSet()
+                        // 开启「仅本会话首次询问」后，自动纳入选定范围之后新向量化 / 更新的章节
+                        val refreshed = if (prefs.memoryScopeAskOncePerSession.first()) {
+                            container.memoryRepository.vectorizedTimes(memoryBookId)
+                                .filter { (id, time) -> memoryScopeVectorSnapshot[id] != time }
+                                .keys
+                        } else {
+                            emptySet()
+                        }
+                        (ids + refreshed).filter { it in vectorized }.toSet()
                     }
                     ?.takeIf { it.isNotEmpty() }
                 if (remembered != null) {
@@ -2872,6 +2896,8 @@ class AiChatViewModel(
      * 或残留上一轮的回答卡片，表现为新会话「未对话却卡在正在生成中」。
      */
     private fun abortInFlightWork() {
+        // 切换会话后「本会话首次询问范围」重新计数
+        memoryScopeAskedInSession = false
         // 生成梗概 / 生成正文：含收集阶段的弹窗与执行阶段的在途请求
         cancelGeneration()
         generationCancelled = true
@@ -3972,9 +3998,21 @@ class AiChatViewModel(
             val quota = prefs.memoryBlockQuota.first()
             val scope = prefs.memorySearchScope.first()
             // 侧边助手写的是当前这一章，把本章自己的块排除掉，检索才会真的去翻本书其它章节；
-            // 开启「记忆检索是否限定范围」时只检索用户勾选的章节
+            // 开启「记忆检索是否限定范围」时只检索用户勾选的章节；
+            // 开启「仅本会话首次询问」后，再自动纳入选定范围之后新向量化 / 更新的章节
             val scopeIds = if (prefs.memoryScopeLimitEnabled.first()) {
-                memoryScopeSelection.value?.takeIf { it.bookId == bookId }?.chapterIds
+                val remembered = memoryScopeSelection.value
+                    ?.takeIf { it.bookId == bookId }
+                    ?.chapterIds
+                if (remembered != null && prefs.memoryScopeAskOncePerSession.first()) {
+                    val current = container.memoryRepository.vectorizedTimes(bookId)
+                    val refreshed = current.filter { (id, time) ->
+                        memoryScopeVectorSnapshot[id] != time
+                    }.keys
+                    remembered + refreshed
+                } else {
+                    remembered
+                }
             } else {
                 null
             }

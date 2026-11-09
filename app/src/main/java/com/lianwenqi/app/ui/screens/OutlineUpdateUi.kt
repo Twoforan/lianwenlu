@@ -59,7 +59,8 @@ import kotlinx.coroutines.launch
  * 冲突与无效项可见但不可勾选，DELETE 默认不选且写入前需要二次确认。
  *
  * 建议默认折叠，点标题行展开后可逐条修改「新内容」；
- * 底部只有确认 / 放弃，右上角 X 表示稍后处理（保留已保存的修改）。
+ * 底部为确认 / 后台运行 / 放弃，右上角 X 与「后台运行」等价：分析在应用级作用域执行，
+ * 关闭弹窗只是隐藏界面，不会中断正在进行的差异分析，结果会保存下来供稍后查看。
  */
 @Composable
 fun OutlineDiffDialog(
@@ -128,7 +129,7 @@ fun OutlineDiffDialog(
                     enabled = !applying && !discarding,
                     onClick = onLater
                 ) {
-                    Icon(Icons.Default.Close, contentDescription = "稍后处理")
+                    Icon(Icons.Default.Close, contentDescription = "后台运行")
                 }
             }
         },
@@ -161,7 +162,10 @@ fun OutlineDiffDialog(
                     }
 
                     analyzing -> {
-                        Text("正在分析大纲差异…结果会自动保存，可点右上角 × 稍后查看。")
+                        Text(
+                            "正在分析大纲差异…结果会自动保存。可点右上角 × 或「后台运行」，" +
+                                "分析会在后台继续，稍后回来查看即可。"
+                        )
                     }
 
                     ready -> {
@@ -251,6 +255,12 @@ fun OutlineDiffDialog(
                     onClick = onRetry
                 ) { Text("重新分析") }
 
+                // 分析进行中：关闭弹窗不取消任务，等同于转到后台继续
+                analyzing -> TextButton(
+                    enabled = !applying && !discarding,
+                    onClick = onLater
+                ) { Text("后台运行") }
+
                 else -> Button(
                     enabled = ready && !applying && !discarding && selectedIds.isNotEmpty(),
                     onClick = {
@@ -271,17 +281,30 @@ fun OutlineDiffDialog(
             }
         },
         dismissButton = {
-            TextButton(
-                enabled = ready && !applying && !discarding,
-                onClick = {
-                    discarding = true
-                    scope.launch {
-                        onDiscard()
-                        discarding = false
-                        onLater()
+            // 分析进行中只在 confirmButton 位置提供「后台运行」，避免出现两个相同按钮
+            if (!analyzing) {
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    // 显式的后台运行入口：与右上角 X 行为一致，不取消正在进行的分析；
+                    // 分析已失败时没有任务在跑，这里只是关闭弹窗
+                    TextButton(
+                        enabled = !applying && !discarding,
+                        onClick = onLater
+                    ) { Text(if (failed) "关闭" else "后台运行") }
+                    if (ready || discarding) {
+                        TextButton(
+                            enabled = ready && !applying && !discarding,
+                            onClick = {
+                                discarding = true
+                                scope.launch {
+                                    onDiscard()
+                                    discarding = false
+                                    onLater()
+                                }
+                            }
+                        ) { Text(if (discarding) "正在放弃…" else "放弃") }
                     }
                 }
-            ) { Text(if (discarding) "正在放弃…" else "放弃") }
+            }
         }
     )
 

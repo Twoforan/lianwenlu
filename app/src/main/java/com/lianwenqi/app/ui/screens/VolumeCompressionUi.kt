@@ -69,6 +69,7 @@ import com.lianwenqi.app.data.volume.CompressionStartResult
 import com.lianwenqi.app.data.volume.CompressionEstimateResult
 import com.lianwenqi.app.data.volume.OutlineApplySummary
 import com.lianwenqi.app.data.volume.OutlineScopeResolved
+import com.lianwenqi.app.data.volume.OutlineUpdateStatus
 import com.lianwenqi.app.data.volume.OutlineScopeResolver
 import com.lianwenqi.app.data.volume.VolumeCompressionInputHash
 import com.lianwenqi.app.data.volume.VolumeCompressionRequest
@@ -114,6 +115,22 @@ class VolumeCompressionViewModel(
 
     val sessions: StateFlow<List<VolumeCompressionSession>> =
         coordinator.observeSessions(bookId).stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(5_000),
+            emptyList()
+        )
+
+    /** F6：后台大纲差异分析状态；分卷入口据此提示差异处理中 */
+    val outlineUpdates: StateFlow<List<VolumeOutlineUpdate>> =
+        container.database.volumeOutlineDao().observeUpdatesByBook(bookId).stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(5_000),
+            emptyList()
+        )
+
+    /** F6：书籍维度的大纲建议；分卷入口据此区分「查看梗概」与「查看差异」 */
+    val outlineSuggestionsByBook: StateFlow<List<VolumeOutlineSuggestion>> =
+        container.database.volumeOutlineDao().observeSuggestionsByBook(bookId).stateIn(
             viewModelScope,
             SharingStarted.WhileSubscribed(5_000),
             emptyList()
@@ -175,6 +192,9 @@ class VolumeCompressionViewModel(
 
     fun observeOutlineSuggestions(sessionId: Long): Flow<List<VolumeOutlineSuggestion>> =
         container.database.volumeOutlineDao().observeSuggestionsBySession(sessionId)
+
+    suspend fun outlineUpdateOf(sessionId: Long): VolumeOutlineUpdate? =
+        outlineCoordinator.updateOf(sessionId)
 
     suspend fun outlineSuggestions(sessionId: Long): List<VolumeOutlineSuggestion> =
         outlineCoordinator.suggestionsOf(sessionId)
@@ -315,7 +335,9 @@ data class CompressionUiSeed(
     val activeSummary: VolumeSummary?,
     val latestSession: VolumeCompressionSession?,
     /** F6：最近一次大纲差异分析；用于恢复未确认的预览 */
-    val outlineUpdate: VolumeOutlineUpdate? = null
+    val outlineUpdate: VolumeOutlineUpdate? = null,
+    /** 该差异是否还有未处理建议；决定入口是「查看大纲差异化」还是「查看整卷梗概」 */
+    val outlineHasOpenSuggestions: Boolean = false
 )
 
 private sealed interface CompressionMode {
@@ -350,7 +372,15 @@ fun volumeCompressionLabel(
         }
     }
     val summary = seed?.activeSummary
-    if (summary != null) return if (stale == true) "查看整卷梗概 · 已过期" else "查看整卷梗概"
+    if (summary != null) {
+        // 分析中提示回来确认；分析结束且仍有未处理建议时直接进入差异，否则先看梗概
+        when (seed?.outlineUpdate?.status) {
+            OutlineUpdateStatus.ANALYZING -> return "确认大纲差异化中"
+            OutlineUpdateStatus.READY ->
+                if (seed?.outlineHasOpenSuggestions == true) return "查看大纲差异化"
+        }
+        return if (stale == true) "查看整卷梗概 · 已过期" else "查看整卷梗概"
+    }
     val latest = seed?.latestSession
     if (latest != null && latest.statusEnumValue in listOf(
             VolumeCompressionStatus.FAILED,
@@ -398,7 +428,7 @@ fun VolumeCompressionHost(
                     VolumeCompressionStatus.AWAITING_CONFIRMATION ->
                     CompressionMode.Candidate(current.activeSession.id)
                 current.activeSession != null -> CompressionMode.Progress(current.activeSession.id)
-                // F6：未处理完的大纲差异优先于梗概页，避免用户看不到待确认建议
+                // F6：有未处理建议时直接看差异；否则先进梗概，确认后再跳转差异
                 outlineSessionId != null && outline?.status == "ANALYZING" ->
                     CompressionMode.Outline(outlineSessionId)
                 outlineSessionId != null && outline?.status == "FAILED" ->
@@ -511,6 +541,18 @@ fun VolumeCompressionHost(
             loadVersions = { vm.versions(volume.id) },
             loadSession = { vm.sessionOf(it) },
             onDismiss = onDismiss,
+            onConfirmed = { sessionId ->
+                scope.launch {
+                    // 大纲差异与梗概同属一次压缩任务，确认梗概后默认落到对应差异
+                    val update = sessionId?.let { vm.outlineUpdateOf(it) }
+                    if (update != null) {
+                        seed = null
+                        mode = CompressionMode.Outline(update.sessionId)
+                    } else {
+                        onDismiss()
+                    }
+                }
+            },
             onSave = { id, text -> vm.saveUserContent(id, text) },
             onRestore = { id -> vm.restoreVersion(id) },
             onRecompress = { sessionId ->
@@ -1029,6 +1071,7 @@ private fun CompressionSummaryDialog(
     loadVersions: suspend (Long) -> List<VolumeSummary>,
     loadSession: suspend (Long?) -> VolumeCompressionSession?,
     onDismiss: () -> Unit,
+    onConfirmed: (Long?) -> Unit,
     onSave: suspend (Long, String) -> Boolean,
     onRestore: suspend (Long) -> Boolean,
     onRecompress: (Long?) -> Unit
@@ -1171,7 +1214,14 @@ private fun CompressionSummaryDialog(
             if (editing) {
                 Button(onClick = { saveAndExitEdit() }) { Text("完成") }
             } else {
-                Button(onClick = { if (dirty) saveAndExitEdit() else onDismiss() }) { Text("确认") }
+                Button(onClick = {
+                    val sessionId = current.compressionSessionId
+                    if (dirty) {
+                        scope.launch { if (onSave(current.id, text)) onConfirmed(sessionId) }
+                    } else {
+                        onConfirmed(sessionId)
+                    }
+                }) { Text("确认") }
             }
         },
         dismissButton = {

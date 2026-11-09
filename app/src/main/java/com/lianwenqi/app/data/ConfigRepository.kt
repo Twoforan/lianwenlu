@@ -8,11 +8,13 @@ import com.lianwenqi.app.data.entity.AiModel
 import com.lianwenqi.app.data.entity.Prompt
 import com.lianwenqi.app.data.entity.Provider
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 
 /** 配置领域：提示词、供应商、模型，以及模型请求转发 */
 class ConfigRepository(
     private val db: AppDatabase,
-    private val ai: AiClient = AiClient()
+    private val ai: AiClient = AiClient(),
+    private val prefs: Prefs
 ) : ModelGateway {
     private val promptDao = db.promptDao()
     private val providerDao = db.providerDao()
@@ -80,7 +82,8 @@ class ConfigRepository(
             maxContext = model.maxContext,
             systemPrompt = model.systemPrompt,
             reasoningEnabled = model.reasoningEnabled,
-            reasoningLevel = model.reasoningLevel
+            reasoningLevel = model.reasoningLevel,
+            forceEnglishThinking = prefs.genForceEnglishThinking.first()
         )
     }
 

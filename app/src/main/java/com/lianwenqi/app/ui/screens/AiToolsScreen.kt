@@ -134,6 +134,10 @@ class AiToolsViewModel(private val container: AppContainer) : ViewModel() {
     val genContentWithSummary: StateFlow<Boolean> =
         prefs.genContentWithSummary.stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
+    /** 「思考过程强制使用英文」：开启后模型思考用英文，正文输出仍为中文（默认关闭） */
+    val genForceEnglishThinking: StateFlow<Boolean> =
+        prefs.genForceEnglishThinking.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
     fun setGenSummaryWordRange(min: Int, max: Int) =
         viewModelScope.launch { prefs.setGenSummaryWordRange(min, max) }
 
@@ -143,6 +147,9 @@ class AiToolsViewModel(private val container: AppContainer) : ViewModel() {
         viewModelScope.launch { prefs.setGenContentWordRange(min, max) }
 
     fun setGenContentWithSummary(v: Boolean) = viewModelScope.launch { prefs.setGenContentWithSummary(v) }
+
+    fun setGenForceEnglishThinking(v: Boolean) =
+        viewModelScope.launch { prefs.setGenForceEnglishThinking(v) }
 
     /** 完整表单新建书籍，返回新书 id */
     suspend fun createBookFull(r: BookFormResult): Long = bookRepository.createBook(
@@ -218,7 +225,7 @@ class AiToolsViewModel(private val container: AppContainer) : ViewModel() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AiToolsScreen(onBack: () -> Unit, onOpenCompression: () -> Unit = {}) {
+fun AiToolsScreen(onBack: () -> Unit) {
     val vm = appViewModel { AiToolsViewModel(it) }
     val outlineEnabled by vm.outlineToolEnabled.collectAsState()
     val chapterEnabled by vm.chapterToolEnabled.collectAsState()
@@ -453,33 +460,7 @@ fun AiToolsScreen(onBack: () -> Unit, onOpenCompression: () -> Unit = {}) {
                     Column(Modifier.weight(1f)) {
                         Text("生成设置", fontWeight = FontWeight.SemiBold)
                         Text(
-                            "生成梗概 / 生成正文的字数范围、限定范围与同时生成梗概",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Icon(
-                        Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-
-            // 分卷压缩：整卷梗概的默认来源、完成后是否更新大纲，以及大纲更新范围
-            Card(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .clickable(onClick = onOpenCompression)
-                        .padding(12.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text("分卷压缩", fontWeight = FontWeight.SemiBold)
-                        Text(
-                            "整卷梗概的默认来源、完成后是否更新大纲，以及大纲更新范围",
+                            "生成梗概 / 生成正文的字数范围、限定范围、同时生成梗概与思考语言",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -540,6 +521,7 @@ private fun AiGenerateSettingsScreen(vm: AiToolsViewModel, onBack: () -> Unit) {
     val limitScope by vm.genSummaryLimitScope.collectAsState()
     val contentRange by vm.genContentWordRange.collectAsState()
     val withSummary by vm.genContentWithSummary.collectAsState()
+    val forceEnglishThinking by vm.genForceEnglishThinking.collectAsState()
 
     Scaffold(
         containerColor = GenBg,
@@ -598,6 +580,16 @@ private fun AiGenerateSettingsScreen(vm: AiToolsViewModel, onBack: () -> Unit) {
                     "关闭时若本章没有梗概会提示先填写",
                 checked = withSummary,
                 onCheckedChange = { vm.setGenContentWithSummary(it) }
+            )
+
+            // 思考语言：强制模型的思考过程使用英文，正文输出仍为中文
+            GenToggleCard(
+                icon = Icons.AutoMirrored.Filled.Article,
+                title = "思考过程强制使用英文",
+                desc = "开启后所有生成请求都会要求模型用英文思考（Think in English），最终输出的梗概 / 正文仍使用中文；" +
+                    "关闭时不作语言要求",
+                checked = forceEnglishThinking,
+                onCheckedChange = { vm.setGenForceEnglishThinking(it) }
             )
         }
     }

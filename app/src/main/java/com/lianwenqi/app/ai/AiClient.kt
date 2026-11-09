@@ -194,9 +194,20 @@ class AiClient(
             (System.nanoTime() - lastActivity) / 1_000_000 > timeoutMs
     }
 
+    /**
+     * 实际发送的系统提示：开启「思考过程强制使用英文」时在末尾追加语言要求。
+     * 只约束模型内部的思考 / 推理语言，正文输出仍按原提示词（中文）生成。
+     */
+    private fun systemPromptOf(endpoint: ModelEndpoint): String {
+        if (!endpoint.forceEnglishThinking) return endpoint.systemPrompt
+        return if (endpoint.systemPrompt.isBlank()) ENGLISH_THINKING_HINT
+        else endpoint.systemPrompt.trimEnd() + "\n\n" + ENGLISH_THINKING_HINT
+    }
+
     private fun buildMessages(endpoint: ModelEndpoint, turns: List<ChatTurn>): List<ChatMessageDto> =
         buildList {
-            if (endpoint.systemPrompt.isNotBlank()) add(ChatMessageDto("system", endpoint.systemPrompt))
+            val system = systemPromptOf(endpoint)
+            if (system.isNotBlank()) add(ChatMessageDto("system", system))
             turns.forEach { add(ChatMessageDto(it.role.name.lowercase(), it.content)) }
         }
 
@@ -475,7 +486,7 @@ class AiClient(
             input = turns.map { ChatMessageDto(it.role.name.lowercase(), it.content) },
             temperature = endpoint.temperature,
             maxOutputTokens = endpoint.maxTokens.takeIf { it > 0 },
-            instructions = endpoint.systemPrompt.ifBlank { null },
+            instructions = systemPromptOf(endpoint).ifBlank { null },
             promptCacheKey = cacheKey(endpoint),
             reasoning = reasoningFields(endpoint, ApiType.RESPONSES).reasoning,
             tools = responsesTools(tools)
@@ -524,7 +535,7 @@ class AiClient(
             input = turns.map { ChatMessageDto(it.role.name.lowercase(), it.content) },
             temperature = endpoint.temperature,
             maxOutputTokens = endpoint.maxTokens.takeIf { it > 0 },
-            instructions = endpoint.systemPrompt.ifBlank { null },
+            instructions = systemPromptOf(endpoint).ifBlank { null },
             stream = true,
             promptCacheKey = cacheKey(endpoint),
             reasoning = reasoningFields(endpoint, ApiType.RESPONSES).reasoning,
@@ -646,8 +657,9 @@ class AiClient(
         tools: List<AiToolSpec> = emptyList()
     ): AnthropicRequest {
         val system = buildList {
-            if (endpoint.systemPrompt.isNotBlank()) {
-                add(AnthropicBlock(type = "text", text = endpoint.systemPrompt))
+            val prompt = systemPromptOf(endpoint)
+            if (prompt.isNotBlank()) {
+                add(AnthropicBlock(type = "text", text = prompt))
             }
             turns.filter { it.role == ChatRole.SYSTEM }.forEach {
                 add(AnthropicBlock(type = "text", text = it.content))
@@ -866,6 +878,11 @@ class AiClient(
 
         /** 开启思考时，Anthropic 的 max_tokens 需比思考预算多出的余量，留给正文输出 */
         private const val REASONING_MAX_TOKENS_GAP = 1024
+
+        /** 「思考过程强制使用英文」追加到系统提示末尾的要求（正文语言不受影响） */
+        private const val ENGLISH_THINKING_HINT =
+            "Thinking language requirement: if you perform internal reasoning or thinking, do the entire thinking process in English only. " +
+                "The final answer/output that is shown to the user must still be written in Chinese (中文)."
 
         fun defaultClient(): OkHttpClient = OkHttpClient.Builder()
             .connectTimeout(30, TimeUnit.SECONDS)

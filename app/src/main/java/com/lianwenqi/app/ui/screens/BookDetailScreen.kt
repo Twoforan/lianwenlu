@@ -116,6 +116,7 @@ import com.lianwenqi.app.data.encodeOutlineFields
 import com.lianwenqi.app.data.entity.Volume
 import com.lianwenqi.app.data.entity.VolumeCompressionStatus
 import com.lianwenqi.app.data.entity.outlineCategoryLabel
+import com.lianwenqi.app.data.volume.hasOpenSuggestions
 import com.lianwenqi.app.ui.appViewModel
 import com.lianwenqi.app.ui.components.BookCover
 import com.lianwenqi.app.util.ExportUtil
@@ -149,6 +150,8 @@ fun BookDetailScreen(
     val compressionSessions by compressionVm.sessions.collectAsState()
     val activeSummaries by compressionVm.activeSummaries.collectAsState()
     val compressionFreshness by compressionVm.freshness.collectAsState()
+    val compressionOutlineUpdates by compressionVm.outlineUpdates.collectAsState()
+    val compressionOutlineSuggestions by compressionVm.outlineSuggestionsByBook.collectAsState()
     var compressionTarget by remember { mutableStateOf<Volume?>(null) }
     // 后台压缩跑完（进度弹窗可能已关闭）自动弹出候选结果，避免用户错过确认
     val seenCompressionStatus = remember { mutableStateMapOf<Long, String>() }
@@ -320,7 +323,17 @@ fun BookDetailScreen(
                             )
                         }
                         volumeCompressionLabel(
-                            CompressionUiSeed(active, summary, latest),
+                            CompressionUiSeed(
+                                active,
+                                summary,
+                                latest,
+                                latest?.let { l ->
+                                    compressionOutlineUpdates.firstOrNull { it.sessionId == l.id }
+                                },
+                                latest != null && compressionOutlineSuggestions
+                                    .filter { it.sessionId == latest.id }
+                                    .hasOpenSuggestions()
+                            ),
                             summary?.let { compressionFreshness[it.id] }
                         )
                     },

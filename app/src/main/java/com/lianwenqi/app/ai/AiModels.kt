@@ -314,7 +314,9 @@ data class ModelEndpoint(
     /** 是否开启思考/推理模式（默认开启） */
     val reasoningEnabled: Boolean = true,
     /** 思考强度档位存储值：low / medium / high / max（默认最高强度） */
-    val reasoningLevel: String = ReasoningLevel.DEFAULT.storage
+    val reasoningLevel: String = ReasoningLevel.DEFAULT.storage,
+    /** 开启后向系统提示追加要求：思考过程使用英文，最终输出正文仍使用中文 */
+    val forceEnglishThinking: Boolean = false
 )
 
 // ---------- Anthropic Messages 协议 DTO（/v1/messages） ----------

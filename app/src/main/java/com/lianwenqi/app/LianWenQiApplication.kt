@@ -52,7 +52,7 @@ class AppContainer(val app: Application) {
     val backupRepository: BackupRepository = BackupRepository(database, app, prefs)
     val chatRepository: ChatRepository = ChatRepository(database)
     val outlineRepository: OutlineRepository = OutlineRepository(database)
-    val configRepository: ConfigRepository = ConfigRepository(database, aiClient)
+    val configRepository: ConfigRepository = ConfigRepository(database, aiClient, prefs)
     /** 整卷梗概版本仓库（F1）；压缩引擎只写入候选，不自动确认生效 */
     val volumeSummaryRepository: VolumeSummaryRepository = VolumeSummaryRepository(database)
     /** 统一整卷压缩引擎：F2 场景使用章节梗概来源 */

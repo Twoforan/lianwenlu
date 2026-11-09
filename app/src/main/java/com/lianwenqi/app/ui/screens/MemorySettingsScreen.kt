@@ -105,6 +105,10 @@ class MemorySettingsViewModel(private val container: AppContainer) : ViewModel()
     val scopeLimitEnabled: StateFlow<Boolean> =
         prefs.memoryScopeLimitEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
+    /** 限定范围时是否只在本会话第一次勾选记忆检索时询问 */
+    val scopeAskOnce: StateFlow<Boolean> =
+        prefs.memoryScopeAskOncePerSession.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
     /**
      * 向量化工具是否已配置可用（API 模式需填齐 baseUrl / apiKey / 向量模型名；本地模式需已启用）。
      * 未配置时「记忆检索」按钮不可用。
@@ -200,6 +204,9 @@ class MemorySettingsViewModel(private val container: AppContainer) : ViewModel()
     fun setApiKey(v: String) = viewModelScope.launch { prefs.setMemoryEmbeddingApiKey(v) }
     fun setModel(v: String) = viewModelScope.launch { prefs.setMemoryEmbeddingModel(v) }
     fun setScopeLimitEnabled(v: Boolean) = viewModelScope.launch { prefs.setMemoryScopeLimitEnabled(v) }
+    fun setScopeAskOnce(v: Boolean) = viewModelScope.launch {
+        prefs.setMemoryScopeAskOncePerSession(v)
+    }
     fun setAutoVectorize(v: Boolean) = viewModelScope.launch { prefs.setMemoryAutoVectorize(v) }
     fun setBlockQuota(v: Int) = viewModelScope.launch { prefs.setMemoryBlockQuota(v) }
     fun setSearchScope(v: String) = viewModelScope.launch { prefs.setMemorySearchScope(v) }
@@ -224,6 +231,7 @@ fun MemorySettingsScreen(
     val savedApiKey by vm.apiKey.collectAsState()
     val savedModel by vm.model.collectAsState()
     val scopeLimitEnabled by vm.scopeLimitEnabled.collectAsState()
+    val scopeAskOnce by vm.scopeAskOnce.collectAsState()
     val vectorizationReady by vm.vectorizationReady.collectAsState()
     val autoVectorize by vm.autoVectorize.collectAsState()
     val modelOptions by vm.modelOptions.collectAsState()
@@ -419,6 +427,29 @@ fun MemorySettingsScreen(
                     checked = scopeLimitEnabled,
                     onCheckedChange = { vm.setScopeLimitEnabled(it) }
                 )
+            }
+
+            if (scopeLimitEnabled) {
+                Spacer(Modifier.height(12.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("仅在本会话第一次勾选时询问范围")
+                        Text(
+                            if (scopeAskOnce) {
+                                "已开启：每个会话只在第一次勾选记忆检索时弹窗选择范围；之后沿用该范围，" +
+                                    "并自动纳入后续新向量化 / 更新的章节。"
+                            } else {
+                                "关闭：每次勾选记忆检索都会弹窗询问检索范围。"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = scopeAskOnce,
+                        onCheckedChange = { vm.setScopeAskOnce(it) }
+                    )
+                }
             }
 
             Spacer(Modifier.height(12.dp))
