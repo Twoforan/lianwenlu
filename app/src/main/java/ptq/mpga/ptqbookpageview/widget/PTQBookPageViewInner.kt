@@ -10,6 +10,8 @@ import androidx.compose.animation.core.TweenSpec
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
@@ -257,6 +259,26 @@ internal fun PTQBookPageViewInner(
         state = State.ExitAnimStart
     }
 
+    //所有流程的最后，所有状态复位：动画正常结束与「卡死自救」共用
+    fun resetToIdle() {
+        curDragEvent = DragEvent(absO.copy(), absO.copy())
+        state = State.Idle
+        exitPreStartState = false
+        allPoints = AllPoints.default(absO)
+        upsideDown = false
+        pageState = PageState.Loose
+        time = 0L
+        theta = 0f
+        f = 0f
+        animLastPoint = absO.copy()
+        animStartAndEndPoint = DragEvent(absO.copy(), absO.copy())
+        animDuration = arrayOf(animEnterDuration, animExitDuration)
+        isNextOrPrevious = null
+        interruptedInDrag = false
+        dragInitialPoint = absO.copy()
+        turnPageRequestWhenDrag = false
+    }
+
     //动画
     val animFloatRatio by animateFloatAsState(targetValue = if (state == State.EnterAnimStart || state == State.ExitAnimStart) 1f else 0f, finishedListener = {
         //动画结束时触发的回调
@@ -266,24 +288,9 @@ internal fun PTQBookPageViewInner(
             }
 
             State.ExitAnimStart -> {
-                //所有流程的最后，所有状态重置
-                curDragEvent = DragEvent(absO.copy(), absO.copy())
-                state = State.Idle
-                exitPreStartState = false
-                allPoints = AllPoints.default(absO)
-                upsideDown = false
-                pageState = PageState.Loose
-                time = 0L
-                theta = 0f
-                f = 0f
-                animLastPoint = absO.copy()
-                animStartAndEndPoint = DragEvent(absO.copy(), absO.copy())
-                animDuration = arrayOf(animEnterDuration, animExitDuration)
-                if (isNextOrPrevious == true) onNext() else if (isNextOrPrevious == false) onPrevious()
-                isNextOrPrevious = null
-                interruptedInDrag = false
-                dragInitialPoint = absO.copy()
-                turnPageRequestWhenDrag = false
+                val fireNext = isNextOrPrevious
+                resetToIdle()
+                if (fireNext == true) onNext() else if (fireNext == false) onPrevious()
                 isRightToLeftWhenStartLast = isRightToLeftWhenStart
             }
 
@@ -389,6 +396,23 @@ internal fun PTQBookPageViewInner(
 
     Box(modifier = Modifier
         .fillMaxSize()
+        //卡死自救：上一次手势若没有正常收尾（系统取消、输入重启、手指离开屏幕等），
+        //状态会停在 Draggable / EnterAnimStart，之后任何拖动都会被 onDragStart 拒绝，
+        //表现为「停在半翻状态动不了」。下一次按下时直接复位，保证永远能继续翻页。
+        .pointerInput(localConfig) {
+            awaitEachGesture {
+                awaitFirstDown(requireUnconsumed = false)
+                if (!dragGestureStarted &&
+                    (state == State.Draggable || state == State.EnterAnimStart)
+                ) {
+                    resetToIdle()
+                }
+                //等这一轮手势全部抬起，避免同一次滑动里反复触发
+                do {
+                    val event = awaitPointerEvent()
+                } while (event.changes.any { it.pressed })
+            }
+        }
         .pointerInput(
             localConfig,
             dragXRange,
@@ -425,7 +449,6 @@ internal fun PTQBookPageViewInner(
             dragXRange,
             leftUpOnTap,
             absC,
-            interruptedInDrag,
         ) {
             detectDragGestures(
                 onDragStart = { viewSystemOffset: Offset ->
@@ -515,7 +538,9 @@ internal fun PTQBookPageViewInner(
 
                     if (state == State.Draggable) {
                         if (!dragXRange.contains(cur.x)) {
-                            interruptedInDrag = true
+                            //手指拖出可拖动范围时按「松手」收尾走完退出动画。
+                            //这里不能再把 interruptedInDrag 置 true：它曾作为手势检测的 key，
+                            //置位会重启 pointerInput、吞掉 onDragEnd，页面就永远停在半翻状态。
                             onDragEnd.value()
                             return@detectDragGestures
                         }
