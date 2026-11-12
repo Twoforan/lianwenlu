@@ -19,8 +19,10 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import kotlinx.coroutines.delay
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -202,6 +204,8 @@ internal fun PTQBookPageViewInner(
 
     //本次手势是否真正走完了 onDragStart 的初始化，避免用上一次手势的残留坐标启动翻页导致卡在半翻状态
     var dragGestureStarted by remember { mutableStateOf(false) }
+    //当前是否有手指按在屏幕上（用于判断「非 Idle 状态」是用户还在操作，还是流程已丢失）
+    var gestureInProgress by remember { mutableStateOf(false) }
 
     //动画的初始和最终状态
     var animStartAndEndPoint by remember { mutableStateOf(DragEvent(absO.copy(), absO.copy())) }
@@ -277,6 +281,16 @@ internal fun PTQBookPageViewInner(
         interruptedInDrag = false
         dragInitialPoint = absO.copy()
         turnPageRequestWhenDrag = false
+    }
+
+    //兜底自愈：只要「没有手指按着」却仍停在非 Idle 状态超过 1s，说明这一步流程
+    //（动画完成回调 / 手势收尾）已经丢了，直接复位。无论卡在 Draggable 还是
+    //进入 / 退出动画，都会自动回到可翻页状态，不需要重启应用。
+    LaunchedEffect(state, gestureInProgress) {
+        if (state != State.Idle && !gestureInProgress) {
+            delay(1000)
+            if (state != State.Idle && !gestureInProgress) resetToIdle()
+        }
     }
 
     //动画
@@ -402,15 +416,18 @@ internal fun PTQBookPageViewInner(
         .pointerInput(localConfig) {
             awaitEachGesture {
                 awaitFirstDown(requireUnconsumed = false)
-                if (!dragGestureStarted &&
-                    (state == State.Draggable || state == State.EnterAnimStart)
-                ) {
-                    resetToIdle()
+                gestureInProgress = true
+                try {
+                    //拖动残留在 Draggable 时（没有动画在跑）直接复位：下一次按下即可继续翻页。
+                    //动画状态交给上面的超时自愈，避免打断正常翻页动画、吞掉快速连续点击。
+                    if (state == State.Draggable) resetToIdle()
+                    //等这一轮手势全部抬起，避免同一次滑动里反复触发
+                    do {
+                        val event = awaitPointerEvent()
+                    } while (event.changes.any { it.pressed })
+                } finally {
+                    gestureInProgress = false
                 }
-                //等这一轮手势全部抬起，避免同一次滑动里反复触发
-                do {
-                    val event = awaitPointerEvent()
-                } while (event.changes.any { it.pressed })
             }
         }
         .pointerInput(
