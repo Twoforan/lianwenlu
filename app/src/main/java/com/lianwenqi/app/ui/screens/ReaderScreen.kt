@@ -125,6 +125,7 @@ import com.lianwenqi.app.util.readerFontFamily
 import com.lianwenqi.app.util.volumeKeyNavDirection
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
@@ -147,6 +148,9 @@ private const val CHAPTER_SWIPE_DP = 56
 private const val TURN_FLICK_PX = 70f
 private const val TURN_ANIM_MS = 420
 private const val TURN_CANCEL_MS = 180
+
+/** 仿真翻页：拖动距离超过页面宽度的该比例即提交翻页（替代组件默认的"松手点是否越过屏幕中线"） */
+private const val CURL_COMMIT_RATIO = 0.18f
 
 /** 进度面板 / 目录里的一个分卷分组；[volumeId] 为 null 表示未分卷章节 */
 internal data class ReaderVolumeGroup(
@@ -1054,16 +1058,12 @@ private fun PagedReader(
                             }
                         )
                     }
-                    .pointerInput(pages.size) {
-                        detectTapGestures { offset ->
-                            val third = size.width / 3f
-                            when {
-                                offset.x < third -> prevPage()
-                                offset.x > third * 2 -> nextPage()
-                                else -> toggleMenu()
-                            }
-                        }
-                    }
+                    .readerTapZones(
+                        vertical = false,
+                        onPrev = { prevPage() },
+                        onNext = { nextPage() },
+                        onToggleMenu = { toggleMenu() }
+                    )
             ) {
                 Box(Modifier.fillMaxSize().padding(pagePadding)) {
                     Text(
@@ -1106,16 +1106,12 @@ private fun PagedReader(
                 Box(
                     Modifier
                         .fillMaxSize()
-                        .pointerInput(Unit) {
-                            detectTapGestures { offset ->
-                                val third = size.height / 3f
-                                when {
-                                    offset.y < third -> prevPage()
-                                    offset.y > third * 2 -> nextPage()
-                                    else -> toggleMenu()
-                                }
-                            }
-                        }
+                        .readerTapZones(
+                            vertical = true,
+                            onPrev = { prevPage() },
+                            onNext = { nextPage() },
+                            onToggleMenu = { toggleMenu() }
+                        )
                 ) {
                     Box(Modifier.fillMaxSize().padding(pagePadding)) {
                         Text(
@@ -1199,16 +1195,12 @@ private fun PagedReader(
                             }
                         )
                     }
-                    .pointerInput(Unit) {
-                        detectTapGestures { offset ->
-                            val third = size.width / 3f
-                            when {
-                                offset.x < third -> prevPage()
-                                offset.x > third * 2 -> nextPage()
-                                else -> toggleMenu()
-                            }
-                        }
-                    }
+                    .readerTapZones(
+                        vertical = false,
+                        onPrev = { prevPage() },
+                        onNext = { nextPage() },
+                        onToggleMenu = { toggleMenu() }
+                    )
             ) {
                 // 旧页留在底部不动，新页从右侧（向后翻时从左侧）滑入
                 Box(
@@ -1240,12 +1232,99 @@ private fun PagedReader(
 }
 
 /**
+ * 阅读器点击分区（分页模式下使用）：
+ * - 左/上 1/3：上一页，立即响应
+ * - 右/下 1/3：下一页，立即响应
+ * - 中间 1/3 的中央 1/5（0.4~0.6）：单击立即呼出/收起菜单
+ * - 中间 1/3 的其余部分：单击下一页（等待双击判定超时后生效），双击呼出/收起菜单
+ */
+@Composable
+private fun Modifier.readerTapZones(
+    vertical: Boolean,
+    onPrev: () -> Unit,
+    onNext: () -> Unit,
+    onToggleMenu: () -> Unit
+): Modifier {
+    val scope = rememberCoroutineScope()
+    val latestPrev by rememberUpdatedState(onPrev)
+    val latestNext by rememberUpdatedState(onNext)
+    val latestMenu by rememberUpdatedState(onToggleMenu)
+    return this.pointerInput(vertical) {
+        val slop = viewConfiguration.touchSlop
+        val doubleTapTimeout = viewConfiguration.doubleTapTimeoutMillis.toLong()
+        // 中间区域的单击要等双击判定超时后才能确定，避免把双击的第一下当成翻页
+        var pendingSingleTap: Job? = null
+        var lastMiddleTapUp = 0L
+        awaitPointerEventScope {
+            while (true) {
+                val down = awaitFirstDown(requireUnconsumed = false)
+                val start = down.position
+                var moved = false
+                while (true) {
+                    val event = awaitPointerEvent()
+                    val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                    if ((change.position - start).getDistance() > slop) moved = true
+                    if (!change.pressed) break
+                }
+                if (moved) continue
+                val ratio = if (vertical) {
+                    start.y / size.height.coerceAtLeast(1).toFloat()
+                } else {
+                    start.x / size.width.coerceAtLeast(1).toFloat()
+                }
+                when {
+                    ratio < 1f / 3f -> {
+                        pendingSingleTap?.cancel()
+                        pendingSingleTap = null
+                        lastMiddleTapUp = 0L
+                        latestPrev()
+                    }
+
+                    ratio > 2f / 3f -> {
+                        pendingSingleTap?.cancel()
+                        pendingSingleTap = null
+                        lastMiddleTapUp = 0L
+                        latestNext()
+                    }
+
+                    // 正中最窄的一带：单击直接开关菜单，不必等双击判定
+                    ratio in 0.4f..0.6f -> {
+                        pendingSingleTap?.cancel()
+                        pendingSingleTap = null
+                        lastMiddleTapUp = 0L
+                        latestMenu()
+                    }
+
+                    else -> {
+                        val now = System.currentTimeMillis()
+                        if (now - lastMiddleTapUp <= doubleTapTimeout) {
+                            pendingSingleTap?.cancel()
+                            pendingSingleTap = null
+                            lastMiddleTapUp = 0L
+                            latestMenu()
+                        } else {
+                            lastMiddleTapUp = now
+                            pendingSingleTap?.cancel()
+                            pendingSingleTap = scope.launch {
+                                delay(doubleTapTimeout)
+                                latestNext()
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
  * 仿真翻页容器：内部使用移植自 PTQFlipper（MIT，https://github.com/FantasticPornTaiQiang/PTQFlipper）
  * 的 PTQBookPageView，由它负责纸张卷曲、网格扭曲、纸背与阴影的绘制。
  *
  * - [currentPage] 为外部受控页码（可能落在前后章的跨章页上），翻页完成后通过 [onPageChange] 交回新页码
  * - 本章首页 / 末页继续翻时交给 [onPrevChapter] / [onNextChapter] 切章
- * - 左右三分之一交给翻页器翻页，中间三分之一用于呼出菜单
+ * - 左右三分之一点击翻页；中间三分之一单击翻下一页、双击呼出菜单，正中五分之一单击直接呼出菜单
+ * - 拖动距离超过页面宽度的 [CURL_COMMIT_RATIO] 即提交翻页
  * - 音量键通过 [navTick] / [navDir] 触发，复用组件内部的翻页动画
  */
 @Composable
@@ -1276,6 +1355,7 @@ private fun CurlFlipReader(
     val latestPrevChapter by rememberUpdatedState(onPrevChapter)
     val latestNextChapter by rememberUpdatedState(onNextChapter)
     val latestToggleMenu by rememberUpdatedState(onToggleMenu)
+    val tapScope = rememberCoroutineScope()
 
     // 重新分页 / 换章后页面位图需要重拍；不重建组件，避免跨章翻页时闪一下
     LaunchedEffect(pages) {
@@ -1293,8 +1373,12 @@ private fun CurlFlipReader(
     Box(
         Modifier
             .fillMaxSize()
+            // 中间三分之一：单击翻下一页、双击呼出菜单（两侧保持翻页器的即时响应）
             .pointerInput(Unit) {
                 val slop = viewConfiguration.touchSlop
+                val doubleTapTimeout = viewConfiguration.doubleTapTimeoutMillis.toLong()
+                var pendingSingleTap: Job? = null
+                var lastMiddleTapUp = 0L
                 awaitPointerEventScope {
                     while (true) {
                         val down = awaitFirstDown(
@@ -1310,8 +1394,28 @@ private fun CurlFlipReader(
                             if (!change.pressed) break
                         }
                         val third = size.width / 3f
-                        if (!moved && start.x >= third && start.x <= third * 2f) {
+                        if (moved || start.x < third || start.x > third * 2f) continue
+                        // 正中最窄的一带：单击直接开关菜单
+                        if (start.x in size.width * 0.4f..size.width * 0.6f) {
+                            pendingSingleTap?.cancel()
+                            pendingSingleTap = null
+                            lastMiddleTapUp = 0L
                             latestToggleMenu()
+                            continue
+                        }
+                        val now = System.currentTimeMillis()
+                        if (now - lastMiddleTapUp <= doubleTapTimeout) {
+                            pendingSingleTap?.cancel()
+                            pendingSingleTap = null
+                            lastMiddleTapUp = 0L
+                            latestToggleMenu()
+                        } else {
+                            lastMiddleTapUp = now
+                            pendingSingleTap?.cancel()
+                            pendingSingleTap = tapScope.launch {
+                                delay(doubleTapTimeout)
+                                turnRequest.next()
+                            }
                         }
                     }
                 }
@@ -1338,6 +1442,19 @@ private fun CurlFlipReader(
                     touch.x < rightDown.x / 3f -> false
                     touch.x > rightDown.x * 2f / 3f -> true
                     else -> null
+                }
+            }
+            // 松手判定改成"拖动距离超过页面宽度的一小段即翻页"，
+            // 不再要求手指越过屏幕中线，避免短距离滑动回弹造成卡手
+            dragBehavior { rightDown, initialTouchPoint, lastTouchPoint, isRightToLeftWhenStart ->
+                val width = rightDown.x.coerceAtLeast(1f)
+                val movedRatio = abs(lastTouchPoint.x - initialTouchPoint.x) / width
+                val commit = movedRatio > CURL_COMMIT_RATIO
+                when {
+                    commit && isRightToLeftWhenStart -> true to true
+                    commit -> false to false
+                    isRightToLeftWhenStart -> false to null
+                    else -> true to null
                 }
             }
             contents { page, refresh ->

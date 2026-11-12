@@ -2341,8 +2341,8 @@ private fun ContextPicker(
     onToggleVolumeSummary: (Long) -> Unit,
     onToggleVolumeContent: (Long) -> Unit
 ) {
-    // 各分卷的收起状态：默认只展开当前章节所在的分卷
-    val collapsed = remember { mutableStateMapOf<Long, Boolean>() }
+    // 各分卷的展开状态：默认只展开当前章节所在的分卷
+    val expandedState = remember { mutableStateMapOf<Long, Boolean>() }
     Column(
         Modifier
             .fillMaxWidth()
@@ -2406,14 +2406,14 @@ private fun ContextPicker(
             volumes.forEach { v ->
                 val list = chapters.filter { it.volumeId == v.id }
                 if (list.isNotEmpty()) {
-                    val expanded = collapsed[v.id] ?: (v.id == focusVolumeId)
+                    val expanded = expandedState[v.id] ?: (v.id == focusVolumeId)
                     val activeSummary = activeVolumeSummaries.firstOrNull { it.volumeId == v.id }
                     GenVolumeRow(
                         label = v.title,
                         picked = list.count { it.id in selected },
                         total = list.size,
                         expanded = expanded,
-                        onToggleExpand = { collapsed[v.id] = expanded },
+                        onToggleExpand = { expandedState[v.id] = !expanded },
                         volumeSummarySelected =
                             activeSummary != null && activeSummary.id in selectedVolumeSummaryIds,
                         onToggleVolumeSummary = { onToggleVolumeSummaryAsset(v.id) },

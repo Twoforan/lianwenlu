@@ -52,7 +52,7 @@ private const val stateTightDragRightScreenDistanceRatio = 1 / 40f //tight状态
 private const val maxDragXRatio = stateTightDragRightScreenDistanceRatio //手指最大X，和上个变量一样
 private const val minWxRatio = 1 / 25f //W.x的最小值
 
-private const val animStartTimeout = 70//动画在手指拖动多久后开始，此值不宜过大，会造成不准确
+private const val animStartTimeout = 0//动画在手指拖动多久后开始，此值不宜过大，会造成不准确（0=按下后立刻跟手）
 private const val animEnterDuration = 100 //入动画时间，此值不宜过大，会造成不准确
 private const val animExitDuration = animEnterDuration //出动画时间
 
@@ -197,6 +197,9 @@ internal fun PTQBookPageViewInner(
 
     //（在进入State.Draggable之前）是否被responseDragWhen终止，为true意味着无任何响应（不执行退出动画）
     var interruptedInDrag by remember { mutableStateOf(false) }
+
+    //本次手势是否真正走完了 onDragStart 的初始化，避免用上一次手势的残留坐标启动翻页导致卡在半翻状态
+    var dragGestureStarted by remember { mutableStateOf(false) }
 
     //动画的初始和最终状态
     var animStartAndEndPoint by remember { mutableStateOf(DragEvent(absO.copy(), absO.copy())) }
@@ -426,6 +429,7 @@ internal fun PTQBookPageViewInner(
         ) {
             detectDragGestures(
                 onDragStart = { viewSystemOffset: Offset ->
+                    dragGestureStarted = false
                     if (state != State.Idle || !controller.isRenderOk() || localConfig.disabled) {
                         return@detectDragGestures
                     }
@@ -436,15 +440,20 @@ internal fun PTQBookPageViewInner(
                         return@detectDragGestures
                     }
 
-                    dragInitialPoint = touchPoint
+                    dragGestureStarted = true
+                    dragInitialPoint = touchPoint.copy()
                     pageState = PageState.Loose
                     interruptedInDrag = false
-                    curDragEvent = DragEvent(touchPoint, touchPoint)
+                    curDragEvent = DragEvent(touchPoint.copy(), touchPoint.copy())
                     f = viewHeight - touchPoint.y.absoluteValue
-                    animStartAndEndPoint = animStartAndEndPoint.copy(originTouchPoint = touchPoint)
+                    //必须复制：originTouchPoint 之后会被改写为页边坐标，共用实例会污染 dragInitialPoint
+                    animStartAndEndPoint = animStartAndEndPoint.copy(originTouchPoint = touchPoint.copy())
                     time = System.currentTimeMillis()
                 },
                 onDrag = { _: PointerInputChange, dragAmount: Offset ->
+                    if (!dragGestureStarted) {
+                        return@detectDragGestures
+                    }
                     if (!controller.isRenderOk() || localConfig.disabled) {
                         return@detectDragGestures
                     }
@@ -519,11 +528,23 @@ internal fun PTQBookPageViewInner(
                     }
                 },
                 onDragEnd = {
-                    if (interruptedInDrag || localConfig.disabled) {
+                    val started = dragGestureStarted
+                    dragGestureStarted = false
+                    if (!started || interruptedInDrag || localConfig.disabled) {
                         return@detectDragGestures
                     }
 
                     onDragEnd.value()
+                },
+                //手势被系统取消（拖到屏幕外、多指介入等）时也要收尾，否则会停在半翻状态
+                onDragCancel = {
+                    val started = dragGestureStarted
+                    dragGestureStarted = false
+                    if (started && !interruptedInDrag &&
+                        (state == State.Draggable || state == State.EnterAnimStart)
+                    ) {
+                        onDragEnd.value()
+                    }
                 }
             )
         }
