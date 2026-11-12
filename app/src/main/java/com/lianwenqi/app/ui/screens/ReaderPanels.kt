@@ -227,18 +227,32 @@ fun ReaderSettingsPanel(
             onChange = { v -> onFormat { it.copy(indent = v.toInt()) } }
         )
         ReaderValueSlider(
-            label = "左右边距",
-            valueText = "${format.paddingHorizontal} dp",
-            value = format.paddingHorizontal.toFloat(),
+            label = "左边距",
+            valueText = "${format.readerPadStart} dp",
+            value = format.readerPadStart.toFloat(),
             range = 0f..64f,
-            onChange = { v -> onFormat { it.copy(paddingHorizontal = v.toInt()) } }
+            onChange = { v -> onFormat { it.copy(readerPadStart = v.toInt()) } }
         )
         ReaderValueSlider(
-            label = "上下边距",
-            valueText = "${format.paddingVertical} dp",
-            value = format.paddingVertical.toFloat(),
+            label = "右边距",
+            valueText = "${format.readerPadEnd} dp",
+            value = format.readerPadEnd.toFloat(),
             range = 0f..64f,
-            onChange = { v -> onFormat { it.copy(paddingVertical = v.toInt()) } }
+            onChange = { v -> onFormat { it.copy(readerPadEnd = v.toInt()) } }
+        )
+        ReaderValueSlider(
+            label = "上边距",
+            valueText = "${format.readerPadTop} dp",
+            value = format.readerPadTop.toFloat(),
+            range = 0f..64f,
+            onChange = { v -> onFormat { it.copy(readerPadTop = v.toInt()) } }
+        )
+        ReaderValueSlider(
+            label = "下边距",
+            valueText = "${format.readerPadBottom} dp",
+            value = format.readerPadBottom.toFloat(),
+            range = 0f..64f,
+            onChange = { v -> onFormat { it.copy(readerPadBottom = v.toInt()) } }
         )
         ReaderValueSlider(
             label = "字号",

@@ -131,6 +131,7 @@ fun ChapterEditorScreen(
     val style by vm.style.collectAsState()
     val keepScreenOn by vm.keepScreenOn.collectAsState()
     val outline by vm.outline.collectAsState()
+    val oversizedChapter by vm.oversizedChapter.collectAsState()
 
     var currentId by remember { mutableStateOf(chapterId) }
     val summaryTagFlow = remember(currentId) { vm.observeSummaryTags(currentId) }
@@ -769,6 +770,33 @@ fun ChapterEditorScreen(
                 TextButton(onClick = { editingTitle = false }) { Text("取消") }
             }
         )
+    }
+
+    // 超长章节（单章正文超过游标窗口上限）无法整章载入编辑器：给出说明并只允许返回，
+    // 保存入口在 ViewModel 里同步被拦截，避免空缓冲区把真正的正文覆盖掉。
+    if (oversizedChapter) {
+        Column(
+            Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.surface)
+                .padding(horizontal = 32.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                "本章正文过长，无法在编辑器中打开",
+                style = MaterialTheme.typography.titleMedium
+            )
+            Spacer(Modifier.height(12.dp))
+            Text(
+                "单章正文超过 20 万字时，整章读取会超出系统限制。为避免正文被覆盖丢失，" +
+                    "编辑页暂不加载本章，请先拆分章节。",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(24.dp))
+            TextButton(onClick = onBack) { Text("返回") }
+        }
     }
 
     msg?.let {

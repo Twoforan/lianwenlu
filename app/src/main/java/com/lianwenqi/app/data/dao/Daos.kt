@@ -163,15 +163,41 @@ interface ChapterDao {
      * 有效章节：行存在，且 [Chapter.volumeId] 为空（未分卷）或指向同一本书的现存分卷。
      * 旧版本删除分卷只删了 volume 行，会留下 volumeId 悬空的孤儿章节；所有面向用户的读取
      * （目录、阅读、搜索、向量化、记忆检索、备份导出）都必须走这里，避免各写各的过滤条件。
+     *
+     * 列表 / 阅读用的查询把正文限制在前 200000 字：单行超过 SQLite CursorWindow（2MB）
+     * 会让整个查询抛 SQLiteBlobTooBigException 直接闪退，用户在目录 / 翻页时就会崩溃。
+     * 正文超限时追加截断提示；需要完整正文的路径（编辑、备份导出、向量化、整卷梗概）
+     * 仍走 [getByBook] / [getValidByBook] / [getById]，避免写回时丢内容。
      */
     @Query(
-        "SELECT c.* FROM chapter c LEFT JOIN volume v ON v.id = c.volumeId " +
+        "SELECT c.id, c.bookId, c.volumeId, c.title, c.summary, " +
+            "CASE WHEN length(c.content) > 200000 THEN substr(c.content, 1, 200000) " +
+            "|| char(10) || char(10) || '……（本章正文过长，此处仅显示前 20 万字）' " +
+            "ELSE c.content END AS content, " +
+            "c.lastCursor, c.sortOrder, c.createdAt, c.updatedAt " +
+            "FROM chapter c LEFT JOIN volume v ON v.id = c.volumeId " +
             "WHERE c.bookId = :bookId AND (c.volumeId IS NULL OR (v.id IS NOT NULL AND v.bookId = c.bookId)) " +
             "ORDER BY c.sortOrder ASC, c.id ASC"
     )
     fun observeValidByBook(bookId: Long): Flow<List<Chapter>>
 
-    /** 有效章节的可挂起版本，口径与 [observeValidByBook] 完全一致 */
+    /**
+     * 与 [observeValidByBook] 同样的截断口径，供书架统计字数等只读场景使用，
+     * 避免因为某一章体积过大导致整个书架加载失败。
+     */
+    @Query(
+        "SELECT c.id, c.bookId, c.volumeId, c.title, c.summary, " +
+            "CASE WHEN length(c.content) > 200000 THEN substr(c.content, 1, 200000) " +
+            "|| char(10) || char(10) || '……（本章正文过长，此处仅显示前 20 万字）' " +
+            "ELSE c.content END AS content, " +
+            "c.lastCursor, c.sortOrder, c.createdAt, c.updatedAt " +
+            "FROM chapter c LEFT JOIN volume v ON v.id = c.volumeId " +
+            "WHERE c.bookId = :bookId AND (c.volumeId IS NULL OR (v.id IS NOT NULL AND v.bookId = c.bookId)) " +
+            "ORDER BY c.sortOrder ASC, c.id ASC"
+    )
+    suspend fun getValidPreviewByBook(bookId: Long): List<Chapter>
+
+    /** 有效章节的可挂起版本，口径与 [observeValidByBook] 一致，但返回完整正文（编辑、导出、向量化用） */
     @Query(
         "SELECT c.* FROM chapter c LEFT JOIN volume v ON v.id = c.volumeId " +
             "WHERE c.bookId = :bookId AND (c.volumeId IS NULL OR (v.id IS NOT NULL AND v.bookId = c.bookId)) " +
@@ -224,6 +250,9 @@ interface ChapterDao {
     @Query("UPDATE chapter SET volumeId = :volumeId, sortOrder = :order WHERE id = :id")
     suspend fun moveToVolume(id: Long, volumeId: Long?, order: Int)
 
+    @Query("SELECT length(content) FROM chapter WHERE id = :id")
+    suspend fun contentLength(id: Long): Int?
+
     @Query("DELETE FROM chapter WHERE id = :id")
     suspend fun deleteById(id: Long)
 
@@ -231,8 +260,17 @@ interface ChapterDao {
     @Query("DELETE FROM chapter WHERE bookId = :bookId")
     suspend fun deleteByBook(bookId: Long)
 
+    /**
+     * 全书查找：匹配仍基于完整正文，但返回的正文同样截断到前 200000 字，
+     * 避免命中超长章节时整次查询因单行超过 CursorWindow 而崩溃。
+     */
     @Query(
-        "SELECT c.* FROM chapter c LEFT JOIN volume v ON v.id = c.volumeId " +
+        "SELECT c.id, c.bookId, c.volumeId, c.title, c.summary, " +
+            "CASE WHEN length(c.content) > 200000 THEN substr(c.content, 1, 200000) " +
+            "|| char(10) || char(10) || '……（本章正文过长，此处仅显示前 20 万字）' " +
+            "ELSE c.content END AS content, " +
+            "c.lastCursor, c.sortOrder, c.createdAt, c.updatedAt " +
+            "FROM chapter c LEFT JOIN volume v ON v.id = c.volumeId " +
             "WHERE c.bookId = :bookId AND (c.volumeId IS NULL OR (v.id IS NOT NULL AND v.bookId = c.bookId)) AND " +
             "(c.title LIKE '%' || :keyword || '%' OR c.summary LIKE '%' || :keyword || '%' OR c.content LIKE '%' || :keyword || '%') " +
             "ORDER BY c.sortOrder ASC, c.id ASC"

@@ -460,8 +460,8 @@ fun ReaderScreen(bookId: Long, chapterId: Long, onBack: () -> Unit) {
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
                 .padding(
-                    start = format.paddingHorizontal.dp,
-                    end = format.paddingHorizontal.dp,
+                    start = format.readerPadStart.dp,
+                    end = format.readerPadEnd.dp,
                     bottom = 6.dp
                 ),
             verticalAlignment = Alignment.CenterVertically
@@ -712,10 +712,10 @@ private fun ScrollReader(
             .windowInsetsPadding(WindowInsets.statusBars)
             .windowInsetsPadding(WindowInsets.navigationBars),
         contentPadding = PaddingValues(
-            start = format.paddingHorizontal.dp,
-            end = format.paddingHorizontal.dp,
-            top = format.paddingVertical.dp,
-            bottom = (format.paddingVertical + READER_FOOTER_SPACE).dp
+            start = format.readerPadStart.dp,
+            end = format.readerPadEnd.dp,
+            top = format.readerPadTop.dp,
+            bottom = (format.readerPadBottom + READER_FOOTER_SPACE).dp
         )
     ) {
         itemsIndexed(chapters, key = { _, ch -> ch.id }) { i, ch ->
@@ -773,17 +773,28 @@ private fun PagedReader(
         // 页内留白与页脚占位改为在每页内部内缩，页面本身铺满整屏，
         // 这样纸张背景可以和文字一起参与翻页动画。
         val pagePadding = PaddingValues(
-            start = format.paddingHorizontal.dp,
-            end = format.paddingHorizontal.dp,
-            top = format.paddingVertical.dp,
-            bottom = (format.paddingVertical + READER_FOOTER_SPACE).dp
+            start = format.readerPadStart.dp,
+            end = format.readerPadEnd.dp,
+            top = format.readerPadTop.dp,
+            bottom = (format.readerPadBottom + READER_FOOTER_SPACE).dp
         )
-        val widthPx = with(localDensity) {
-            (maxWidth - (format.paddingHorizontal * 2).dp).roundToPx()
+        val targetWidthPx = with(localDensity) {
+            (maxWidth - (format.readerPadStart + format.readerPadEnd).dp).roundToPx()
         }
-        val heightPx = with(localDensity) {
-            (maxHeight - (format.paddingVertical * 2 + READER_FOOTER_SPACE).dp).roundToPx()
+        val targetHeightPx = with(localDensity) {
+            (maxHeight - (format.readerPadTop + format.readerPadBottom + READER_FOOTER_SPACE).dp)
+                .roundToPx()
         }
+        // 系统栏动画 / 首次布局会让可用宽高在连续几帧内反复变化（实测 2400→2407→2442→2454）。
+        // 若每帧都重新分页，一次进入阅读器就要把当前章与前后章各排几遍，
+        // 长章节会明显卡顿甚至 ANR。这里等尺寸稳定一小段时间后再排版，只排一次。
+        var stableSize by remember { mutableStateOf(targetWidthPx to targetHeightPx) }
+        LaunchedEffect(targetWidthPx, targetHeightPx) {
+            delay(120)
+            stableSize = targetWidthPx to targetHeightPx
+        }
+        val widthPx = stableSize.first
+        val heightPx = stableSize.second
 
         // 已排版过的章节页缓存：跨章翻页动画需要取到上一章末页 / 下一章首页
         val chapterPageCache = remember(widthPx, heightPx, textStyle) {
@@ -1430,7 +1441,8 @@ private fun CurlFlipReader(
             onTurnPageRequest { page, next, success ->
                 if (success) {
                     val destination = page + if (next) 1 else -1
-                    latestOnPageChange(destination.coerceIn(0, latestPageCount - 1))
+                    // 页数可能因重新分页瞬间变化，避免 coerceIn 的空区间异常
+                    latestOnPageChange(destination.coerceIn(0, (latestPageCount - 1).coerceAtLeast(0)))
                 } else if (next) {
                     latestNextChapter()
                 } else {
@@ -1471,8 +1483,45 @@ private fun CurlFlipReader(
     }
 }
 
-/** 把整章文本按可视高度切成若干页，切分点落在行边界上，并记录每页起始偏移 */
+/** 单次排版的最大字符数：超长章节分段排版，避免一个 TextLayoutResult 撑爆内存 */
+private const val PAGINATE_CHUNK_CHARS = 8000
+
+/**
+ * 把整章文本按可视高度切成若干页，切分点落在行边界上，并记录每页起始偏移。
+ * 章节过长时分段排版：一次性排版几十万字既会长时间占用主线程，也容易 OOM 崩溃。
+ */
 private fun paginate(
+    measurer: TextMeasurer,
+    text: AnnotatedString,
+    style: TextStyle,
+    widthPx: Int,
+    heightPx: Int
+): List<ReaderPage> {
+    if (text.isEmpty() || widthPx <= 0 || heightPx <= 0) return listOf(ReaderPage(0, text))
+    if (text.length <= PAGINATE_CHUNK_CHARS * 3) {
+        return paginateRange(measurer, text, style, widthPx, heightPx)
+    }
+    val pages = mutableListOf<ReaderPage>()
+    val plain = text.text
+    var chunkStart = 0
+    while (chunkStart < plain.length) {
+        var chunkEnd = (chunkStart + PAGINATE_CHUNK_CHARS).coerceAtMost(plain.length)
+        if (chunkEnd < plain.length) {
+            // 尽量在段落边界切开，避免把一句话拆到两个排版结果里
+            val newline = plain.indexOf('\n', chunkEnd)
+            if (newline >= 0) chunkEnd = newline + 1
+        }
+        val chunk = text.subSequence(chunkStart, chunkEnd)
+        paginateRange(measurer, chunk, style, widthPx, heightPx).forEach { page ->
+            pages.add(ReaderPage(chunkStart + page.startChar, page.text))
+        }
+        chunkStart = chunkEnd
+    }
+    return pages.ifEmpty { listOf(ReaderPage(0, text)) }
+}
+
+/** 对一段文本（不超过 [PAGINATE_CHUNK_CHARS] × 3 字符）执行分页，页偏移相对该段起点 */
+private fun paginateRange(
     measurer: TextMeasurer,
     text: AnnotatedString,
     style: TextStyle,

@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.lianwenqi.app.AppContainer
 import com.lianwenqi.app.ai.AiRequest
 import com.lianwenqi.app.ai.ChatTurn
+import com.lianwenqi.app.data.MAX_CHAPTER_CONTENT_CHARS
 import com.lianwenqi.app.data.entity.Book
 import com.lianwenqi.app.data.entity.Chapter
 import com.lianwenqi.app.data.entity.ChatRole
@@ -21,6 +22,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
@@ -74,11 +76,23 @@ class ChapterEditorViewModel(
 
     private var saveJob: Job? = null
 
+    /** 当前章节正文超过 [MAX_CHAPTER_CONTENT_CHARS]，编辑页无法整章载入（会触发游标窗口崩溃） */
+    private val _oversizedChapter = MutableStateFlow(false)
+    val oversizedChapter: StateFlow<Boolean> = _oversizedChapter
+
     fun switchChapter(id: Long) {
         currentChapterId = id
     }
 
-    suspend fun loadChapter(id: Long = currentChapterId): Chapter? = bookRepository.getChapter(id)
+    suspend fun loadChapter(id: Long = currentChapterId): Chapter? {
+        // 先只查长度：超长章节直接返回空，避免整章读取抛 SQLiteBlobTooBigException 闪退
+        if (bookRepository.chapterContentLength(id) > MAX_CHAPTER_CONTENT_CHARS) {
+            _oversizedChapter.value = true
+            return null
+        }
+        _oversizedChapter.value = false
+        return bookRepository.getChapter(id)
+    }
 
     /** 章节梗概标签（与梗概正文分开保存，不拼接进梗概） */
     fun observeSummaryTags(chapterId: Long) =
@@ -152,6 +166,7 @@ class ChapterEditorViewModel(
     }
 
     fun saveNow(title: String, summary: String, content: String, cursor: Int) = viewModelScope.launch {
+        if (_oversizedChapter.value) return@launch
         saveJob?.cancel()
         commit(currentChapterId, title, summary, content, cursor)
         bookRepository.touchBook(bookId, currentChapterId, title)
@@ -164,11 +179,14 @@ class ChapterEditorViewModel(
      */
     fun saveChapter(chapterId: Long, title: String, summary: String, content: String, cursor: Int) =
         viewModelScope.launch {
+            // 超长章节没有载入正文，缓冲区是空的，落库会覆盖真实内容，必须拦掉
+            if (_oversizedChapter.value) return@launch
             saveJob?.cancel()
             bookRepository.saveChapterContent(chapterId, title, summary, content, cursor)
         }
 
     private suspend fun commit(chapterId: Long, title: String, summary: String, content: String, cursor: Int) {
+        if (_oversizedChapter.value) return
         bookRepository.saveChapterContent(chapterId, title, summary, content, cursor)
         bookRepository.touchBook(bookId, chapterId, title)
     }

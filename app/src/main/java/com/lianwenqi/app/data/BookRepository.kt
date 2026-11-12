@@ -13,6 +13,13 @@ import kotlinx.coroutines.flow.map
 
 enum class SortMode { TIME, NAME }
 
+/**
+ * 单章正文可整章读入内存的上限（字）。
+ * 超过该值的一行会超出 SQLite CursorWindow（2MB）上限，直接读取会抛 SQLiteBlobTooBigException；
+ * 列表 / 阅读 / 查找走截断查询，编辑页遇到超限章节会提示而不是闪退。
+ */
+const val MAX_CHAPTER_CONTENT_CHARS = 200_000
+
 /** 书籍列表所需的聚合信息 */
 data class BookSummary(
     val book: Book,
@@ -55,7 +62,8 @@ class BookRepository(
     fun observeBookSummaries(mode: SortMode, asc: Boolean): Flow<List<BookSummary>> =
         observeBooks(mode, asc).map { books ->
             books.map { b ->
-                val chapters = chapterDao.getValidByBook(b.id)
+                // 书架统计只读正文前 20 万字，超长章节不会让整个书架加载崩溃
+                val chapters = chapterDao.getValidPreviewByBook(b.id)
                 BookSummary(
                     book = b,
                     wordCount = chapters.sumOf { TextTool.countWords(it.content) },
@@ -203,6 +211,9 @@ class BookRepository(
     fun observeChapter(id: Long): Flow<Chapter?> = chapterDao.observeById(id)
 
     suspend fun getChapter(id: Long): Chapter? = chapterDao.getById(id)
+
+    /** 章节正文长度（不读正文本身），用于判断能否整章载入编辑器 */
+    suspend fun chapterContentLength(id: Long): Int = chapterDao.contentLength(id) ?: 0
 
     suspend fun createVolume(bookId: Long, prefix: String? = null): Long {
         val book = bookDao.getById(bookId)

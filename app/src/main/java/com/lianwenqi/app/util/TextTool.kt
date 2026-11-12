@@ -17,6 +17,11 @@ data class FormatSettings(
     val paddingBottom: Int = 24,
     /** 阅读页上下边距（dp），仅阅读器使用 */
     val paddingVertical: Int = 12,
+    /** 阅读页四边边距（dp），仅阅读器使用；左右 / 上下可分别设置 */
+    val readerPadStart: Int = 16,
+    val readerPadEnd: Int = 16,
+    val readerPadTop: Int = 12,
+    val readerPadBottom: Int = 12,
     /** 首行缩进字符数 */
     val indent: Int = 2,
     /** 段落之间空行数 */

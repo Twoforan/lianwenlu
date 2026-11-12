@@ -176,6 +176,11 @@ class Prefs(private val context: Context) {
         val rPadH = intPreferencesKey("reader_fmt_pad_h")
         val rPadBottom = intPreferencesKey("reader_fmt_pad_bottom")
         val rPadV = intPreferencesKey("reader_fmt_pad_v")
+        // 阅读页四边边距（左右 / 上下可分别设置），旧值 rPadH / rPadV 仅用于迁移
+        val rPadStart = intPreferencesKey("reader_fmt_pad_start")
+        val rPadEnd = intPreferencesKey("reader_fmt_pad_end")
+        val rPadTop = intPreferencesKey("reader_fmt_pad_top")
+        val rPadBottomEdge = intPreferencesKey("reader_fmt_pad_bottom_edge")
         val rIndent = intPreferencesKey("reader_fmt_indent")
         val rBlankLines = intPreferencesKey("reader_fmt_blank_lines")
 
@@ -386,6 +391,11 @@ class Prefs(private val context: Context) {
             paddingHorizontal = it[K.rPadH] ?: 16,
             paddingBottom = it[K.rPadBottom] ?: 24,
             paddingVertical = it[K.rPadV] ?: 12,
+            // 四边边距：首次升级时沿用手上原有的左右 / 上下边距
+            readerPadStart = it[K.rPadStart] ?: it[K.rPadH] ?: 16,
+            readerPadEnd = it[K.rPadEnd] ?: it[K.rPadH] ?: 16,
+            readerPadTop = it[K.rPadTop] ?: it[K.rPadV] ?: 12,
+            readerPadBottom = it[K.rPadBottomEdge] ?: it[K.rPadV] ?: 12,
             indent = it[K.rIndent] ?: 2,
             blankLines = it[K.rBlankLines] ?: 0
         )
@@ -568,6 +578,10 @@ class Prefs(private val context: Context) {
             it[K.rPadH] = next.paddingHorizontal
             it[K.rPadBottom] = next.paddingBottom
             it[K.rPadV] = next.paddingVertical
+            it[K.rPadStart] = next.readerPadStart
+            it[K.rPadEnd] = next.readerPadEnd
+            it[K.rPadTop] = next.readerPadTop
+            it[K.rPadBottomEdge] = next.readerPadBottom
             it[K.rIndent] = next.indent
             it[K.rBlankLines] = next.blankLines
         }
