@@ -28,7 +28,9 @@ const val REFERENCE_BLOCK_HEADER = "以下是参考资料，请在写作时参�
  * 排在稳定前缀之后、本轮用户输入之前，避免把历史当成正在续写的回答。
  */
 const val HISTORY_SUMMARY_HEADER = "【历史梗概】\n以下为本会话历史章节的梗概，请作为前情参考：\n"
-const val HISTORY_CONTENT_HEADER = "【历史正文】\n以下为本会话历史章节的正文，请作为前情参考：\n"
+const val HISTORY_CONTENT_HEADER =
+    "【历史正文】\n以下为本会话历史章节已完成的正文，仅用于衔接前情、保持人物与设定一致：" +
+        "严禁照抄、复述或扩写其中任何章节的内容，本章必须依据「本章梗概」撰写全新情节。\n"
 const val HISTORY_DIALOGUE_HEADER = "【历史对话】\n以下为本会话的历史消息，请作为前情参考：\n"
 
 /**

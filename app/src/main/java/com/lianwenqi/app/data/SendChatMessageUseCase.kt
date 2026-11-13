@@ -135,8 +135,13 @@ data class SendChatRequest(
     val stylePrefix: String = "",
     /** 会话级的「自定义前缀」（纯文本），为空则不发送 */
     val prefixText: String = "",
-    /** 会话已冻结的「参考资料前缀」（书籍/大纲/章节字面文本），为空则不发送 */
+    /** 会话已冻结的「参考资料前缀」（书籍/章节字面文本），为空则不发送 */
     val referencePrefix: String = "",
+    /**
+     * 会话已冻结的大纲条目（逐条）：排在历史对话之后注入，新追加大纲不会打断前面的前缀缓存。
+     * 与 [referencePrefix] 互不重复（大纲已从参考资料前缀中剔除）。
+     */
+    val outlineBlocks: List<String> = emptyList(),
     /**
      * 「历史对话前缀」（历史梗概 / 历史正文 / 每轮消息）渲染成的整段文本，
      * 仅用于提示词日志回显；真正发给模型的历史对话见 [historyTurns]。
@@ -301,15 +306,40 @@ object HistoryChapters {
         chapters.sortedWith(compareBy({ it.bookId }, { it.sortOrder }, { it.id }))
 
     /** 渲染历史梗概块正文：跳过空梗概，每章带标题区分 */
-    fun renderSummary(chapters: List<Chapter>): String = chapters
+    fun renderSummary(chapters: List<Chapter>): String = renderSummaryBlocks(chapters).joinToString("\n\n")
+
+    /**
+     * 按章节拆开的历史梗概：每章一条，供生成请求逐条作为独立消息注入。
+     * 逐条注入而非拼成一整块，是为了让上一轮请求的消息序列成为本轮请求的逐字节前缀，
+     * 从而跨章命中供应商侧缓存（整块拼接时内容逐轮变长，整块缓存全部失效）。
+     */
+    fun renderSummaryBlocks(chapters: List<Chapter>): List<String> = chapters
         .filter { it.summary.isNotBlank() }
-        .joinToString("\n\n") { "【章节】${it.title.trim()}\n梗概：${it.summary.trim()}" }
+        .map { "【章节】${it.title.trim()}\n梗概：${it.summary.trim()}" }
 
     /** 渲染历史正文块正文：跳过空正文，使用完整正文（不截断、不摘要） */
-    fun renderContent(chapters: List<Chapter>): String = chapters
+    fun renderContent(chapters: List<Chapter>): String = renderContentBlocks(chapters).joinToString("\n\n")
+
+    /**
+     * 按章节拆开的历史正文：每章一条，供生成请求逐条作为独立消息注入。
+     * 逐条注入而非拼成一整块，是为了让上一轮请求的消息序列成为本轮请求的逐字节前缀，
+     * 从而跨章命中供应商侧缓存（整块拼接时内容逐轮变长，整块缓存全部失效）。
+     */
+    fun renderContentBlocks(chapters: List<Chapter>): List<String> = chapters
         .filter { it.content.isNotBlank() }
-        .joinToString("\n\n") { "【章节】${it.title.trim()}\n正文：${it.content.trim()}" }
+        .map { "【章节】${it.title.trim()}\n正文：${it.content.trim()}" }
+
+    /**
+     * 按章节拆开的历史正文（结构化）：生成请求把它还原成「user 要求生成 → assistant 正文」的
+     * 真实对话轮次，使第 N 章的完整请求成为第 N+1 章请求的逐字节前缀，跨章命中前缀缓存。
+     */
+    fun renderContentTurns(chapters: List<Chapter>): List<HistoryContentTurn> = chapters
+        .filter { it.content.isNotBlank() }
+        .map { HistoryContentTurn(it.title.trim(), it.content.trim()) }
 }
+
+/** 历史章节正文：章节标题（用于构造当轮的生成要求）+ 该章正文 */
+data class HistoryContentTurn(val title: String, val content: String)
 
 /**
  * 「发送 AI 消息」用例：组装上下文与历史 → 流式请求模型 → 写回助手消息 → 解析工具区块。
@@ -376,6 +406,8 @@ class SendChatMessageUseCase(
                 // 兼容没有提供结构化轮次的调用方（例如旧测试 / 外部构造的请求）
                 add(ChatTurn(ChatRole.SYSTEM, request.historyPrefix))
             }
+            // 大纲逐条排在历史对话之后：新增条目只影响其后内容，不会顶掉历史段已建立的缓存
+            request.outlineBlocks.forEach { add(ChatTurn(ChatRole.SYSTEM, it)) }
             // 最后一轮始终是真实的用户输入；历史以助手消息结尾时（编辑回答后继续）补兜底指令
             if (finalTurn != null && finalTurn.role == ChatRole.USER) {
                 add(finalTurn)

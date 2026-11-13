@@ -521,6 +521,26 @@ data class SessionPrefix(
         )
 
     /**
+     * 按条拆分已冻结的大纲：分类标题规则与 [renderEntries] 一致。
+     * 供请求逐条注入（排在历史正文之后），新追加大纲时只影响其后内容，
+     * 不会像整块参考资料那样把历史正文的缓存一并打断。
+     */
+    fun renderOutlineBlocks(entries: List<PrefixEntry>): List<String> {
+        val blocks = mutableListOf<String>()
+        var prevCategory: String? = null
+        entries.forEach { entry ->
+            val sb = StringBuilder()
+            if (entry.category != prevCategory) {
+                sb.append("【").append(outlineCategoryLabel(entry.category)).append("】\n")
+                prevCategory = entry.category
+            }
+            sb.append(entry.text)
+            blocks += sb.toString().trimEnd('\n')
+        }
+        return blocks
+    }
+
+    /**
      * 按「书籍 → 大纲 → 整卷梗概 → 章节」顺序拼接条目文本（大纲按相邻分类去重输出分类标题）。
      * 既用于前置的参考资料预设，也用于「本轮新勾选内容」追加到历史对话尾端。
      */
