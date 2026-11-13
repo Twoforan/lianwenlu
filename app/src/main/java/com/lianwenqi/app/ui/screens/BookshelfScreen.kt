@@ -22,6 +22,8 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -65,6 +67,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -129,6 +132,21 @@ fun BookshelfScreen(
     // 编辑目标书籍（更多菜单「编辑」）
     var editBookTarget by remember { mutableStateOf<Book?>(null) }
     val selected = remember { mutableStateOf(setOf<Long>()) }
+    // 复制目标书籍：非空时展示「复制内容多选」弹窗
+    var copyTarget by remember { mutableStateOf<BookSummary?>(null) }
+    // 新增 / 复制成功后待定位的新书 id：列表刷新后滚动到该位置
+    var locateBookId by remember { mutableStateOf<Long?>(null) }
+    val listState = rememberLazyListState()
+    val gridState = rememberLazyGridState()
+
+    LaunchedEffect(visibleBooks, locateBookId, listMode) {
+        val target = locateBookId ?: return@LaunchedEffect
+        val index = visibleBooks.indexOfFirst { it.book.id == target }
+        if (index >= 0) {
+            if (listMode) listState.animateScrollToItem(index) else gridState.animateScrollToItem(index)
+            locateBookId = null
+        }
+    }
 
     // 批量管理下按返回键退出多选
     BackHandler(enabled = batchMode) {
@@ -304,6 +322,7 @@ fun BookshelfScreen(
                     )
                 } else if (listMode) {
                     LazyColumn(
+                        state = listState,
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(12.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -324,6 +343,7 @@ fun BookshelfScreen(
                     // 图墙模式：一行三本
                     LazyVerticalGrid(
                         columns = GridCells.Fixed(3),
+                        state = gridState,
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(12.dp),
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -420,7 +440,7 @@ fun BookshelfScreen(
             onPickCover = { uri, cb -> vm.pickCover(uri, cb) },
             onCreateGroup = { vm.createGroupAndGet(it) },
             onConfirm = { r ->
-                // 创建成功后停留在书架，由列表刷新显示新书；失败时保留弹窗并提示原因
+                // 创建成功后关闭弹窗并定位到书架里的新书；失败时保留弹窗并提示原因
                 vm.createBook(
                     title = r.title,
                     intro = r.intro,
@@ -430,7 +450,10 @@ fun BookshelfScreen(
                     chapterPrefix = r.chapterPrefix,
                     groupId = r.groupId,
                     styleId = r.styleId,
-                    onCreated = { showCreate = false },
+                    onCreated = { id ->
+                        showCreate = false
+                        locateBookId = id
+                    },
                     onError = { message ->
                         Toast.makeText(context, message, Toast.LENGTH_LONG).show()
                     }
@@ -549,15 +572,8 @@ fun BookshelfScreen(
                         vm.togglePin(item.book); sheetBook = null
                     },
                     SheetActionItem(Icons.Filled.ContentCopy, "复制本书") {
-                        val srcTitle = item.book.title
+                        copyTarget = item
                         sheetBook = null
-                        vm.copyBookOutline(item.book.id) { title ->
-                            Toast.makeText(
-                                context,
-                                if (title != null) "已复制《$srcTitle》的大纲到《$title》" else "复制失败",
-                                Toast.LENGTH_SHORT
-                            ).show()
-                        }
                     },
                     SheetActionItem(Icons.Filled.DeleteOutline, "删除本书", danger = true) {
                         deleteTarget = item.book
@@ -577,6 +593,60 @@ fun BookshelfScreen(
                 }
             }
         }
+    }
+
+    // 复制本书：勾选要复制的内容（至少一项）
+    copyTarget?.let { target ->
+        var copyOutline by remember(target.book.id) { mutableStateOf(true) }
+        var copySummaries by remember(target.book.id) { mutableStateOf(false) }
+        var copyContent by remember(target.book.id) { mutableStateOf(false) }
+        AlertDialog(
+            onDismissRequest = { copyTarget = null },
+            shape = RoundedCornerShape(24.dp),
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            title = { Text("复制《${target.book.title}》") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        "选择要复制到新书的内容：",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    CopyOptionRow(
+                        label = "复制本书大纲",
+                        checked = copyOutline,
+                        onCheckedChange = { copyOutline = it }
+                    )
+                    CopyOptionRow(
+                        label = "复制本书所有梗概（章节梗概 + 卷梗概）",
+                        checked = copySummaries,
+                        onCheckedChange = { copySummaries = it }
+                    )
+                    CopyOptionRow(
+                        label = "复制本书所有章节正文",
+                        checked = copyContent,
+                        onCheckedChange = { copyContent = it }
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = copyOutline || copySummaries || copyContent,
+                    onClick = {
+                        copyTarget = null
+                        vm.copyBook(target.book.id, copyOutline, copySummaries, copyContent) { newId ->
+                            if (newId > 0) {
+                                Toast.makeText(context, "已复制为新书", Toast.LENGTH_SHORT).show()
+                                locateBookId = newId
+                            } else {
+                                Toast.makeText(context, "复制失败", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    }
+                ) { Text("开始复制") }
+            },
+            dismissButton = { TextButton(onClick = { copyTarget = null }) { Text("取消") } }
+        )
     }
 
     // 单本删除确认
@@ -768,6 +838,18 @@ private fun SheetGridAction(item: SheetActionItem, modifier: Modifier = Modifier
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
+    }
+}
+
+/** 「复制本书」弹窗里的一行复选项 */
+@Composable
+private fun CopyOptionRow(label: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().clickable { onCheckedChange(!checked) },
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        androidx.compose.material3.Checkbox(checked = checked, onCheckedChange = onCheckedChange)
+        Text(label, style = MaterialTheme.typography.bodyMedium)
     }
 }
 

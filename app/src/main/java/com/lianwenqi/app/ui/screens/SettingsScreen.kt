@@ -36,6 +36,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.DropdownMenu
@@ -82,6 +83,7 @@ import com.lianwenqi.app.data.entity.ApiType
 import com.lianwenqi.app.data.entity.Prompt
 import com.lianwenqi.app.data.entity.Provider
 import com.lianwenqi.app.data.BackupPayload
+import com.lianwenqi.app.data.BackupSections
 import com.lianwenqi.app.data.RestoreResult
 import com.lianwenqi.app.ui.appViewModel
 import com.lianwenqi.app.util.ExportUtil
@@ -135,15 +137,23 @@ class SettingsViewModel(private val container: AppContainer) : ViewModel() {
 
     fun defaultBackupName(): String = backupRepository.defaultFileName()
 
-    /** 打包全部书籍到缓存 zip（供分享） */
-    fun createBackup(onDone: (Result<File>) -> Unit) = viewModelScope.launch {
-        onDone(runCatching { withContext(Dispatchers.IO) { backupRepository.createBackupZip() } })
+    /** 打包勾选的分区到缓存 zip（供分享） */
+    fun createBackup(sections: Set<String>, onDone: (Result<File>) -> Unit) = viewModelScope.launch {
+        onDone(runCatching { withContext(Dispatchers.IO) { backupRepository.createBackupZip(sections) } })
     }
 
-    /** 打包并写入用户选中的保存位置，回调备份的书籍数量 */
-    fun saveBackupTo(uri: Uri, onDone: (Result<Int>) -> Unit) = viewModelScope.launch {
-        onDone(runCatching { withContext(Dispatchers.IO) { backupRepository.writeBackupTo(uri) } })
-    }
+    /** 打包勾选的分区并写入用户选中的保存位置，回调备份的书籍数量 */
+    fun saveBackupTo(uri: Uri, sections: Set<String>, onDone: (Result<Int>) -> Unit) =
+        viewModelScope.launch {
+            onDone(
+                runCatching {
+                    withContext(Dispatchers.IO) { backupRepository.writeBackupTo(uri, sections) }
+                }
+            )
+        }
+
+    /** 备份实际包含的分区（旧备份按内容推断） */
+    fun sectionsOf(payload: BackupPayload): Set<String> = backupRepository.availableSections(payload)
 
     /** 读取并校验备份，同时返回与现有书籍重名的书名 */
     fun inspectBackup(uri: Uri, onDone: (Result<Pair<BackupPayload, List<String>>>) -> Unit) =
@@ -156,11 +166,18 @@ class SettingsViewModel(private val container: AppContainer) : ViewModel() {
             )
         }
 
-    /** 恢复备份：[overwrite] 为 true 时整本覆盖同名书籍，否则跳过同名书籍 */
-    fun restoreBackup(payload: BackupPayload, overwrite: Boolean, onDone: (Result<RestoreResult>) -> Unit) =
-        viewModelScope.launch {
-            onDone(runCatching { backupRepository.restore(payload, overwrite) })
-        }
+    /**
+     * 恢复备份：[overwrite] 为 true 时整本覆盖同名书籍，否则跳过同名书籍；
+     * [sections] 为本次勾选要恢复的分区。
+     */
+    fun restoreBackup(
+        payload: BackupPayload,
+        overwrite: Boolean,
+        sections: Set<String>,
+        onDone: (Result<RestoreResult>) -> Unit
+    ) = viewModelScope.launch {
+        onDone(runCatching { backupRepository.restore(payload, overwrite, sections) })
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -190,32 +207,46 @@ fun SettingsScreen(
     var editPrompt by remember { mutableStateOf<Prompt?>(null) }
     var showPromptDialog by remember { mutableStateOf(false) }
 
-    // 数据备份 / 恢复：showBackupMenu 为备份方式选择弹窗；busyText 非空时展示不可取消的进度弹窗
+    // 数据备份 / 恢复：showBackupMenu 为备份多选弹窗；busyText 非空时展示不可取消的进度弹窗
     val context = LocalContext.current
     var showBackupMenu by remember { mutableStateOf(false) }
     var busyText by remember { mutableStateOf<String?>(null) }
     var conflicts by remember { mutableStateOf<List<String>>(emptyList()) }
     var pendingPayload by remember { mutableStateOf<BackupPayload?>(null) }
+    // 备份多选：提示词库 / 系统设置 / 全部书籍内容
+    var backupPrompts by remember { mutableStateOf(true) }
+    var backupSettings by remember { mutableStateOf(true) }
+    var backupBooks by remember { mutableStateOf(true) }
+    var pendingBackupSections by remember { mutableStateOf<Set<String>>(emptySet()) }
+    // 恢复多选：读取备份后展示该备份实际包含的分区
+    var showRestoreOptions by remember { mutableStateOf(false) }
+    var restorePayload by remember { mutableStateOf<BackupPayload?>(null) }
+    var restoreConflicts by remember { mutableStateOf<List<String>>(emptyList()) }
+    var conflictSections by remember { mutableStateOf<Set<String>>(emptySet()) }
 
-    fun restore(payload: BackupPayload, overwrite: Boolean) {
+    fun restore(payload: BackupPayload, overwrite: Boolean, sections: Set<String>) {
         busyText = if (overwrite) "正在覆盖恢复…" else "正在恢复数据…"
-        vm.restoreBackup(payload, overwrite) { result ->
+        vm.restoreBackup(payload, overwrite, sections) { result ->
             busyText = null
             result.onSuccess { r ->
-                Toast.makeText(
-                    context,
-                    "恢复完成：新建 ${r.created} 本，覆盖 ${r.replaced} 本，跳过 ${r.skipped} 本",
-                    Toast.LENGTH_LONG
-                ).show()
+                val parts = buildList {
+                    if (BackupSections.BOOKS in sections) {
+                        add("新建 ${r.created} 本，覆盖 ${r.replaced} 本，跳过 ${r.skipped} 本")
+                    }
+                    if (r.prompts > 0) add("提示词 ${r.prompts} 条")
+                    if (r.settingsRestored > 0) add("系统设置 ${r.settingsRestored} 项")
+                }
+                val suffix = if (parts.isEmpty()) "" else "：" + parts.joinToString("；")
+                Toast.makeText(context, "恢复完成$suffix", Toast.LENGTH_LONG).show()
             }.onFailure {
                 Toast.makeText(context, "恢复失败：${it.message}", Toast.LENGTH_LONG).show()
             }
         }
     }
 
-    fun shareBackup() {
+    fun shareBackup(sections: Set<String>) {
         busyText = "正在打包备份…"
-        vm.createBackup { result ->
+        vm.createBackup(sections) { result ->
             busyText = null
             result.onSuccess { file ->
                 runCatching { ExportUtil.shareFile(context, file, "application/zip", "分享备份") }
@@ -231,10 +262,10 @@ fun SettingsScreen(
     ) { uri ->
         uri?.let {
             busyText = "正在导出备份…"
-            vm.saveBackupTo(it) { result ->
+            vm.saveBackupTo(it, pendingBackupSections) { result ->
                 busyText = null
-                result.onSuccess { count ->
-                    Toast.makeText(context, "备份已保存，共 $count 本书", Toast.LENGTH_LONG).show()
+                result.onSuccess {
+                    Toast.makeText(context, "备份已保存", Toast.LENGTH_LONG).show()
                 }.onFailure {
                     Toast.makeText(context, "备份失败：${it.message}", Toast.LENGTH_LONG).show()
                 }
@@ -250,12 +281,10 @@ fun SettingsScreen(
             vm.inspectBackup(it) { result ->
                 busyText = null
                 result.onSuccess { (payload, duplicated) ->
-                    if (duplicated.isEmpty()) {
-                        restore(payload, overwrite = false)
-                    } else {
-                        pendingPayload = payload
-                        conflicts = duplicated
-                    }
+                    // 读取后按该备份实际包含的分区让用户勾选要恢复的内容
+                    restorePayload = payload
+                    restoreConflicts = duplicated
+                    showRestoreOptions = true
                 }.onFailure {
                     Toast.makeText(context, "恢复失败：${it.message}", Toast.LENGTH_LONG).show()
                 }
@@ -363,7 +392,7 @@ fun SettingsScreen(
                             Column(Modifier.weight(1f)) {
                                 Text("数据备份")
                                 Text(
-                                    "把全部书籍的大纲、正文与梗概打包成 zip，可保存到本机或分享上传",
+                                    "可选择备份提示词库、系统设置与全部书籍的大纲、正文、梗概和卷梗概",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -396,7 +425,7 @@ fun SettingsScreen(
                             Column(Modifier.weight(1f)) {
                                 Text("数据恢复")
                                 Text(
-                                    "导入本应用生成的备份 zip；书名重合时可选择覆盖或跳过",
+                                    "导入本应用生成的备份 zip，按备份里的分区勾选要恢复的内容",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -579,29 +608,123 @@ fun SettingsScreen(
             )
         }
 
-        // 备份方式：保存到文件（SAF）或直接分享
+        // 备份：多选要导出的分区，再选择保存到文件或分享
         if (showBackupMenu) {
+            val sections = buildSet {
+                if (backupBooks) add(BackupSections.BOOKS)
+                if (backupPrompts) add(BackupSections.PROMPTS)
+                if (backupSettings) add(BackupSections.SETTINGS)
+            }
             AlertDialog(
                 onDismissRequest = { showBackupMenu = false },
                 title = { Text("数据备份") },
                 text = {
-                    Text(
-                        "把全部书籍的大纲、正文与梗概打包成 zip 文件。\n\n" +
-                            "· 保存到文件：自己选择本机或网盘的保存位置\n" +
-                            "· 分享：发送到聊天工具 / 网盘等其它应用"
-                    )
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(
+                            "勾选要备份的内容，再选择保存到本机或分享：",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        BackupSectionRow("提示词库", backupPrompts) { backupPrompts = it }
+                        BackupSectionRow("系统设置", backupSettings) { backupSettings = it }
+                        BackupSectionRow(
+                            "全部书籍（大纲 / 正文 / 梗概 / 卷梗概）",
+                            backupBooks
+                        ) { backupBooks = it }
+                    }
                 },
                 confirmButton = {
-                    TextButton(onClick = {
-                        showBackupMenu = false
-                        backupSaveLauncher.launch(vm.defaultBackupName())
-                    }) { Text("保存到文件") }
+                    TextButton(
+                        enabled = sections.isNotEmpty(),
+                        onClick = {
+                            pendingBackupSections = sections
+                            showBackupMenu = false
+                            backupSaveLauncher.launch(vm.defaultBackupName())
+                        }
+                    ) { Text("保存到文件") }
                 },
                 dismissButton = {
                     Row {
-                        TextButton(onClick = { showBackupMenu = false; shareBackup() }) { Text("分享") }
+                        TextButton(
+                            enabled = sections.isNotEmpty(),
+                            onClick = {
+                                pendingBackupSections = sections
+                                showBackupMenu = false
+                                shareBackup(sections)
+                            }
+                        ) { Text("分享") }
                         TextButton(onClick = { showBackupMenu = false }) { Text("取消") }
                     }
+                }
+            )
+        }
+
+        // 恢复：只列出该备份实际包含的分区，按勾选恢复
+        val restoreSource = restorePayload
+        if (showRestoreOptions && restoreSource != null) {
+            val available = remember(restoreSource) { vm.sectionsOf(restoreSource) }
+            var restoreBooks by remember(restoreSource) {
+                mutableStateOf(BackupSections.BOOKS in available)
+            }
+            var restorePrompts by remember(restoreSource) {
+                mutableStateOf(BackupSections.PROMPTS in available)
+            }
+            var restoreSettings by remember(restoreSource) {
+                mutableStateOf(BackupSections.SETTINGS in available)
+            }
+            val selectedSections = buildSet {
+                if (restoreBooks) add(BackupSections.BOOKS)
+                if (restorePrompts) add(BackupSections.PROMPTS)
+                if (restoreSettings) add(BackupSections.SETTINGS)
+            }
+            AlertDialog(
+                onDismissRequest = {
+                    showRestoreOptions = false
+                    restorePayload = null
+                },
+                title = { Text("数据恢复") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(
+                            "备份里包含以下内容，勾选要恢复的部分：",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        if (BackupSections.BOOKS in available) {
+                            BackupSectionRow(
+                                "全部书籍（大纲 / 正文 / 梗概 / 卷梗概）",
+                                restoreBooks
+                            ) { restoreBooks = it }
+                        }
+                        if (BackupSections.PROMPTS in available) {
+                            BackupSectionRow("提示词库", restorePrompts) { restorePrompts = it }
+                        }
+                        if (BackupSections.SETTINGS in available) {
+                            BackupSectionRow("系统设置", restoreSettings) { restoreSettings = it }
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        enabled = selectedSections.isNotEmpty(),
+                        onClick = {
+                            showRestoreOptions = false
+                            restorePayload = null
+                            if (BackupSections.BOOKS in selectedSections && restoreConflicts.isNotEmpty()) {
+                                pendingPayload = restoreSource
+                                conflicts = restoreConflicts
+                                conflictSections = selectedSections
+                            } else {
+                                restore(restoreSource, overwrite = false, sections = selectedSections)
+                            }
+                        }
+                    ) { Text("开始恢复") }
+                },
+                dismissButton = {
+                    TextButton(onClick = {
+                        showRestoreOptions = false
+                        restorePayload = null
+                    }) { Text("取消") }
                 }
             )
         }
@@ -633,7 +756,7 @@ fun SettingsScreen(
                     TextButton(onClick = {
                         pendingPayload = null
                         conflicts = emptyList()
-                        restore(payload, overwrite = true)
+                        restore(payload, overwrite = true, sections = conflictSections)
                     }) { Text("覆盖") }
                 },
                 dismissButton = {
@@ -641,11 +764,12 @@ fun SettingsScreen(
                         TextButton(onClick = {
                             pendingPayload = null
                             conflicts = emptyList()
-                            restore(payload, overwrite = false)
+                            restore(payload, overwrite = false, sections = conflictSections)
                         }) { Text("跳过") }
                         TextButton(onClick = {
                             pendingPayload = null
                             conflicts = emptyList()
+                            conflictSections = emptySet()
                         }) { Text("取消") }
                     }
                 }
@@ -1030,7 +1154,6 @@ private fun AddModelDialog(
     var maxTokens by remember { mutableStateOf(8192) }
     var unlimited by remember { mutableStateOf(false) }
     var maxContext by remember { mutableStateOf(20) }
-    var contextWindowText by remember { mutableStateOf("") }
     var systemPrompt by remember { mutableStateOf("") }
     var reasoningEnabled by remember { mutableStateOf(true) }
     var reasoningLevel by remember { mutableStateOf(ReasoningLevel.DEFAULT.storage) }
@@ -1054,7 +1177,6 @@ private fun AddModelDialog(
                             temperature = temperature,
                             maxTokens = if (unlimited) 0 else maxTokens,
                             maxContext = maxContext,
-                            contextWindow = contextWindowText.toIntOrNull() ?: 0,
                             systemPrompt = systemPrompt,
                             reasoningEnabled = reasoningEnabled,
                             reasoningLevel = reasoningLevel,
@@ -1108,11 +1230,6 @@ private fun AddModelDialog(
             onUnlimitedChange = { unlimited = it }
         )
         MaxContextSetting(maxContext = maxContext, onContextChange = { maxContext = it })
-        Spacer(Modifier.height(8.dp))
-        ContextWindowSetting(
-            value = contextWindowText,
-            onValueChange = { contextWindowText = it }
-        )
         Spacer(Modifier.height(12.dp))
         ReasoningSetting(
             enabled = reasoningEnabled,
@@ -1145,9 +1262,6 @@ private fun ModelDetailDialog(
     var maxTokens by remember { mutableStateOf(if (model.maxTokens > 0) model.maxTokens else 8192) }
     var unlimited by remember { mutableStateOf(model.maxTokens <= 0) }
     var maxContext by remember { mutableStateOf(model.maxContext) }
-    var contextWindowText by remember {
-        mutableStateOf(model.contextWindow.takeIf { it > 0 }?.toString().orEmpty())
-    }
     var systemPrompt by remember { mutableStateOf(model.systemPrompt) }
     var reasoningEnabled by remember { mutableStateOf(model.reasoningEnabled) }
     var reasoningLevel by remember { mutableStateOf(model.reasoningLevel) }
@@ -1174,7 +1288,6 @@ private fun ModelDetailDialog(
                             temperature = temperature,
                             maxTokens = if (unlimited) 0 else maxTokens,
                             maxContext = maxContext,
-                            contextWindow = contextWindowText.toIntOrNull() ?: 0,
                             systemPrompt = systemPrompt,
                             reasoningEnabled = reasoningEnabled,
                             reasoningLevel = reasoningLevel
@@ -1211,11 +1324,6 @@ private fun ModelDetailDialog(
             onUnlimitedChange = { unlimited = it }
         )
         MaxContextSetting(maxContext = maxContext, onContextChange = { maxContext = it })
-        Spacer(Modifier.height(8.dp))
-        ContextWindowSetting(
-            value = contextWindowText,
-            onValueChange = { contextWindowText = it }
-        )
         Spacer(Modifier.height(12.dp))
         ReasoningSetting(
             enabled = reasoningEnabled,
@@ -1288,24 +1396,6 @@ private fun MaxTokensSetting(
     }
 }
 
-/** 模型真实的 Token 上下文窗口（不是历史消息条数）；0 = 未知，分卷压缩需要它来安全分批 */
-@Composable
-private fun ContextWindowSetting(value: String, onValueChange: (String) -> Unit) {
-    OutlinedTextField(
-        value = value,
-        onValueChange = { input -> onValueChange(input.filter { it.isDigit() }.take(9)) },
-        label = { Text("Token 上下文窗口（可选）") },
-        placeholder = { Text("如 128000；留空表示未知") },
-        singleLine = true,
-        modifier = Modifier.fillMaxWidth()
-    )
-    Text(
-        "与上面的「最大上下文（条）」不同：这里填模型能容纳的 Token 总数，仅用于分卷压缩的安全分批。未知时整卷压缩会拒绝启动。",
-        style = MaterialTheme.typography.labelSmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant
-    )
-}
-
 /** 最大上下文：携带的历史消息条数；「不限」时存 0，发送全部历史 */
 @Composable
 private fun MaxContextSetting(maxContext: Int, onContextChange: (Int) -> Unit) {
@@ -1330,6 +1420,15 @@ private fun MaxContextSetting(maxContext: Int, onContextChange: (Int) -> Unit) {
         style = MaterialTheme.typography.labelSmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant
     )
+}
+
+/** 备份 / 恢复弹窗里的一行分区复选项 */
+@Composable
+private fun BackupSectionRow(label: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Checkbox(checked = checked, onCheckedChange = onCheckedChange)
+        Text(label, style = MaterialTheme.typography.bodyMedium)
+    }
 }
 
 /** 思考模式：开关 + 思考强度档位（低 / 中 / 高 / 极）；关闭即关闭模型的思考/推理 */

@@ -19,13 +19,17 @@ class StylePromptInjectionTest {
         source = StyleTagSource.AI
     )
 
+    private fun systemText(turns: List<ChatTurn>) = turns
+        .filter { it.role == com.lianwenqi.app.data.entity.ChatRole.SYSTEM }
+        .joinToString("\n") { it.content }
+
     @Test
     fun `开启标签时梗概提示词要求句子标签结构化输出`() {
         val turns = buildSummaryTurns(
             "写本章梗概", 400..600, withTags = true,
             profileTags = listOf(profileTag(11, "表达方式", "潜台词"))
         )
-        val system = turns.first { it.role == com.lianwenqi.app.data.entity.ChatRole.SYSTEM }.content
+        val system = systemText(turns)
         assertTrue(system.contains("synopsis"))
         assertTrue(system.contains("sentences"))
         assertTrue(system.contains("\"id\":12"))
@@ -35,7 +39,7 @@ class StylePromptInjectionTest {
     @Test
     fun `开启标签但档案没有标签时按普通文本输出`() {
         val turns = buildSummaryTurns("写本章梗概", 400..600, withTags = true, profileTags = emptyList())
-        val system = turns.first { it.role == com.lianwenqi.app.data.entity.ChatRole.SYSTEM }.content
+        val system = systemText(turns)
         assertFalse(system.contains("synopsis"))
         assertTrue(system.contains("只输出最终梗概这一整段文字"))
     }
@@ -46,7 +50,7 @@ class StylePromptInjectionTest {
             "写本章梗概", 400..600, withTags = false,
             profileTags = listOf(profileTag(11, "表达方式", "潜台词"))
         )
-        val system = turns.first { it.role == com.lianwenqi.app.data.entity.ChatRole.SYSTEM }.content
+        val system = systemText(turns)
         assertFalse(system.contains("synopsis"))
         assertTrue(system.contains("只输出最终梗概这一整段文字"))
     }
@@ -75,13 +79,16 @@ class StylePromptInjectionTest {
             summarySentenceBlock = sentenceBlock,
             styleSamplesBlock = buildStyleSampleBlock(hits)
         )
-        val instruction = turns.first { it.role == com.lianwenqi.app.data.entity.ChatRole.SYSTEM }.content
-        // 参考资料是第二个 SYSTEM 轮；最后一轮是用户输入
-        val reference = turns.filter { it.role == com.lianwenqi.app.data.entity.ChatRole.SYSTEM }.last().content
+        val systemTurns = turns.filter { it.role == com.lianwenqi.app.data.entity.ChatRole.SYSTEM }
+        val instruction = systemTurns[0].content
+        // 参考资料是第二个 SYSTEM 轮；最后一个 SYSTEM 轮是本章任务参数
+        val reference = systemTurns[1].content
+        val taskParams = systemTurns.last().content
 
-        assertTrue(instruction.contains("文风标签句例"))
-        assertTrue(instruction.contains("临时文风样本"))
-        assertTrue(instruction.contains("文风优先"))
+        assertTrue(taskParams.contains("文风标签句例"))
+        assertTrue(taskParams.contains("临时文风样本"))
+        assertTrue(taskParams.contains("文风优先"))
+        assertFalse(instruction.contains("文风优先"))
         assertTrue(reference.contains("第一优先表达依据"))
         assertTrue(reference.contains("【本章梗概·文风标签句例】"))
         assertTrue(reference.contains("标签：潜台词、压抑"))

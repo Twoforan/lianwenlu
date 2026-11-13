@@ -225,6 +225,7 @@ class VolumeCompressionViewModel(
         volumeId: Long,
         source: String,
         modelId: Long,
+        maxOutputTokens: Int,
         maxInputChars: Int,
         outputChars: Int
     ): CompressionEstimateResult =
@@ -234,6 +235,7 @@ class VolumeCompressionViewModel(
                 volumeId = volumeId,
                 modelId = modelId,
                 sourceType = source,
+                maxOutputTokensOverride = maxOutputTokens,
                 maxInputChars = maxInputChars,
                 targetOutputChars = outputChars
             )
@@ -258,6 +260,7 @@ class VolumeCompressionViewModel(
                 volumeId = volumeId,
                 modelId = modelId,
                 sourceType = source,
+                maxOutputTokensOverride = snapshot.normalized().maxOutputTokens,
                 maxInputChars = snapshot.normalized().maxCharsPerRequest,
                 targetOutputChars = snapshot.normalized().outputChars
             ),
@@ -469,6 +472,7 @@ fun VolumeCompressionHost(
                     volume.id,
                     source,
                     modelId,
+                    config.normalized().maxOutputTokens,
                     config.normalized().maxCharsPerRequest,
                     config.normalized().outputChars
                 )
@@ -650,7 +654,7 @@ private fun CompressionConfigDialog(
     var starting by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf("") }
 
-    LaunchedEffect(source, modelId, config.maxCharsPerRequest) {
+    LaunchedEffect(source, modelId, config.maxOutputTokens, config.maxCharsPerRequest) {
         if (modelId == 0L) {
             estimateState = EstimateUi.Failed(
                 "请先在设置中配置模型",

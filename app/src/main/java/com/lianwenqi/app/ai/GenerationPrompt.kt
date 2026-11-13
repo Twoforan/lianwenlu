@@ -32,11 +32,14 @@ const val HISTORY_CONTENT_HEADER = "【历史正文】\n以下为本会话历史
 const val HISTORY_DIALOGUE_HEADER = "【历史对话】\n以下为本会话的历史消息，请作为前情参考：\n"
 
 /**
- * 生成任务的开头：有章名时点明「现在撰写的是『第2章』」，无章名时退回「为当前章节」。
+ * 给「稳定前缀」的最后一块打上缓存断点。
+ *
+ * Anthropic 的显式缓存需要把 `cache_control` 落在真正稳定的块上；
+ * 如果留在最后一条 system 上，而尾部又追加了章节标题 / 字数范围等动态内容，
+ * 断点就会每轮变化，缓存反而失效。其他供应商的被动前缀缓存不读取该标记。
  */
-private fun taskHead(chapterTitle: String, action: String): String =
-    if (chapterTitle.isBlank()) "你的任务：$action。\n"
-    else "你的任务：现在撰写的是「${chapterTitle.trim()}」，请$action。\n"
+internal fun List<ChatTurn>.markStablePrefixEnd(): List<ChatTurn> =
+    if (isEmpty()) this else dropLast(1) + last().copy(cacheBreakpoint = true)
 
 /**
  * 生成请求与聊天请求共用的前段块：文风约束（会话内冻结）→ 自定义前缀 → 「以下是参考资料」。
@@ -55,7 +58,7 @@ fun buildGenerationPrefixTurns(
     if (styleBlock.isNotBlank()) add(ChatTurn(ChatRole.SYSTEM, styleBlock))
     if (customPrefix.isNotBlank()) add(ChatTurn(ChatRole.SYSTEM, customPrefix))
     if (reference.isNotBlank()) add(ChatTurn(ChatRole.SYSTEM, REFERENCE_BLOCK_HEADER + reference))
-}
+}.markStablePrefixEnd()
 
 /** 正文段落分隔的块标题（与 [buildContentTurns] 一一对应） */
 private const val HEAD_SUMMARY = "【本章梗概】"
@@ -116,27 +119,37 @@ fun buildSummaryTurns(
     val tagging = withTags && profileTags.isNotEmpty()
     val max = upperBound(range)
     val lower = if (hasLowerBound(range)) range!!.first else null
+    // 稳定指令：不含章节标题 / 字数范围，跨章节可复用同一段 system 前缀。
+    // 所有会随章节变化的内容统一放进末尾的【本章任务参数 / 输出要求】。
     val instruction = buildString {
-        append(taskHead(chapterTitle, "为本章生成梗概"))
+        append("你的任务：为本章生成梗概。\n")
+        append("\n请在草稿里完成下列自检，它们只作为你的内部思考，严禁出现在输出中：\n")
+        append("1. 列出本章必须覆盖的 3–5 个核心事件。\n")
+        append("2. 按事件顺序写梗概草稿。\n")
+        append("3. 数一下草稿字数，并按末尾【本章任务参数】中的字数硬约束调整。\n")
+        append("4. 按末尾【输出要求】输出最终结果。")
+    }
+    val taskParams = buildString {
+        append("【本章任务参数】\n")
+        if (chapterTitle.isNotBlank()) {
+            append("本章标题：").append(chapterTitle.trim()).append('\n')
+        }
         when {
             max == null -> Unit
             lower == null -> append("字数硬约束：最终输出不要超过 ").append(max).append(" 字（含标点）。\n")
             else -> append("字数硬约束：最终输出必须在 ").append(lower).append("–").append(max)
                 .append(" 字之间（含标点）。\n")
         }
-        append("\n请在草稿里完成下列自检，它们只作为你的内部思考，严禁出现在输出中：\n")
-        append("1. 列出本章必须覆盖的 3–5 个核心事件。\n")
-        append("2. 按事件顺序写梗概草稿。\n")
-        append("3. 数一下草稿字数：\n")
         if (lower != null) {
             append("   - 低于 ").append(lower).append("：补充一个次要情节或人物反应的细节；\n")
         }
         if (max != null) {
             append("   - 高于 ").append(max).append("：删除修饰性描写，合并相邻事件；\n")
+            append("   - 在范围内：输出。\n")
         }
-        append("   - 在范围内：输出。\n")
+        append("\n【输出要求】\n")
         if (tagging) {
-            append("4. 把最终梗概按顺序每 3 句合并成一个句段（最后不足 3 句按实际句数），标出符合文风标签的句段，只输出一个 JSON 对象。\n")
+            append("把最终梗概按顺序每 3 句合并成一个句段（最后不足 3 句按实际句数），标出符合文风标签的句段，只输出一个 JSON 对象。\n")
             append("\n句段标签要求：\n")
             append("- synopsis 必须是上面字数约束下的最终梗概整段文字；\n")
             append("- sentences 只收录需要打标的句段，text 必须从 synopsis 中原样复制整个句段（连续的 1～3 句，含标点，不要拆分或改写）；\n")
@@ -155,13 +168,14 @@ fun buildSummaryTurns(
             append("{\"synopsis\":\"最终梗概正文\",\"sentences\":[{\"text\":\"句段原文\",\"tags\":[{\"id\":12}]}]}\n")
             append("\n输出禁令：除该 JSON 对象外，不得输出任何其他内容 —— 包括核心事件清单、步骤说明、字数统计、标题、章节名、列表符号或任何解释。")
         } else {
-            append("4. 只输出最终梗概这一整段文字。\n")
+            append("只输出最终梗概这一整段文字。\n")
             append("\n输出禁令：除最终梗概本身外，不得输出任何其他内容 —— 包括核心事件清单、步骤说明、字数统计、字数区间、标题、章节名、列表符号、markdown 标记或任何解释。")
         }
-    }
+    }.trimEnd('\n')
     return buildList {
-        add(ChatTurn(ChatRole.SYSTEM, instruction))
+        add(ChatTurn(ChatRole.SYSTEM, instruction, cacheBreakpoint = true))
         if (referenceBlock.isNotBlank()) add(ChatTurn(ChatRole.SYSTEM, referenceBlock))
+        add(ChatTurn(ChatRole.SYSTEM, taskParams))
         add(ChatTurn(ChatRole.USER, input.trim().ifBlank { SUMMARY_FALLBACK_INPUT }))
     }
 }
@@ -191,26 +205,34 @@ fun buildContentTurns(
 ): List<ChatTurn> {
     val max = upperBound(range)
     val lower = if (hasLowerBound(range)) range!!.first else null
+    // 稳定指令：不含章节标题 / 字数范围，也不含随本轮样本变化的条款；
+    // 这些动态内容统一放到末尾的【本章任务参数】，避免破坏前面的稳定前缀。
     val instruction = buildString {
-        append(taskHead(chapterTitle, "依据下方「本章梗概」撰写本章正文"))
+        append("你的任务：依据下方「本章梗概」撰写本章正文。\n")
+        append("要求：\n")
+        append("- 严格依据「本章梗概」展开，覆盖其中所有核心事件；\n")
+        append("- 参考「大纲 / 人物设定」，保持人物、世界观与情节走向一致；\n")
+        append("- 「记忆检索参考资料」来自本书已写正文，仅供写作参考，请勿照抄或复述；\n")
+        append("- 只输出正文内容，不要输出标题、章节名、说明、字数统计或任何解释。")
+    }
+    val taskParams = buildString {
+        append("【本章任务参数】\n")
+        if (chapterTitle.isNotBlank()) {
+            append("本章标题：").append(chapterTitle.trim()).append('\n')
+        }
         when {
             max == null -> Unit
             lower == null -> append("字数硬约束：最终正文不要超过 ").append(max).append(" 字（含标点）。\n")
             else -> append("字数硬约束：最终正文必须在 ").append(lower).append("–").append(max)
                 .append(" 字之间（含标点）。\n")
         }
-        append("要求：\n")
         if (styleSamplesBlock.isNotBlank()) {
             append("- 【文风优先】本轮已提供「临时文风样本」：动笔前先对照样本归纳本章要沿用的句式、节奏、描写、用词、对话与叙述视角（不要把这部分写进正文），再让整篇正文保持这些特征；样本只提供写法，不得复制其中的人物、剧情、设定、地点或台词，与梗概、大纲的事实冲突时以后者为准；\n")
         }
-        append("- 严格依据「本章梗概」展开，覆盖其中所有核心事件；\n")
-        append("- 参考「大纲 / 人物设定」，保持人物、世界观与情节走向一致；\n")
-        append("- 「记忆检索参考资料」来自本书已写正文，仅供写作参考，请勿照抄或复述；\n")
         if (summarySentenceBlock.isNotBlank()) {
             append("- 「本章梗概·文风标签句例」是本章梗概中与指定文风标签对应的表达示例，仅参考措辞、节奏和表达方式；不得当作新增剧情设定，不要求照抄；不要在回答中解释标签或输出抽样过程；\n")
         }
-        append("- 只输出正文内容，不要输出标题、章节名、说明、字数统计或任何解释。")
-    }
+    }.trimEnd('\n')
     val reference = buildString {
         if (summary.isNotBlank()) {
             append(HEAD_SUMMARY).append('\n').append(summary.trim()).append('\n')
@@ -234,8 +256,9 @@ fun buildContentTurns(
         }
     }.trimEnd('\n')
     return buildList {
-        add(ChatTurn(ChatRole.SYSTEM, instruction))
+        add(ChatTurn(ChatRole.SYSTEM, instruction, cacheBreakpoint = true))
         if (reference.isNotBlank()) add(ChatTurn(ChatRole.SYSTEM, reference))
+        add(ChatTurn(ChatRole.SYSTEM, taskParams))
         add(ChatTurn(ChatRole.USER, userInput.trim().ifBlank { CONTENT_FALLBACK_INPUT }))
     }
 }

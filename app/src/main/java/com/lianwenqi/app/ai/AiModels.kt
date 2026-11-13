@@ -8,8 +8,18 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
 
-/** 对话消息（发送给模型的统一结构） */
-data class ChatTurn(val role: ChatRole, val content: String)
+/**
+ * 对话消息（发送给模型的统一结构）。
+ *
+ * [cacheBreakpoint] 只对 Anthropic 生效：标记「稳定前缀的最后一块」，
+ * 由请求组装处显式指定，避免把缓存断点打在每轮都会变化的尾部内容上。
+ * OpenAI / MiniMax 等被动前缀缓存接口会忽略该标记。
+ */
+data class ChatTurn(
+    val role: ChatRole,
+    val content: String,
+    val cacheBreakpoint: Boolean = false
+)
 
 /** 工具定义：[parametersJson] 为 JSON Schema 原文，直接透传给供应商 */
 data class AiToolSpec(

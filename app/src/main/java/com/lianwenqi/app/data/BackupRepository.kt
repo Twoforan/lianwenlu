@@ -8,6 +8,7 @@ import com.lianwenqi.app.data.entity.BookGroup
 import com.lianwenqi.app.data.entity.Chapter
 import com.lianwenqi.app.data.entity.OutlineCategory
 import com.lianwenqi.app.data.entity.OutlineItem
+import com.lianwenqi.app.data.entity.Prompt
 import com.lianwenqi.app.data.entity.StyleProfile
 import com.lianwenqi.app.data.entity.StyleSourceType
 import com.lianwenqi.app.data.entity.Volume
@@ -139,6 +140,31 @@ data class BackupOutline(
     val pinned: Boolean = false
 )
 
+/** 备份可勾选的分区：书籍内容 / 提示词库 / 系统设置 */
+object BackupSections {
+    const val BOOKS = "books"
+    const val PROMPTS = "prompts"
+    const val SETTINGS = "settings"
+
+    val all: List<String> = listOf(BOOKS, PROMPTS, SETTINGS)
+}
+
+/** 备份文件里的一条提示词 */
+@Serializable
+data class BackupPrompt(
+    val title: String,
+    val content: String = "",
+    val createdAt: Long = 0
+)
+
+/** 备份文件里的一条系统设置：键 + 类型 + 字符串化值（类型见 [Prefs.importSettings]） */
+@Serializable
+data class BackupPreference(
+    val key: String,
+    val type: String,
+    val value: String = ""
+)
+
 /** 备份包内容：app + format 作为「符合规则」的校验标识 */
 @Serializable
 data class BackupPayload(
@@ -146,13 +172,25 @@ data class BackupPayload(
     val format: Int = BackupRepository.FORMAT_VERSION,
     val exportedAt: Long = System.currentTimeMillis(),
     val appVersion: String = "",
+    /** 本次备份包含的分区，见 [BackupSections]；旧备份为空，按实际内容推断 */
+    val sections: List<String> = emptyList(),
     val books: List<BackupBook> = emptyList(),
     /** 文风档案；旧备份没有该字段，按空列表处理 */
-    val styleProfiles: List<BackupStyleProfile> = emptyList()
+    val styleProfiles: List<BackupStyleProfile> = emptyList(),
+    /** 提示词库；旧备份没有该字段，按空列表处理 */
+    val prompts: List<BackupPrompt> = emptyList(),
+    /** 系统设置；旧备份没有该字段，按空列表处理 */
+    val settings: List<BackupPreference> = emptyList()
 )
 
-/** 恢复结果：新建 / 覆盖 / 跳过的书籍数量 */
-data class RestoreResult(val created: Int, val replaced: Int, val skipped: Int)
+/** 恢复结果：新建 / 覆盖 / 跳过的书籍数量，以及提示词与系统设置的恢复情况 */
+data class RestoreResult(
+    val created: Int,
+    val replaced: Int,
+    val skipped: Int,
+    val prompts: Int = 0,
+    val settingsRestored: Int = 0
+)
 
 /**
  * 数据备份与恢复：把全部书籍的大纲 / 正文 / 梗概打包成一个 zip（内含一份 JSON 清单）。
@@ -171,6 +209,7 @@ class BackupRepository(
     private val memoryChunkDao = db.memoryChunkDao()
     private val styleDao = db.styleProfileDao()
     private val volumeSummaryDao = db.volumeSummaryDao()
+    private val promptDao = db.promptDao()
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -183,9 +222,9 @@ class BackupRepository(
         return "炼文炉备份_$stamp.zip"
     }
 
-    /** 导出全部书籍到缓存目录下的 zip，供「分享」使用 */
-    suspend fun createBackupZip(): File {
-        val payload = exportPayload()
+    /** 导出勾选的分区到缓存目录下的 zip，供「分享」使用 */
+    suspend fun createBackupZip(sections: Set<String> = BackupSections.all.toSet()): File {
+        val payload = exportPayload(sections)
         // 与 FileProvider 的 cache-path「exports/」保持一致，分享时才能取到可读 Uri
         val dir = File(context.cacheDir, "exports").apply { mkdirs() }
         val file = File(dir, defaultFileName())
@@ -193,9 +232,9 @@ class BackupRepository(
         return file
     }
 
-    /** 导出并直接写入用户选择的保存位置（SAF） */
-    suspend fun writeBackupTo(uri: Uri): Int {
-        val payload = exportPayload()
+    /** 导出勾选的分区并直接写入用户选择的保存位置（SAF） */
+    suspend fun writeBackupTo(uri: Uri, sections: Set<String> = BackupSections.all.toSet()): Int {
+        val payload = exportPayload(sections)
         val out = context.contentResolver.openOutputStream(uri)
             ?: throw IOException("无法写入所选位置")
         BufferedOutputStream(out).use { writeZip(payload, it) }
@@ -212,8 +251,21 @@ class BackupRepository(
         if (payload.app != APP_ID || payload.format < 1) {
             throw IllegalArgumentException("不是有效的炼文炉备份文件")
         }
-        if (payload.books.isEmpty()) throw IllegalArgumentException("备份文件里没有书籍数据")
+        if (payload.books.isEmpty() && payload.prompts.isEmpty() && payload.settings.isEmpty()) {
+            throw IllegalArgumentException("备份文件里没有可恢复的数据")
+        }
         return payload
+    }
+
+    /** 备份实际包含的分区；旧备份没有 sections 字段时按内容推断 */
+    fun availableSections(payload: BackupPayload): Set<String> {
+        val declared = payload.sections.filter { it in BackupSections.all }.toSet()
+        if (declared.isNotEmpty()) return declared
+        return buildSet {
+            if (payload.books.isNotEmpty()) add(BackupSections.BOOKS)
+            if (payload.prompts.isNotEmpty()) add(BackupSections.PROMPTS)
+            if (payload.settings.isNotEmpty()) add(BackupSections.SETTINGS)
+        }
     }
 
     /** 与现有书籍重名的书名（恢复前用于询问是否覆盖） */
@@ -224,33 +276,79 @@ class BackupRepository(
             .filter { title -> bookDao.findByTitle(title) != null }
 
     /**
-     * 恢复：重名书籍按 [overwrite] 覆盖（整本替换）或跳过，其余按新书加入书架。
-     * 先恢复文风档案并建立「备份原 id → 新 id」映射，再按映射恢复书籍绑定，保证引用有效。
-     * 整段导入在同一事务内完成，中途失败不会留下半本书。
+     * 恢复：只恢复 [sections] 里勾选的分区。
+     * 书籍重名时按 [overwrite] 覆盖（整本替换）或跳过，其余按新书加入书架；
+     * 提示词同标题覆盖内容、否则新增；系统设置按备份里的键值写回。
+     * 书籍导入整段在同一事务内完成，中途失败不会留下半本书。
      */
-    suspend fun restore(payload: BackupPayload, overwrite: Boolean): RestoreResult = db.withTransaction {
-        val groups = groupDao.getAll().toMutableList()
-        val styleMap = restoreStyleProfiles(payload.styleProfiles)
-        var created = 0
-        var replaced = 0
-        var skipped = 0
-        payload.books.forEach { raw ->
+    suspend fun restore(
+        payload: BackupPayload,
+        overwrite: Boolean,
+        sections: Set<String> = availableSections(payload)
+    ): RestoreResult {
+        val restoreSettings = BackupSections.SETTINGS in sections && payload.settings.isNotEmpty()
+        if (restoreSettings) prefs.importSettings(payload.settings)
+        val restoredPrompts =
+            if (BackupSections.PROMPTS in sections && payload.prompts.isNotEmpty()) {
+                restorePrompts(payload.prompts)
+            } else {
+                0
+            }
+        val books = if (BackupSections.BOOKS in sections && payload.books.isNotEmpty()) {
+            db.withTransaction {
+                val groups = groupDao.getAll().toMutableList()
+                val styleMap = restoreStyleProfiles(payload.styleProfiles)
+                var created = 0
+                var replaced = 0
+                var skipped = 0
+                payload.books.forEach { raw ->
+                    val title = raw.title.trim()
+                    if (title.isBlank()) return@forEach
+                    val existing = bookDao.findByTitle(title)
+                    if (existing != null) {
+                        if (!overwrite) {
+                            skipped++
+                            return@forEach
+                        }
+                        deleteBookRows(existing.id)
+                        replaced++
+                    } else {
+                        created++
+                    }
+                    insertBook(raw.copy(title = title), groups, styleMap)
+                }
+                RestoreResult(created = created, replaced = replaced, skipped = skipped)
+            }
+        } else {
+            RestoreResult(created = 0, replaced = 0, skipped = 0)
+        }
+        return books.copy(
+            prompts = restoredPrompts,
+            settingsRestored = if (restoreSettings) payload.settings.size else 0
+        )
+    }
+
+    /** 恢复提示词库：同标题覆盖内容，否则新增；返回处理的条数 */
+    private suspend fun restorePrompts(prompts: List<BackupPrompt>): Int {
+        var count = 0
+        prompts.forEach { raw ->
             val title = raw.title.trim()
             if (title.isBlank()) return@forEach
-            val existing = bookDao.findByTitle(title)
+            val existing = promptDao.findByTitle(title)
             if (existing != null) {
-                if (!overwrite) {
-                    skipped++
-                    return@forEach
-                }
-                deleteBookRows(existing.id)
-                replaced++
+                promptDao.update(existing.copy(content = raw.content))
             } else {
-                created++
+                promptDao.insert(
+                    Prompt(
+                        title = title,
+                        content = raw.content,
+                        createdAt = raw.createdAt.takeIf { it > 0 } ?: System.currentTimeMillis()
+                    )
+                )
             }
-            insertBook(raw.copy(title = title), groups, styleMap)
+            count++
         }
-        RestoreResult(created = created, replaced = replaced, skipped = skipped)
+        return count
     }
 
     /**
@@ -285,9 +383,12 @@ class BackupRepository(
         return idMap
     }
 
-    private suspend fun exportPayload(): BackupPayload {
+    private suspend fun exportPayload(sections: Set<String>): BackupPayload {
+        val includeBooks = BackupSections.BOOKS in sections
+        val includePrompts = BackupSections.PROMPTS in sections
+        val includeSettings = BackupSections.SETTINGS in sections
         val groupNames = groupDao.getAll().associate { it.id to it.name }
-        val books = bookDao.getAll().map { book ->
+        val books = if (!includeBooks) emptyList() else bookDao.getAll().map { book ->
             val volumes = volumeDao.getByBook(book.id).sortedBy { it.sortOrder }
             val volumeIndex = volumes.mapIndexed { index, volume -> volume.id to index }.toMap()
             val outlines = outlineDao.getByBook(book.id)
@@ -343,8 +444,9 @@ class BackupRepository(
         return BackupPayload(
             exportedAt = System.currentTimeMillis(),
             appVersion = appVersionName(),
+            sections = sections.filter { it in BackupSections.all },
             books = books,
-            styleProfiles = styleDao.getAll().map { profile ->
+            styleProfiles = if (!includeBooks) emptyList() else styleDao.getAll().map { profile ->
                 BackupStyleProfile(
                     id = profile.id,
                     name = profile.name,
@@ -356,7 +458,15 @@ class BackupRepository(
                     createdAt = profile.createdAt,
                     updatedAt = profile.updatedAt
                 )
-            }
+            },
+            prompts = if (!includePrompts) emptyList() else promptDao.getAll().map { prompt ->
+                BackupPrompt(
+                    title = prompt.title,
+                    content = prompt.content,
+                    createdAt = prompt.createdAt
+                )
+            },
+            settings = if (!includeSettings) emptyList() else prefs.exportSettings()
         )
     }
 

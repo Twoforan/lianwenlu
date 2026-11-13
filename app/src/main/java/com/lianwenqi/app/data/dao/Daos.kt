@@ -393,6 +393,10 @@ interface PromptDao {
     @Query("SELECT * FROM prompt ORDER BY id DESC")
     suspend fun getAll(): List<Prompt>
 
+    /** 按标题查找（恢复备份时同标题覆盖内容） */
+    @Query("SELECT * FROM prompt WHERE title = :title LIMIT 1")
+    suspend fun findByTitle(title: String): Prompt?
+
     @Insert
     suspend fun insert(prompt: Prompt): Long
 

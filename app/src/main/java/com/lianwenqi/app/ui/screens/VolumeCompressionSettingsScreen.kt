@@ -99,6 +99,12 @@ fun VolumeCompressionSettingsScreen(onBack: () -> Unit) {
     var outputChars by remember(config.outputChars) {
         mutableFloatStateOf(config.outputChars.toFloat())
     }
+    var maxOutputTokensValue by remember(config.maxOutputTokens) {
+        mutableFloatStateOf(
+            config.maxOutputTokens.takeIf { it > 0 }?.toFloat()
+                ?: VolumeCompressionConfig.DEFAULT_MAX_OUTPUT_TOKENS.toFloat()
+        )
+    }
     val selectedModel = models.firstOrNull { it.id == config.compressionModelId }
         ?: models.firstOrNull()
 
@@ -195,6 +201,65 @@ fun VolumeCompressionSettingsScreen(onBack: () -> Unit) {
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+            }
+
+            Spacer(Modifier.height(16.dp))
+            SectionTitle("最大输出 tokens 数")
+            Text(
+                "仅作用于分卷压缩；默认跟随所选模型的最大输出 token 设置。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    if (config.maxOutputTokens <= 0) {
+                        val modelLimit = selectedModel?.maxTokens?.takeIf { it > 0 }
+                        "跟随模型设置（${modelLimit?.toString() ?: "不限"}）"
+                    } else {
+                        "单独指定"
+                    },
+                    modifier = Modifier.weight(1f)
+                )
+                Switch(
+                    checked = config.maxOutputTokens <= 0,
+                    onCheckedChange = { followModel ->
+                        vm.update {
+                            it.copy(
+                                maxOutputTokens = if (followModel) {
+                                    0
+                                } else {
+                                    maxOutputTokensValue.roundToInt()
+                                }
+                            )
+                        }
+                    }
+                )
+            }
+            if (config.maxOutputTokens > 0) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Slider(
+                        value = maxOutputTokensValue,
+                        onValueChange = { maxOutputTokensValue = it },
+                        valueRange = VolumeCompressionConfig.MIN_MAX_OUTPUT_TOKENS.toFloat()..
+                            VolumeCompressionConfig.MAX_MAX_OUTPUT_TOKENS.toFloat(),
+                        steps = (VolumeCompressionConfig.MAX_MAX_OUTPUT_TOKENS -
+                            VolumeCompressionConfig.MIN_MAX_OUTPUT_TOKENS) / 256 - 1,
+                        onValueChangeFinished = {
+                            val value = maxOutputTokensValue.roundToInt().coerceIn(
+                                VolumeCompressionConfig.MIN_MAX_OUTPUT_TOKENS,
+                                VolumeCompressionConfig.MAX_MAX_OUTPUT_TOKENS
+                            )
+                            maxOutputTokensValue = value.toFloat()
+                            vm.update { it.copy(maxOutputTokens = value) }
+                        },
+                        modifier = Modifier.weight(1f)
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Text(
+                        "${maxOutputTokensValue.roundToInt()} tokens",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
             }
 
             Spacer(Modifier.height(16.dp))

@@ -140,30 +140,121 @@ class BookRepository(
     }
 
     /**
-     * 「复制本书」：新建一本空白书（只有默认首卷首章），把原书的大纲条目完整复制过去
-     * （分类标签、字段、排序位置一并保留）。新书标题自动加序号，从（1）开始取第一个未被占用的。
-     * 文风绑定随书籍配置一并保留（引用原档案 id，不复制档案本身）。
+     * 「复制本书」：按勾选复制大纲 / 所有梗概（章节梗概 + 卷梗概）/ 所有章节正文。
+     * 新书标题自动加序号，从（1）开始取第一个未被占用的；文风绑定随书籍配置一并保留
+     * （引用原档案 id，不复制档案本身）。未勾选梗概与正文时新书保持「默认首卷首章」的空白结构。
      * 返回新书 id（原书不存在时返回 0）。
      */
-    suspend fun copyBookOutline(sourceBookId: Long): Long = db.withTransaction {
+    suspend fun copyBook(
+        sourceBookId: Long,
+        copyOutline: Boolean,
+        copySummaries: Boolean,
+        copyContent: Boolean
+    ): Long = db.withTransaction {
         val src = bookDao.getById(sourceBookId) ?: return@withTransaction 0L
         // 去掉原标题末尾已有的（n）作为基准名，避免复制副本时叠加成「书名（1）（1）」
         val base = src.title.replace(Regex("（\\d+）$"), "")
         val existing = bookDao.getAll().map { it.title }.toSet()
         var index = 1
         while ("$base（$index）" in existing) index++
-        val newId = createBook(
-            title = "$base（$index）",
-            intro = src.intro,
-            coverPath = src.coverPath,
-            coverColor = src.coverColor,
-            volumePrefix = src.volumePrefix,
-            chapterPrefix = src.chapterPrefix,
-            groupId = src.groupId,
-            styleId = src.styleId
+        val now = System.currentTimeMillis()
+        val newId = bookDao.insert(
+            Book(
+                title = "$base（$index）",
+                intro = src.intro,
+                coverPath = src.coverPath,
+                coverColor = src.coverColor,
+                volumePrefix = src.volumePrefix,
+                chapterPrefix = src.chapterPrefix,
+                groupId = src.groupId,
+                styleId = src.styleId,
+                createdAt = now,
+                updatedAt = now
+            )
         )
-        outlineDao.getByBook(sourceBookId).forEach { item ->
-            outlineDao.insert(item.copy(id = 0, bookId = newId))
+        val srcVolumes = volumeDao.getByBook(sourceBookId)
+        val srcChapters = chapterDao.getValidByBook(sourceBookId)
+        // 旧卷 / 旧章节 id → 新 id：卷梗概的参与章节需要按映射重新指向新章节
+        val volumeMap = mutableMapOf<Long, Long>()
+        val chapterMap = mutableMapOf<Long, Long>()
+        var firstChapterId: Long? = null
+        var firstChapterTitle: String? = null
+
+        if (copySummaries || copyContent) {
+            srcVolumes.forEach { volume ->
+                volumeMap[volume.id] = volumeDao.insert(
+                    Volume(bookId = newId, title = volume.title, sortOrder = volume.sortOrder)
+                )
+            }
+            srcChapters.forEachIndexed { order, chapter ->
+                val newChapterId = chapterDao.insert(
+                    Chapter(
+                        bookId = newId,
+                        volumeId = chapter.volumeId?.let { volumeMap[it] },
+                        title = chapter.title,
+                        summary = if (copySummaries) chapter.summary else "",
+                        content = if (copyContent) chapter.content else "",
+                        sortOrder = order,
+                        createdAt = now,
+                        updatedAt = now
+                    )
+                )
+                chapterMap[chapter.id] = newChapterId
+                if (firstChapterId == null) {
+                    firstChapterId = newChapterId
+                    firstChapterTitle = chapter.title
+                }
+            }
+            // 卷梗概只复制每卷当前生效版本；归档与候选属于历史 / 未确认任务，不进入副本
+            if (copySummaries) {
+                srcVolumes.forEach { volume ->
+                    val summary = volumeSummaryDao.activeByVolume(volume.id) ?: return@forEach
+                    val newVolumeId = volumeMap[volume.id] ?: return@forEach
+                    val mapped = summary.sourceChapterIdList()
+                        .zip(summary.sourceChapterHashList())
+                        .mapNotNull { (chapterId, hash) -> chapterMap[chapterId]?.let { it to hash } }
+                    volumeSummaryDao.insert(
+                        summary.copy(
+                            id = 0,
+                            bookId = newId,
+                            volumeId = newVolumeId,
+                            sourceChapterIds = mapped.joinToString(",") { it.first.toString() },
+                            sourceChapterHashes = mapped.joinToString(",") { it.second },
+                            // 章节 id 已变化，必须按新 id 重算指纹，否则复制后会被判为「已过期」
+                            sourceRevision = VolumeSourceRevision.revision(
+                                summary.sourceType,
+                                mapped.map { VolumeSourceRevision.Entry(it.first, it.second) }
+                            ),
+                            sourceChapterCount = srcChapters.count { it.volumeId == volume.id },
+                            processedChapterCount = mapped.size,
+                            compressionSessionId = null,
+                            isCurrent = true,
+                            createdAt = now,
+                            updatedAt = now
+                        )
+                    )
+                }
+            }
+        }
+
+        if (firstChapterId == null) {
+            // 未复制章节（只复制大纲 / 原书没有章节）：补默认首卷首章，保证打开后有可编辑内容
+            val volumeId = volumeMap.values.firstOrNull()
+                ?: volumeDao.insert(
+                    Volume(bookId = newId, title = buildTitle(src.volumePrefix, 1), sortOrder = 0)
+                )
+            val title = buildTitle(src.chapterPrefix, 1)
+            firstChapterId = chapterDao.insert(
+                Chapter(bookId = newId, volumeId = volumeId, title = title, sortOrder = 0)
+            )
+            firstChapterTitle = title
+        }
+        bookDao.touch(newId, now, firstChapterId, firstChapterTitle)
+
+        if (copyOutline) {
+            outlineDao.getByBook(sourceBookId).forEach { item ->
+                outlineDao.insert(item.copy(id = 0, bookId = newId))
+            }
         }
         newId
     }

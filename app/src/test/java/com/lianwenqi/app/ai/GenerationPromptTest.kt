@@ -11,11 +11,13 @@ class GenerationPromptTest {
     @Test
     fun buildSummaryTurns_systemInstructionCarriesWordRange() {
         val turns = buildSummaryTurns("写一段开场", 100..150)
+        assertEquals(3, turns.size)
         assertEquals(ChatRole.SYSTEM, turns[0].role)
-        assertTrue(turns[0].content.contains("100–150"))
-        // 自检过程只作内部思考，且明确禁止把核心事件清单 / 字数统计等输出出来
+        // 稳定指令不再携带章节相关的字数范围，避免每章前缀都不同
+        assertFalse(turns[0].content.contains("100–150"))
         assertTrue(turns[0].content.contains("只作为你的内部思考"))
-        assertTrue(turns[0].content.contains("不得输出任何其他内容"))
+        assertTrue(turns[1].content.contains("100–150"))
+        assertTrue(turns[1].content.contains("不得输出任何其他内容"))
         assertEquals(ChatRole.USER, turns.last().role)
         assertEquals("写一段开场", turns.last().content)
     }
@@ -23,7 +25,7 @@ class GenerationPromptTest {
     @Test
     fun buildSummaryTurns_noLowerBoundOnlyLimitsUpper() {
         val turns = buildSummaryTurns("", 0..500)
-        val sys = turns[0].content
+        val sys = turns[1].content
         assertTrue(sys.contains("不要超过 500 字"))
         // 下限为 0 时不再给「必须在 X–Y 字之间」的区间约束
         assertFalse(sys.contains("字之间"))
@@ -34,7 +36,7 @@ class GenerationPromptTest {
     @Test
     fun buildSummaryTurns_referenceBlockBecomesSeparateSystemTurn() {
         val turns = buildSummaryTurns("梗概", null, "【本会话参考资料】\n书A")
-        assertEquals(3, turns.size)
+        assertEquals(4, turns.size)
         assertEquals(ChatRole.SYSTEM, turns[1].role)
         assertTrue(turns[1].content.contains("书A"))
     }
@@ -48,21 +50,24 @@ class GenerationPromptTest {
             userInput = "开写",
             range = 1000..6000
         )
-        assertEquals(listOf(ChatRole.SYSTEM, ChatRole.SYSTEM, ChatRole.USER), turns.map { it.role })
+        assertEquals(
+            listOf(ChatRole.SYSTEM, ChatRole.SYSTEM, ChatRole.SYSTEM, ChatRole.USER),
+            turns.map { it.role }
+        )
         // 验收 #3：正文请求里不能出现梗概生成那一轮的 assistant 消息，梗概只以文本变量注入
         assertTrue(turns.none { it.role == ChatRole.ASSISTANT })
         val ref = turns[1].content
         assertTrue(ref.indexOf("【本章梗概】") < ref.indexOf("【大纲 / 人物设定】"))
         assertTrue(ref.indexOf("【大纲 / 人物设定】") < ref.indexOf("【记忆检索参考资料】"))
         assertTrue(ref.contains("本章梗概"))
-        assertTrue(turns[0].content.contains("1000–6000"))
+        assertTrue(turns[2].content.contains("1000–6000"))
         assertEquals("开写", turns.last().content)
     }
 
     @Test
     fun buildContentTurns_omitsMemoryBlockWhenRetrievalOff() {
         val turns = buildContentTurns("梗概", "大纲", "", "写", null)
-        assertEquals(3, turns.size)
+        assertEquals(4, turns.size)
         assertFalse(turns[1].content.contains("【记忆检索参考资料】"))
     }
 
@@ -109,14 +114,17 @@ class GenerationPromptTest {
     @Test
     fun buildContentTurns_pointsOutChapterTitle() {
         val turns = buildContentTurns("梗概", "大纲", "", "写", null, chapterTitle = "第2章")
-        assertTrue(turns[0].content.contains("现在撰写的是「第2章」"))
+        // 章节标题放在末尾的任务参数块，稳定指令保持跨章节一致
+        assertTrue(turns[2].content.contains("本章标题：第2章"))
+        assertFalse(turns[0].content.contains("第2章"))
         assertTrue(turns[0].content.contains("依据下方「本章梗概」"))
     }
 
     @Test
     fun buildSummaryTurns_pointsOutChapterTitle() {
         val turns = buildSummaryTurns("梗概", null, "", chapterTitle = "第2章")
-        assertTrue(turns[0].content.contains("现在撰写的是「第2章」"))
+        assertTrue(turns[1].content.contains("本章标题：第2章"))
+        assertFalse(turns[0].content.contains("第2章"))
     }
 
     @Test
@@ -155,7 +163,7 @@ class GenerationPromptTest {
         // 内部剧情提纲不注入文风：构建结果不包含任何文风块
         val turns = buildSummaryTurns("写梗概", 100..200, "【参考资料】书A", "第2章")
         assertTrue(turns.none { it.content.contains("【文风约束】") })
-        assertEquals(3, turns.size)
+        assertEquals(4, turns.size)
     }
 
     @Test

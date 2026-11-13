@@ -85,6 +85,9 @@ import com.lianwenqi.app.util.AiChapterBlock
 import com.lianwenqi.app.util.AiOutlineBlock
 import com.lianwenqi.app.util.detectImportKindHint
 import com.lianwenqi.app.util.isChapterLikeOutlineBlock
+import com.lianwenqi.app.data.style.StyleLibraryState
+import com.lianwenqi.app.data.style.StyleProfileRow
+import com.lianwenqi.app.data.style.StyleProfileSummaryReader
 import com.lianwenqi.app.data.style.SummarySentenceSample
 import com.lianwenqi.app.data.style.SummarySentenceSampler
 import com.lianwenqi.app.data.style.SummarySentenceSegmenter
@@ -99,6 +102,7 @@ import com.lianwenqi.app.util.shortHash
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
@@ -106,11 +110,13 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -141,6 +147,7 @@ class AiChatViewModel(
     private val outlineRepository = container.outlineRepository
     private val configRepository = container.configRepository
     private val prefs = container.prefs
+    private val styleRepository = container.styleRepository
 
     /** 「发送消息」用例：组装上下文 → 流式请求 → 写回助手消息 → 解析工具区块 */
     private val sendChatMessage = SendChatMessageUseCase(chatRepository, configRepository)
@@ -161,6 +168,38 @@ class AiChatViewModel(
     /** 书籍分组（选书弹窗的分组筛选用） */
     val groups: StateFlow<List<BookGroup>> =
         bookRepository.observeGroups().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    // 新建书籍弹窗里的文风档案：与书架新建弹窗共用同一套读取 / 重试逻辑
+    private val styleRetry = MutableStateFlow(0)
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val styleLibrary: StateFlow<StyleLibraryState> = styleRetry
+        .flatMapLatest {
+            styleRepository.observeProfiles()
+                .map { profiles ->
+                    StyleLibraryState(
+                        loading = false,
+                        rows = profiles.map { profile ->
+                            StyleProfileRow(profile, StyleProfileSummaryReader.read(profile))
+                        }
+                    )
+                }
+                .catch { error ->
+                    emit(
+                        StyleLibraryState(
+                            loading = false,
+                            error = "读取文风档案失败：${error.message ?: "未知错误"}"
+                        )
+                    )
+                }
+        }
+        .flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), StyleLibraryState())
+
+    /** 重新订阅文风档案列表（加载失败或档案被删除后刷新） */
+    fun retryStyleProfiles() {
+        styleRetry.value++
+    }
 
     val sessions: StateFlow<List<ChatSession>> =
         chatRepository.observeSessions().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -1780,8 +1819,11 @@ class AiChatViewModel(
 
     /**
      * 本轮的「历史对话」块：按本会话已生效的角色开关，从 [cutoffExclusive] 之前的消息里
-     * 挑选要注入的内容（[HistoryPrefix.pick] 负责过滤角色 / 生效版本 / 截止位置），
-     * 渲染成「用户：… / AI：…」的 System 块；开关全关或过滤后为空时返回空块。
+     * 挑选要注入的内容（[HistoryPrefix.pick] 负责过滤角色 / 生效版本 / 截止位置）。
+     *
+     * 开关开启时返回日志文本 + 真实轮次；开关关闭时仍然返回真实轮次（受模型
+     * 「最大上下文」条数限制），只是不再渲染成 System 文本块 —— 这样每轮请求
+     * 都会延长上一轮，供应商的前缀缓存才能连续命中。
      * 消息内容每次发送都按当前数据库状态重算，不冻结成快照。
      */
     private suspend fun buildHistoryDialogue(
@@ -1790,7 +1832,24 @@ class AiChatViewModel(
         cutoffExclusive: Long
     ): HistoryDialogue {
         if (!prefix.historyMessageOn || (!prefix.historyAiOn && !prefix.historyUserOn)) {
-            return HistoryDialogue()
+            // 历史对话开关关闭时，仍然把已完成的历史轮次作为真实消息发送：
+            // 1) 多轮对话才有连续记忆；2) 下一轮请求才能严格「延长」上一轮请求，
+            //    供应商的前缀缓存（MiniMax 被动缓存会复用完整前缀）才能连续命中。
+            // 条数由模型的「最大上下文（历史消息条数）」控制，0 表示不限。
+            val history = chatRepository.getMessages(sid)
+                .filter { it.id < cutoffExclusive }
+                .filter { it.role == ChatRole.USER || it.role == ChatRole.ASSISTANT }
+                .filter { it.role == ChatRole.USER || it.active }
+            val max = chatRepository.getSession(sid)?.modelId
+                ?.let { configRepository.getModel(it)?.maxContext } ?: 0
+            val picked = if (max > 0) history.takeLast(max) else history
+            return HistoryDialogue(
+                turns = picked.mapNotNull { m ->
+                    val extra = m.promptExtra
+                    val content = if (extra.isBlank()) m.content else extra + "\n\n" + m.content
+                    ChatTurn(m.role, content).takeIf { it.content.isNotBlank() }
+                }
+            )
         }
         val messages = HistoryPrefix.pick(
             chatRepository.getMessages(sid),
@@ -1802,6 +1861,15 @@ class AiChatViewModel(
         if (body.isBlank()) return HistoryDialogue()
         return HistoryDialogue(
             text = HISTORY_DIALOGUE_HEADER + body,
+            // 真正发给模型的历史对话：保持真实角色，前缀只会在尾部增长
+            turns = messages.mapNotNull { m ->
+                val role = when (m.role) {
+                    ChatRole.USER -> ChatRole.USER
+                    ChatRole.ASSISTANT -> ChatRole.ASSISTANT
+                    ChatRole.SYSTEM -> return@mapNotNull null
+                }
+                ChatTurn(role, m.content.trim()).takeIf { it.content.isNotBlank() }
+            },
             rounds = HistoryPrefix.rounds(messages)
         )
     }
@@ -2349,7 +2417,7 @@ class AiChatViewModel(
         chapterPrefix = "第%n章"
     )
 
-    /** 完整参数新建书籍（新建书籍表单提交用），返回新书 id */
+    /** 完整参数新建书籍（新建书籍表单提交用），返回新书 id；失败返回 0 */
     suspend fun createBookFull(
         title: String,
         intro: String,
@@ -2357,8 +2425,26 @@ class AiChatViewModel(
         coverColor: Int,
         volumePrefix: String,
         chapterPrefix: String,
-        groupId: Long?
-    ): Long = bookRepository.createBook(title, intro, coverPath, coverColor, volumePrefix, chapterPrefix, groupId)
+        groupId: Long?,
+        styleId: Long = 0
+    ): Long = try {
+        if (styleId != 0L && styleRepository.getProfile(styleId) == null) {
+            retryStyleProfiles()
+            0L
+        } else {
+            bookRepository.createBook(
+                title, intro, coverPath, coverColor, volumePrefix, chapterPrefix, groupId, styleId
+            )
+        }
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: IllegalArgumentException) {
+        // 事务内档案存在性校验失败：刷新档案列表，由界面提示后重新选择
+        retryStyleProfiles()
+        0L
+    } catch (e: Exception) {
+        0L
+    }
 
     /** 复制封面图到应用私有目录，返回本地路径 */
     suspend fun pickCover(uri: android.net.Uri): String? =
@@ -2547,6 +2633,7 @@ class AiChatViewModel(
             volumeId = volumeId,
             modelId = modelId,
             sourceType = sourceType,
+            maxOutputTokensOverride = config.maxOutputTokens,
             maxInputChars = config.maxCharsPerRequest,
             targetOutputChars = config.outputChars
         )
@@ -3402,6 +3489,7 @@ class AiChatViewModel(
             prefixText = p.custom,
             referencePrefix = p.reference,
             historyPrefix = history.text,
+            historyTurns = history.turns,
             historySummary = if (p.historySummaryOn) p.historySummaryBlock else "",
             historyContent = if (p.historyContentOn) p.historyContentBlock else "",
             // 本轮所属章节：沿用该用户消息落库时的章节，重新生成 / 编辑重发不会跳到别的章节
@@ -3927,8 +4015,10 @@ class AiChatViewModel(
      * 消息内容每次发送按数据库现状重算，不落进 [SessionPrefix]。
      */
     private data class HistoryDialogue(
-        /** 实际作为 System 块注入的完整文本（含「【历史对话】」抬头），日志直接回显它 */
+        /** 实际注入的历史对话全文（含「【历史对话】」抬头），仅供日志回显 */
         val text: String = "",
+        /** 实际发给模型的真实历史轮次；聊天请求用它替代 System 文本块 */
+        val turns: List<ChatTurn> = emptyList(),
         val rounds: List<PromptLogRound> = emptyList()
     )
 

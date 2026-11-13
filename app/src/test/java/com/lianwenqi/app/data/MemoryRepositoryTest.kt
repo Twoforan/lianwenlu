@@ -132,6 +132,8 @@ class MemoryRepositoryTest {
         override suspend fun getByBook(bookId: Long) = chapters.filter { it.bookId == bookId }
         override fun observeValidByBook(bookId: Long): Flow<List<Chapter>> =
             flowOf(chapters.filter { it.bookId == bookId })
+        override suspend fun getValidPreviewByBook(bookId: Long) =
+            chapters.filter { it.bookId == bookId }
         override suspend fun getValidByBook(bookId: Long) = chapters.filter { it.bookId == bookId }
         override suspend fun getValidByVolume(bookId: Long, volumeId: Long) =
             chapters.filter { it.bookId == bookId && it.volumeId == volumeId }
@@ -139,6 +141,7 @@ class MemoryRepositoryTest {
             chapters.filter { it.bookId == bookId }.map { it.id }
         override fun observeById(id: Long): Flow<Chapter?> = error("未使用")
         override suspend fun getById(id: Long) = chapters.firstOrNull { it.id == id }
+        override suspend fun contentLength(id: Long) = chapters.firstOrNull { it.id == id }?.content?.length
         override suspend fun countByBook(bookId: Long) = chapters.count { it.bookId == bookId }
         override fun observeCountByBook(bookId: Long): Flow<Int> = error("未使用")
         override suspend fun insert(chapter: Chapter) = error("未使用")

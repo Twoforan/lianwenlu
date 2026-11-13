@@ -139,9 +139,15 @@ data class SendChatRequest(
     val referencePrefix: String = "",
     /**
      * 「历史对话前缀」（历史梗概 / 历史正文 / 每轮消息）渲染成的整段文本，
-     * 作为稳定前缀之后、本轮用户输入之前的 System 块发出；为空则不带历史。
+     * 仅用于提示词日志回显；真正发给模型的历史对话见 [historyTurns]。
      */
     val historyPrefix: String = "",
+    /**
+     * 本会话历史对话的真实轮次（按角色开关与截止位置挑出）。
+     * 以 user/assistant 消息追加，而不是塞进一条不断增长的 System 块，
+     * 供应商才能按「历史对话」段做前缀缓存。
+     */
+    val historyTurns: List<ChatTurn> = emptyList(),
     /** 本轮实际注入的「历史梗概」块正文（仅供当轮日志回显，未注入时为空） */
     val historySummary: String = "",
     /** 本轮实际注入的「历史正文」块正文（仅供当轮日志回显，未注入时为空） */
@@ -362,8 +368,12 @@ class SendChatMessageUseCase(
                     styleBlock = request.stylePrefix
                 )
             )
-            // 「历史对话前缀」排在所有稳定前缀之后，减少动态内容对前面缓存的破坏
-            if (request.historyPrefix.isNotBlank()) {
+            // 历史对话以真实 user / assistant 轮次追加：前缀只会在尾部增长，
+            // 供应商的「历史对话」段可以持续命中缓存。
+            if (request.historyTurns.isNotEmpty()) {
+                addAll(request.historyTurns)
+            } else if (request.historyPrefix.isNotBlank()) {
+                // 兼容没有提供结构化轮次的调用方（例如旧测试 / 外部构造的请求）
                 add(ChatTurn(ChatRole.SYSTEM, request.historyPrefix))
             }
             // 最后一轮始终是真实的用户输入；历史以助手消息结尾时（编辑回答后继续）补兜底指令

@@ -59,6 +59,8 @@ data class VolumeCompressionConfig(
     val autoCompressWholeVolumeSummary: Boolean = false,
     /** 分卷压缩默认使用的模型 id；0 表示未指定（回退到当前对话模型 / 第一个模型） */
     val compressionModelId: Long = 0L,
+    /** 分卷压缩最大输出 Token；0 表示跟随模型设置 */
+    val maxOutputTokens: Int = 0,
     /** 单次请求最多提交的字符数（按字符启发式估算，默认 12000 字） */
     val maxCharsPerRequest: Int = DEFAULT_MAX_CHARS_PER_REQUEST,
     /** 最终卷梗概的目标字数（500–10000，默认 2000 字） */
@@ -70,6 +72,10 @@ data class VolumeCompressionConfig(
 ) {
     fun normalized(): VolumeCompressionConfig = copy(
         source = CompressionSourceMode.normalize(source),
+        maxOutputTokens = if (maxOutputTokens <= 0) 0 else maxOutputTokens.coerceIn(
+            MIN_MAX_OUTPUT_TOKENS,
+            MAX_MAX_OUTPUT_TOKENS
+        ),
         maxCharsPerRequest = maxCharsPerRequest.coerceIn(
             MIN_MAX_CHARS_PER_REQUEST,
             MAX_MAX_CHARS_PER_REQUEST
@@ -92,6 +98,9 @@ data class VolumeCompressionConfig(
             CompressionOutlineUpdateMode.OFF
 
     companion object {
+        const val DEFAULT_MAX_OUTPUT_TOKENS = 8192
+        const val MIN_MAX_OUTPUT_TOKENS = 256
+        const val MAX_MAX_OUTPUT_TOKENS = 32768
         const val DEFAULT_MAX_CHARS_PER_REQUEST = 12000
         const val MIN_MAX_CHARS_PER_REQUEST = 500
         const val MAX_MAX_CHARS_PER_REQUEST = 200000

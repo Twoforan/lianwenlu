@@ -256,7 +256,7 @@ sealed class CompressionFailure(val message: String) {
     object ModelConfigMissing : CompressionFailure("未找到所选模型，请先在设置中检查模型配置")
 
     object UnknownContextWindow : CompressionFailure(
-        "模型没有配置真实的 Token 上下文窗口，无法安全分批；请先补全模型上下文窗口或提供临时覆盖值"
+        "无法确定压缩容量；请检查分卷压缩的单次最大提交字符数与最大输出 tokens 设置"
     )
 
     object CandidateSaveRejected : CompressionFailure("压缩结果未能写入候选版本，请检查分卷与章节归属")

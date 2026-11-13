@@ -646,7 +646,8 @@ class AiClient(
 
     /**
      * 把统一的 turns 拆成 Anthropic 的 system + messages，并打上两个缓存断点：
-     *  - 缓存点1：system 的最后一块（预设提示词 + 大纲/资料），这段最稳定；
+     *  - 缓存点1：稳定前缀的断点（[ChatTurn.cacheBreakpoint] 标记的第一块），
+     *    没有标记时回落到 system 的最后一块；
      *  - 缓存点2：messages 中「历史对话的最后一条」（最后一条是本次新消息，不参与缓存）。
      * 这样前缀逐字节稳定、只有尾部增长，缓存命中率最高；DEFAULT 的「临时消息」天然落在末尾。
      */
@@ -656,23 +657,41 @@ class AiClient(
         stream: Boolean,
         tools: List<AiToolSpec> = emptyList()
     ): AnthropicRequest {
+        val prompt = systemPromptOf(endpoint)
+        val systemTurns = turns.filter { it.role == ChatRole.SYSTEM }
         val system = buildList {
-            val prompt = systemPromptOf(endpoint)
             if (prompt.isNotBlank()) {
                 add(AnthropicBlock(type = "text", text = prompt))
             }
-            turns.filter { it.role == ChatRole.SYSTEM }.forEach {
+            systemTurns.forEach {
                 add(AnthropicBlock(type = "text", text = it.content))
             }
         }.toMutableList()
         if (system.isNotEmpty()) {
-            system[system.lastIndex] = system.last().copy(cacheControl = AnthropicCacheControl())
+            // 取「第一处」显式断点：稳定前缀（文风/前缀/参考资料）优先；
+            // 没有稳定前缀时退回到写作指令本身，避免断点落在章节标题、字数范围等动态块上。
+            val offset = if (prompt.isNotBlank()) 1 else 0
+            val marked = systemTurns.indexOfFirst { it.cacheBreakpoint }
+            val index = if (marked >= 0) offset + marked else system.lastIndex
+            system[index] = system[index].copy(cacheControl = AnthropicCacheControl())
         }
 
-        // messages：去掉 SYSTEM 轮 → 去掉空内容 → 截掉开头的 assistant（Anthropic 要求首条为 user）
-        val msgs = turns.filter { it.role != ChatRole.SYSTEM && it.content.isNotBlank() }
-            .map { AnthropicMessage(it.role.name.lowercase(), listOf(AnthropicBlock(type = "text", text = it.content))) }
-            .toMutableList()
+        // messages：去掉 SYSTEM 轮 → 去掉空内容 → 合并相邻同角色（Anthropic 要求 user/assistant 交替）
+        // → 截掉开头的 assistant（Anthropic 要求首条为 user）
+        val msgs = mutableListOf<AnthropicMessage>()
+        turns.filter { it.role != ChatRole.SYSTEM && it.content.isNotBlank() }.forEach { turn ->
+            val role = turn.role.name.lowercase()
+            val last = msgs.lastOrNull()
+            if (last != null && last.role == role) {
+                val text = last.content.joinToString("\n\n") { it.text.orEmpty() } +
+                    "\n\n" + turn.content
+                msgs[msgs.lastIndex] = last.copy(
+                    content = listOf(AnthropicBlock(type = "text", text = text))
+                )
+            } else {
+                msgs += AnthropicMessage(role, listOf(AnthropicBlock(type = "text", text = turn.content)))
+            }
+        }
         while (msgs.isNotEmpty() && msgs.first().role != "user") msgs.removeAt(0)
         if (msgs.size >= 2) {
             val i = msgs.size - 2

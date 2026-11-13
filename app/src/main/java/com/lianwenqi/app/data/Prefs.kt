@@ -767,5 +767,67 @@ class Prefs(private val context: Context) {
         return if (a <= b) a..b else b..a
     }
 
+    // ---------------- 数据备份：系统设置快照 / 恢复 ----------------
+
+    /**
+     * 导出「系统设置」分区：读取 DataStore 里的全部偏好并按类型编码。
+     * 排除按书籍 / 会话 / 模型 id 绑定的键（恢复到另一台设备后这些 id 无意义），
+     * 也排除说明书导入状态等内部标记。
+     */
+    suspend fun exportSettings(): List<BackupPreference> =
+        context.dataStore.data.first().asMap().mapNotNull { (key, value) ->
+            if (isUnbackedSettingKey(key.name)) return@mapNotNull null
+            when (value) {
+                is Boolean -> BackupPreference(key.name, "bool", value.toString())
+                is Int -> BackupPreference(key.name, "int", value.toString())
+                is Long -> BackupPreference(key.name, "long", value.toString())
+                is Float -> BackupPreference(key.name, "float", value.toString())
+                is String -> BackupPreference(key.name, "string", value)
+                is Set<*> -> BackupPreference(
+                    key.name,
+                    "string_set",
+                    Json.encodeToString(
+                        ListSerializer(String.serializer()),
+                        value.filterIsInstance<String>()
+                    )
+                )
+                else -> null
+            }
+        }.sortedBy { it.key }
+
+    /** 恢复「系统设置」分区：按 [BackupPreference.type] 重建对应的偏好键并写回；未知类型跳过 */
+    suspend fun importSettings(entries: List<BackupPreference>) {
+        if (entries.isEmpty()) return
+        writePrefs { prefs ->
+            entries.forEach { entry ->
+                when (entry.type) {
+                    "bool" -> entry.value.toBooleanStrictOrNull()
+                        ?.let { prefs[booleanPreferencesKey(entry.key)] = it }
+                    "int" -> entry.value.toIntOrNull()
+                        ?.let { prefs[intPreferencesKey(entry.key)] = it }
+                    "long" -> entry.value.toLongOrNull()
+                        ?.let { prefs[longPreferencesKey(entry.key)] = it }
+                    "float" -> entry.value.toFloatOrNull()
+                        ?.let { prefs[floatPreferencesKey(entry.key)] = it }
+                    "string" -> prefs[stringPreferencesKey(entry.key)] = entry.value
+                    "string_set" -> runCatching {
+                        Json.decodeFromString(ListSerializer(String.serializer()), entry.value)
+                    }.getOrNull()?.let { prefs[stringSetPreferencesKey(entry.key)] = it.toSet() }
+                }
+            }
+        }
+    }
+
+    /** 这些键引用本机书籍 / 会话 / 模型 id 或属于内部标记，不进入「系统设置」备份 */
+    private fun isUnbackedSettingKey(name: String): Boolean =
+        name.startsWith("ai_ctx_") ||
+            name.startsWith("ai_vol_summary_reco_") ||
+            name.startsWith("outline_fields_") ||
+            name.startsWith("outline_categories_") ||
+            name.startsWith("outline_pinned_cats_") ||
+            name.startsWith("manual_") ||
+            name.startsWith("chat_expanded_") ||
+            name in setOf("active_model_id", "last_book_id", "last_chapter_id")
+
     private suspend fun <T> Flow<T>.firstValue(): T = first()
 }

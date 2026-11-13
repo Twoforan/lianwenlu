@@ -160,6 +160,7 @@ import com.lianwenqi.app.data.entity.outlineCategoryLabel
 import com.lianwenqi.app.data.entity.Provider
 import com.lianwenqi.app.data.entity.Volume
 import com.lianwenqi.app.data.entity.VolumeSummary
+import com.lianwenqi.app.data.style.StyleLibraryState
 import com.lianwenqi.app.ui.appViewModel
 import com.lianwenqi.app.ui.components.BookFormResult
 import com.lianwenqi.app.ui.components.BookFormDialog
@@ -191,6 +192,7 @@ fun AiChatScreen(initialBookId: Long?) {
     val outline by vm.outline.collectAsState()
     val volumes by vm.volumes.collectAsState()
     val groups by vm.groups.collectAsState()
+    val styleLibrary by vm.styleLibrary.collectAsState()
     val selBooks by vm.selectedBookIds.collectAsState()
     val selChapters by vm.selectedChapterIds.collectAsState()
     val selSummary by vm.summaryChapterIds.collectAsState()
@@ -672,10 +674,15 @@ fun AiChatScreen(initialBookId: Long?) {
             selectedId = selBooks.singleOrNull(),
             onSelect = { vm.selectBook(it) },
             onCreateBook = { r ->
-                vm.createBookFull(r.title, r.intro, r.coverPath, r.coverColor, r.volumePrefix, r.chapterPrefix, r.groupId)
+                vm.createBookFull(
+                    r.title, r.intro, r.coverPath, r.coverColor,
+                    r.volumePrefix, r.chapterPrefix, r.groupId, r.styleId
+                )
             },
             onPickCover = { uri, cb -> scope.launch { cb(vm.pickCover(uri)) } },
             onCreateGroup = { vm.createGroupAndGet(it) },
+            styleLibrary = styleLibrary,
+            onRetryStyleProfiles = vm::retryStyleProfiles,
             onDismiss = { showBooks = false }
         )
     }
@@ -721,10 +728,15 @@ fun AiChatScreen(initialBookId: Long?) {
                     groups = groups,
                     resolveTarget = { vm.importTargetBookId() },
                     onCreateBook = { r ->
-                        vm.createBookFull(r.title, r.intro, r.coverPath, r.coverColor, r.volumePrefix, r.chapterPrefix, r.groupId)
+                        vm.createBookFull(
+                            r.title, r.intro, r.coverPath, r.coverColor,
+                            r.volumePrefix, r.chapterPrefix, r.groupId, r.styleId
+                        )
                     },
                     onPickCover = { uri, cb -> scope.launch { cb(vm.pickCover(uri)) } },
                     onCreateGroup = { vm.createGroupAndGet(it) },
+                    styleLibrary = styleLibrary,
+                    onRetryStyleProfiles = vm::retryStyleProfiles,
                     items = head.blocks.map {
                         ImportPreviewItem(
                             label = "${it.type} · ${it.name}（${it.fields.size} 个字段）",
@@ -743,10 +755,15 @@ fun AiChatScreen(initialBookId: Long?) {
                     groups = groups,
                     resolveTarget = { vm.importTargetBookId() },
                     onCreateBook = { r ->
-                        vm.createBookFull(r.title, r.intro, r.coverPath, r.coverColor, r.volumePrefix, r.chapterPrefix, r.groupId)
+                        vm.createBookFull(
+                            r.title, r.intro, r.coverPath, r.coverColor,
+                            r.volumePrefix, r.chapterPrefix, r.groupId, r.styleId
+                        )
                     },
                     onPickCover = { uri, cb -> scope.launch { cb(vm.pickCover(uri)) } },
                     onCreateGroup = { vm.createGroupAndGet(it) },
+                    styleLibrary = styleLibrary,
+                    onRetryStyleProfiles = vm::retryStyleProfiles,
                     items = head.blocks.map {
                         ImportPreviewItem(
                             label = "${it.volume.ifBlank { "默认分卷" }} · ${it.chapterName}",
@@ -4320,6 +4337,9 @@ internal fun BookPickerDialog(
     onCreateBook: suspend (BookFormResult) -> Long,
     onPickCover: (android.net.Uri, (String?) -> Unit) -> Unit,
     onCreateGroup: suspend (String) -> Long,
+    /** 新建书籍表单里的文风档案：与书架新建弹窗保持一致 */
+    styleLibrary: StyleLibraryState? = null,
+    onRetryStyleProfiles: () -> Unit = {},
     onDismiss: () -> Unit
 ) {
     var search by remember { mutableStateOf("") }
@@ -4327,6 +4347,7 @@ internal fun BookPickerDialog(
     var groupFilter by remember { mutableStateOf<Long?>(null) }
     var showCreate by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val context = androidx.compose.ui.platform.LocalContext.current
 
     val filtered = books.filter { b ->
         val matchGroup = when (groupFilter) {
@@ -4439,19 +4460,26 @@ internal fun BookPickerDialog(
     )
 
     if (showCreate) {
-        // 新建书籍：调用与书架一致的完整创建窗口（书名 / 简介 / 封面 / 分组 / 前缀）
+        // 新建书籍：调用与书架一致的完整创建窗口（书名 / 简介 / 封面 / 分组 / 前缀 / 文风）
         BookFormDialog(
             dialogTitle = "新建书籍",
             initial = null,
             groups = groups,
+            styleLibrary = styleLibrary,
+            onRetryStyleProfiles = onRetryStyleProfiles,
             onPickCover = onPickCover,
             onCreateGroup = onCreateGroup,
             onConfirm = { r ->
                 scope.launch {
                     val id = onCreateBook(r)
-                    showCreate = false
-                    onSelect(id)
-                    onDismiss()
+                    if (id > 0) {
+                        showCreate = false
+                        onSelect(id)
+                        onDismiss()
+                    } else {
+                        // 创建失败（如所选文风档案已被删除）：保留表单，提示后重试
+                        Toast.makeText(context, "新建书籍失败，请检查文风档案后重试", Toast.LENGTH_LONG).show()
+                    }
                 }
             },
             onDismiss = { showCreate = false }
@@ -5181,6 +5209,8 @@ private fun ImportConfirmDialog(
     onCreateBook: suspend (BookFormResult) -> Long,
     onPickCover: (android.net.Uri, (String?) -> Unit) -> Unit,
     onCreateGroup: suspend (String) -> Long,
+    styleLibrary: StyleLibraryState? = null,
+    onRetryStyleProfiles: () -> Unit = {},
     items: List<ImportPreviewItem>,
     resolveExisting: suspend (Long) -> Set<String>,
     onConfirm: (Long, Set<Int>) -> Unit,
@@ -5286,6 +5316,8 @@ private fun ImportConfirmDialog(
             onCreateBook = onCreateBook,
             onPickCover = onPickCover,
             onCreateGroup = onCreateGroup,
+            styleLibrary = styleLibrary,
+            onRetryStyleProfiles = onRetryStyleProfiles,
             onDismiss = { showBookPicker = false }
         )
     }

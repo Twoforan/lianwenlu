@@ -24,12 +24,14 @@ class VolumeCompressionConfigTest {
         val config = VolumeCompressionConfig(
             source = CompressionSourceMode.CONTENT,
             autoCompressWholeVolumeSummary = true,
+            maxOutputTokens = 16384,
             outlineUpdateMode = CompressionOutlineUpdateMode.ASK,
             outlineScopeMode = CompressionOutlineScopeMode.UPDATABLE
         )
         val decoded = VolumeCompressionConfig.decode(VolumeCompressionConfig.encode(config))
         assertEquals(CompressionSourceMode.CONTENT, decoded.source)
         assertTrue(decoded.autoCompressWholeVolumeSummary)
+        assertEquals(16384, decoded.maxOutputTokens)
         assertEquals(CompressionOutlineUpdateMode.ASK, decoded.outlineUpdateMode)
         assertEquals(CompressionOutlineScopeMode.UPDATABLE, decoded.outlineScopeMode)
     }
@@ -60,6 +62,7 @@ class VolumeCompressionConfigTest {
         )
         assertEquals(CompressionSourceMode.CONTENT, decoded.source)
         assertFalse(decoded.autoCompressWholeVolumeSummary)
+        assertEquals(0, decoded.maxOutputTokens)
         assertEquals(CompressionOutlineUpdateMode.OFF, decoded.outlineUpdateMode)
         assertEquals(CompressionOutlineScopeMode.WHOLE_BOOK, decoded.outlineScopeMode)
     }

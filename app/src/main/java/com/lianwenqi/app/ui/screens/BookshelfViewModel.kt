@@ -245,14 +245,27 @@ class BookshelfViewModel(private val container: AppContainer) : ViewModel() {
     fun deleteBooks(ids: Set<Long>) = viewModelScope.launch { ids.forEach { bookRepository.deleteBook(it) } }
 
     /**
-     * 复制本书：新建空白书并完整复制原书大纲。
+     * 复制本书：按勾选复制大纲 / 梗概 / 正文。
      * 大纲在大库里是数据行，此外「常驻化分类 / 自定义分类 / 字段模板」按书籍 id 存在 DataStore，
-     * 必须一并迁移到新书，否则新书里已常驻化的分类会丢失。回调返回新书标题（失败为 null）。
+     * 必须一并迁移到新书，否则新书里已常驻化的分类会丢失。
+     * 回调返回新书 id（失败为 0）。
      */
-    fun copyBookOutline(bookId: Long, onCopied: (String?) -> Unit) = viewModelScope.launch {
-        val newId = bookRepository.copyBookOutline(bookId)
-        if (newId > 0) prefs.copyOutlinePrefs(bookId, newId)
-        onCopied(if (newId > 0) bookRepository.getBook(newId)?.title else null)
+    fun copyBook(
+        bookId: Long,
+        copyOutline: Boolean,
+        copySummaries: Boolean,
+        copyContent: Boolean,
+        onCopied: (Long) -> Unit
+    ) = viewModelScope.launch {
+        try {
+            val newId = bookRepository.copyBook(bookId, copyOutline, copySummaries, copyContent)
+            if (newId > 0 && copyOutline) prefs.copyOutlinePrefs(bookId, newId)
+            onCopied(newId)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            onCopied(0L)
+        }
     }
 
     fun moveToGroup(bookId: Long, groupId: Long?) = viewModelScope.launch {

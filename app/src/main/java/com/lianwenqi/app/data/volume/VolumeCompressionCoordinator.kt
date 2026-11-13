@@ -734,6 +734,7 @@ class VolumeCompressionCoordinator(
             modelId = session.modelId,
             sourceType = session.sourceType,
             compressionSessionId = session.id,
+            maxOutputTokensOverride = config.maxOutputTokens,
             maxInputChars = config.maxCharsPerRequest,
             targetOutputChars = config.outputChars
         )

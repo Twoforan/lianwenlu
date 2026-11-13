@@ -76,6 +76,9 @@ import com.lianwenqi.app.data.SortMode
 import com.lianwenqi.app.data.entity.Book
 import com.lianwenqi.app.data.entity.BookGroup
 import com.lianwenqi.app.data.entity.ChatRole
+import com.lianwenqi.app.data.style.StyleLibraryState
+import com.lianwenqi.app.data.style.StyleProfileRow
+import com.lianwenqi.app.data.style.StyleProfileSummaryReader
 import com.lianwenqi.app.ui.appViewModel
 import com.lianwenqi.app.ui.components.BookFormResult
 import com.lianwenqi.app.util.AI_CHAPTER_TOOL_DEFINITION_TEXT
@@ -89,9 +92,15 @@ import com.lianwenqi.app.util.FileUtil
 import com.lianwenqi.app.util.parseAiChapterBlocks
 import com.lianwenqi.app.util.parseAiOutlineBlocks
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
@@ -110,6 +119,38 @@ class AiToolsViewModel(private val container: AppContainer) : ViewModel() {
     /** 书籍分组（选书弹窗的分组筛选用） */
     val groups: StateFlow<List<BookGroup>> =
         bookRepository.observeGroups().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    // 新建书籍弹窗里的文风档案：与书架新建弹窗共用同一套读取 / 重试逻辑
+    private val styleRepository = container.styleRepository
+    private val styleRetry = MutableStateFlow(0)
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val styleLibrary: StateFlow<StyleLibraryState> = styleRetry
+        .flatMapLatest {
+            styleRepository.observeProfiles()
+                .map { profiles ->
+                    StyleLibraryState(
+                        loading = false,
+                        rows = profiles.map { profile ->
+                            StyleProfileRow(profile, StyleProfileSummaryReader.read(profile))
+                        }
+                    )
+                }
+                .catch { error ->
+                    emit(
+                        StyleLibraryState(
+                            loading = false,
+                            error = "读取文风档案失败：${error.message ?: "未知错误"}"
+                        )
+                    )
+                }
+        }
+        .flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), StyleLibraryState())
+
+    fun retryStyleProfiles() {
+        styleRetry.value++
+    }
 
     val outlineToolEnabled: StateFlow<Boolean> =
         prefs.aiToolOutlineEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, true)
@@ -151,17 +192,31 @@ class AiToolsViewModel(private val container: AppContainer) : ViewModel() {
     fun setGenForceEnglishThinking(v: Boolean) =
         viewModelScope.launch { prefs.setGenForceEnglishThinking(v) }
 
-    /** 完整表单新建书籍，返回新书 id */
-    suspend fun createBookFull(r: BookFormResult): Long = bookRepository.createBook(
-        title = r.title.trim(),
-        intro = r.intro.trim(),
-        coverPath = r.coverPath,
-        coverColor = r.coverColor,
-        volumePrefix = r.volumePrefix,
-        chapterPrefix = r.chapterPrefix,
-        groupId = r.groupId,
-        styleId = r.styleId
-    )
+    /** 完整表单新建书籍，返回新书 id；失败返回 0 */
+    suspend fun createBookFull(r: BookFormResult): Long = try {
+        if (r.styleId != 0L && styleRepository.getProfile(r.styleId) == null) {
+            retryStyleProfiles()
+            0L
+        } else {
+            bookRepository.createBook(
+                title = r.title.trim(),
+                intro = r.intro.trim(),
+                coverPath = r.coverPath,
+                coverColor = r.coverColor,
+                volumePrefix = r.volumePrefix,
+                chapterPrefix = r.chapterPrefix,
+                groupId = r.groupId,
+                styleId = r.styleId
+            )
+        }
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (e: IllegalArgumentException) {
+        retryStyleProfiles()
+        0L
+    } catch (e: Exception) {
+        0L
+    }
 
     /** 复制封面图到应用私有目录，返回本地路径 */
     suspend fun pickCover(uri: android.net.Uri): String? =
@@ -755,6 +810,7 @@ private fun WordRangeSlider(range: IntRange, cap: Int, onChange: (Int, Int) -> U
 private fun AiOutlineImportDialog(vm: AiToolsViewModel, onDismiss: () -> Unit) {
     val books by vm.books.collectAsState()
     val groups by vm.groups.collectAsState()
+    val styleLibrary by vm.styleLibrary.collectAsState()
     var text by remember { mutableStateOf("") }
     var targetBookId by remember { mutableStateOf<Long?>(null) }
     var showBookPicker by remember { mutableStateOf(false) }
@@ -835,6 +891,8 @@ private fun AiOutlineImportDialog(vm: AiToolsViewModel, onDismiss: () -> Unit) {
             onCreateBook = { vm.createBookFull(it) },
             onPickCover = { uri, cb -> scope.launch { cb(vm.pickCover(uri)) } },
             onCreateGroup = { vm.createGroupAndGet(it) },
+            styleLibrary = styleLibrary,
+            onRetryStyleProfiles = vm::retryStyleProfiles,
             onDismiss = { showBookPicker = false }
         )
     }
@@ -845,6 +903,7 @@ private fun AiOutlineImportDialog(vm: AiToolsViewModel, onDismiss: () -> Unit) {
 private fun AiChapterImportDialog(vm: AiToolsViewModel, onDismiss: () -> Unit) {
     val books by vm.books.collectAsState()
     val groups by vm.groups.collectAsState()
+    val styleLibrary by vm.styleLibrary.collectAsState()
     var text by remember { mutableStateOf("") }
     var targetBookId by remember { mutableStateOf<Long?>(null) }
     var showBookPicker by remember { mutableStateOf(false) }
@@ -925,6 +984,8 @@ private fun AiChapterImportDialog(vm: AiToolsViewModel, onDismiss: () -> Unit) {
             onCreateBook = { vm.createBookFull(it) },
             onPickCover = { uri, cb -> scope.launch { cb(vm.pickCover(uri)) } },
             onCreateGroup = { vm.createGroupAndGet(it) },
+            styleLibrary = styleLibrary,
+            onRetryStyleProfiles = vm::retryStyleProfiles,
             onDismiss = { showBookPicker = false }
         )
     }
