@@ -1157,6 +1157,7 @@ private fun AddModelDialog(
     var systemPrompt by remember { mutableStateOf("") }
     var reasoningEnabled by remember { mutableStateOf(true) }
     var reasoningLevel by remember { mutableStateOf(ReasoningLevel.DEFAULT.storage) }
+    var webSearchEnabled by remember { mutableStateOf(false) }
     var remote by remember { mutableStateOf<List<String>>(emptyList()) }
     var error by remember { mutableStateOf<String?>(null) }
     var showRemote by remember { mutableStateOf(false) }
@@ -1180,6 +1181,7 @@ private fun AddModelDialog(
                             systemPrompt = systemPrompt,
                             reasoningEnabled = reasoningEnabled,
                             reasoningLevel = reasoningLevel,
+                            webSearchEnabled = webSearchEnabled,
                             custom = !fromRemote
                         )
                     )
@@ -1237,6 +1239,17 @@ private fun AddModelDialog(
             onEnabledChange = { reasoningEnabled = it },
             onLevelChange = { reasoningLevel = it }
         )
+        Spacer(Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(
+                checked = webSearchEnabled,
+                onCheckedChange = { webSearchEnabled = it }
+            )
+            Text(
+                "支持内置联网搜索（勾选后聊天工具条出现联网搜索按钮）",
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
         Spacer(Modifier.height(12.dp))
         OutlinedTextField(
             value = systemPrompt,
@@ -1265,6 +1278,7 @@ private fun ModelDetailDialog(
     var systemPrompt by remember { mutableStateOf(model.systemPrompt) }
     var reasoningEnabled by remember { mutableStateOf(model.reasoningEnabled) }
     var reasoningLevel by remember { mutableStateOf(model.reasoningLevel) }
+    var webSearchEnabled by remember { mutableStateOf(model.webSearchEnabled) }
 
     InputDialog(
         title = "模型设置",
@@ -1290,7 +1304,8 @@ private fun ModelDetailDialog(
                             maxContext = maxContext,
                             systemPrompt = systemPrompt,
                             reasoningEnabled = reasoningEnabled,
-                            reasoningLevel = reasoningLevel
+                            reasoningLevel = reasoningLevel,
+                            webSearchEnabled = webSearchEnabled
                         )
                     )
                 }
@@ -1331,6 +1346,17 @@ private fun ModelDetailDialog(
             onEnabledChange = { reasoningEnabled = it },
             onLevelChange = { reasoningLevel = it }
         )
+        Spacer(Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(
+                checked = webSearchEnabled,
+                onCheckedChange = { webSearchEnabled = it }
+            )
+            Text(
+                "支持内置联网搜索（勾选后聊天工具条出现联网搜索按钮）",
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
         Spacer(Modifier.height(12.dp))
         OutlinedTextField(
             value = systemPrompt,

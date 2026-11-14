@@ -244,7 +244,13 @@ data class AiModel(
     /** 思考强度档位存储值：low / medium / high / max（低/中/高/极）；默认最高强度 */
     val reasoningLevel: String = "max",
     /** true：用户手动创建的模型，模型标识可修改；false：来自厂商列表，模型标识只读 */
-    val custom: Boolean = false
+    val custom: Boolean = false,
+    /**
+     * 该模型是否支持内置联网搜索（由用户在模型配置里标记）。
+     * 仅此标记为 true 时，聊天工具条才显示联网搜索按钮，并在请求中携带搜索参数。
+     */
+    @ColumnInfo(defaultValue = "0")
+    val webSearchEnabled: Boolean = false
 ) {
     /** 界面展示用名称 */
     val displayName: String get() = alias.ifBlank { name }
@@ -313,6 +319,12 @@ data class ChatMessage(
      * 为空时界面按「第X轮对话」显示；编辑只改这里，不会同步到书籍章节。
      */
     val roundName: String = "",
+    /**
+     * 本轮随消息发送的附件清单（JSON 数组）：图片 / 文件 / 链接。
+     * 图片与文件只记录本地缓存路径，发送时按需读取，避免把 base64 与大段文本写进数据库。
+     */
+    @ColumnInfo(defaultValue = "''")
+    val attachments: String = "",
     val createdAt: Long = System.currentTimeMillis()
 )
 

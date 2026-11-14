@@ -66,7 +66,8 @@ class SendChatMessageUseCaseTest {
             completionTokens: Int,
             cachedTokens: Int,
             chapterId: Long,
-            promptLog: String
+            promptLog: String,
+            attachments: String
         ): Long {
             savedMessages.add(
                 ChatMessage(
@@ -82,7 +83,8 @@ class SendChatMessageUseCaseTest {
                     completionTokens = completionTokens,
                     cachedTokens = cachedTokens,
                     chapterId = chapterId,
-                    promptLog = promptLog
+                    promptLog = promptLog,
+                    attachments = attachments
                 )
             )
             return savedMessages.size.toLong()

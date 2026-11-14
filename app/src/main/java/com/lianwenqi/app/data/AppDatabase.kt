@@ -74,7 +74,7 @@ import com.lianwenqi.app.data.entity.VolumeSummary
         VolumeOutlineUpdate::class,
         VolumeOutlineSuggestion::class
     ],
-    version = 24,
+    version = 25,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
@@ -637,6 +637,24 @@ abstract class AppDatabase : RoomDatabase() {
         }
 
         /**
+         * 聊天附件与联网搜索：
+         * - chat_message.attachments 记录本轮图片 / 文件 / 链接的清单（JSON，只存本地路径与链接地址）；
+         * - ai_model.webSearchEnabled 标记模型是否支持内置联网搜索，旧模型默认不支持。
+         */
+        internal val MIGRATION_24_25 = object : Migration(24, 25) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE chat_message " +
+                        "ADD COLUMN attachments TEXT NOT NULL DEFAULT ''"
+                )
+                db.execSQL(
+                    "ALTER TABLE ai_model " +
+                        "ADD COLUMN webSearchEnabled INTEGER NOT NULL DEFAULT 0"
+                )
+            }
+        }
+
+        /**
          * 修复历史遗留的超长行：整本正文被冻结进会话前缀、超长提示词日志 / 正文等，
          * 单行超过 SQLite CursorWindow（2MB）上限后读取会抛 SQLiteBlobTooBigException 直接闪退。
          * 首次打开数据库时把超限文本截断到安全长度，之后用标记表跳过，避免每次启动全表扫描。
@@ -663,7 +681,7 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "lianwenqi.db"
-                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20, MIGRATION_20_21, MIGRATION_21_22, MIGRATION_22_23, MIGRATION_23_24).addCallback(REPAIR_OVERSIZED_ROWS).build().also { INSTANCE = it }
+                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20, MIGRATION_20_21, MIGRATION_21_22, MIGRATION_22_23, MIGRATION_23_24, MIGRATION_24_25).addCallback(REPAIR_OVERSIZED_ROWS).build().also { INSTANCE = it }
             }
     }
 }

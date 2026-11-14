@@ -6,7 +6,13 @@ import com.lianwenqi.app.data.entity.Provider
 import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonObject
 
 /**
  * 对话消息（发送给模型的统一结构）。
@@ -18,7 +24,12 @@ import kotlinx.serialization.json.JsonObject
 data class ChatTurn(
     val role: ChatRole,
     val content: String,
-    val cacheBreakpoint: Boolean = false
+    val cacheBreakpoint: Boolean = false,
+    /**
+     * 随本轮消息一起发送的图片（data URL，如 data:image/jpeg;base64,...）。
+     * 仅 OpenAI 兼容的 chat/completions 接口支持；其他接口遇到图片时降级为纯文本。
+     */
+    val images: List<String> = emptyList()
 )
 
 /** 工具定义：[parametersJson] 为 JSON Schema 原文，直接透传给供应商 */
@@ -38,7 +49,9 @@ data class AiRequest(
     val maxTokens: Int,
     val systemPrompt: String = "",
     /** 本轮提供给模型的工具定义；为空表示普通对话（不带 tools） */
-    val tools: List<AiToolSpec> = emptyList()
+    val tools: List<AiToolSpec> = emptyList(),
+    /** 本轮是否请求模型内置的联网搜索（仅对标记支持搜索的模型生效） */
+    val webSearch: Boolean = false
 )
 
 data class AiResult(
@@ -96,7 +109,7 @@ data class AiResult(
 @Serializable
 data class ChatCompletionRequest(
     val model: String,
-    val messages: List<ChatMessageDto>,
+    val messages: List<OutboundMessageDto>,
     val temperature: Float? = null,
     @SerialName("max_tokens") val maxTokens: Int? = null,
     val stream: Boolean = false,
@@ -107,8 +120,8 @@ data class ChatCompletionRequest(
     val thinking: ThinkingParam? = null,
     /** 通义千问系的思考开关与思考预算 */
     @SerialName("chat_template_kwargs") val chatTemplateKwargs: ChatTemplateKwargs? = null,
-    /** 可用工具列表（OpenAI 兼容格式）；为空时不发送该字段 */
-    val tools: List<ChatCompletionTool>? = null
+    /** 可用工具列表（OpenAI 兼容格式）；为空时不发送该字段。内置联网搜索也合并进该数组 */
+    val tools: List<JsonElement>? = null
 )
 
 /** chat/completions 的工具定义：{type:"function", function:{name,description,parameters}} */
@@ -186,6 +199,47 @@ data class ChatMessageDto(
     /** 模型发起的工具调用（仅解析响应时出现） */
     @SerialName("tool_calls") val toolCalls: List<ToolCallDto>? = null
 )
+
+/**
+ * 请求侧消息 DTO：content 既可以是纯文本，也可以是 OpenAI 多模态数组
+ * （[{"type":"text",...},{"type":"image_url",...}]）。
+ *
+ * 与响应解析用的 [ChatMessageDto] 分开，避免把图片结构带进解析分支；
+ * 无图片时 content 仍是 JsonPrimitive，序列化结果与原来的字符串完全一致。
+ */
+@Serializable
+data class OutboundMessageDto(
+    val role: String,
+    val content: JsonElement,
+    @SerialName("reasoning_content") val reasoningContent: String? = null,
+    @SerialName("tool_calls") val toolCalls: List<ToolCallDto>? = null
+) {
+    companion object {
+        /** 纯文本消息：默认没有图片时的构造入口 */
+        fun text(role: String, content: String): OutboundMessageDto =
+            OutboundMessageDto(role, JsonPrimitive(content))
+
+        /** 按 [ChatTurn] 构造：有图片时转成 OpenAI 多模态 content 数组 */
+        fun of(role: String, content: String, images: List<String>): OutboundMessageDto {
+            if (images.isEmpty()) return OutboundMessageDto(role, JsonPrimitive(content))
+            val parts = buildJsonArray {
+                if (content.isNotBlank()) {
+                    add(buildJsonObject {
+                        put("type", "text")
+                        put("text", content)
+                    })
+                }
+                images.forEach { dataUrl ->
+                    add(buildJsonObject {
+                        put("type", "image_url")
+                        putJsonObject("image_url") { put("url", dataUrl) }
+                    })
+                }
+            }
+            return OutboundMessageDto(role, parts)
+        }
+    }
+}
 
 @Serializable
 data class ChatCompletionResponse(

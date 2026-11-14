@@ -28,8 +28,8 @@ android {
         applicationId = "com.lianwenqi.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 86
-        versionName = "4.7.1"
+        versionCode = 87
+        versionName = "4.7.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -128,6 +128,9 @@ dependencies {
 
     // Network
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    // HTML 正文提取（链接附件）
+    implementation("org.jsoup:jsoup:1.18.3")
 
     // Image loading (book cover)
     implementation("io.coil-kt:coil-compose:2.7.0")

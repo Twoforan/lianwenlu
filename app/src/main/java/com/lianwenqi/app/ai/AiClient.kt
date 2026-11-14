@@ -10,8 +10,10 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.put
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -112,7 +114,9 @@ class AiClient(
         endpoint: ModelEndpoint,
         turns: List<ChatTurn>,
         tools: List<AiToolSpec> = emptyList(),
-        onDelta: ((String, String) -> Unit)? = null
+        onDelta: ((String, String) -> Unit)? = null,
+        /** 本轮是否请求模型内置的联网搜索（仅 chat/completions 支持，随 tools 一起发送） */
+        webSearch: Boolean = false
     ): AiResult =
         withContext(Dispatchers.IO) {
             val apiKey = endpoint.provider.apiKey
@@ -121,16 +125,17 @@ class AiClient(
 
             suspend fun runOnce(withTools: Boolean): AiResult = runCatching {
                 val activeTools = if (withTools) tools else emptyList()
+                val search = webSearch && withTools && endpoint.apiType == ApiType.CHAT_COMPLETIONS
                 when (endpoint.apiType) {
                     ApiType.CHAT_COMPLETIONS ->
-                        if (onDelta != null) streamCompletions(endpoint, turns, activeTools, onDelta)
-                        else chatCompletions(endpoint, turns, activeTools)
+                        if (onDelta != null) streamCompletions(endpoint, turns, activeTools, search, onDelta)
+                        else chatCompletions(endpoint, turns, activeTools, search)
                     ApiType.RESPONSES ->
-                        if (onDelta != null) streamResponses(endpoint, turns, activeTools, onDelta)
-                        else responses(endpoint, turns, activeTools)
+                        if (onDelta != null) streamResponses(endpoint, stripImages(turns), activeTools, onDelta)
+                        else responses(endpoint, stripImages(turns), activeTools)
                     ApiType.ANTHROPIC_MESSAGES ->
-                        if (onDelta != null) streamAnthropic(endpoint, turns, activeTools, onDelta)
-                        else anthropicMessages(endpoint, turns, activeTools)
+                        if (onDelta != null) streamAnthropic(endpoint, stripImages(turns), activeTools, onDelta)
+                        else anthropicMessages(endpoint, stripImages(turns), activeTools)
                 }
             }.getOrElse {
                 // 用户主动「停止响应」时协程被取消，需要原样抛出，不能当成请求失败
@@ -139,8 +144,8 @@ class AiClient(
                 AiResult.fail(AiError.fromThrowable(it))
             }
 
-            val first = runOnce(tools.isNotEmpty())
-            val rejectedTools = tools.isNotEmpty() && (first.error as? AiError.Server)?.code == 400
+            val first = runOnce(tools.isNotEmpty() || webSearch)
+            val rejectedTools = (tools.isNotEmpty() || webSearch) && (first.error as? AiError.Server)?.code == 400
             if (rejectedTools) {
                 val retry = runOnce(false)
                 if (retry.success) retry.copy(toolsUnsupported = true) else retry
@@ -204,11 +209,29 @@ class AiClient(
         else endpoint.systemPrompt.trimEnd() + "\n\n" + ENGLISH_THINKING_HINT
     }
 
-    private fun buildMessages(endpoint: ModelEndpoint, turns: List<ChatTurn>): List<ChatMessageDto> =
+    private fun buildMessages(endpoint: ModelEndpoint, turns: List<ChatTurn>): List<OutboundMessageDto> =
         buildList {
             val system = systemPromptOf(endpoint)
-            if (system.isNotBlank()) add(ChatMessageDto("system", system))
-            turns.forEach { add(ChatMessageDto(it.role.name.lowercase(), it.content)) }
+            if (system.isNotBlank()) add(OutboundMessageDto.text("system", system))
+            turns.forEach {
+                add(OutboundMessageDto.of(it.role.name.lowercase(), it.content, it.images))
+            }
+        }
+
+    /**
+     * 不支持多模态的接口（Responses / Anthropic）遇到图片时降级：
+     * 去掉图片数据并在正文后补一行说明，避免静默丢内容让用户以为图片已生效。
+     */
+    private fun stripImages(turns: List<ChatTurn>): List<ChatTurn> =
+        turns.map {
+            if (it.images.isEmpty()) {
+                it
+            } else {
+                it.copy(
+                    content = it.content + "\n[图片已省略：当前接口不支持]",
+                    images = emptyList()
+                )
+            }
         }
 
     /**
@@ -264,10 +287,21 @@ class AiClient(
         runCatching { json.parseToJsonElement(spec.parametersJson) as? JsonObject }.getOrNull()
             ?: buildJsonObject { put("type", "object"); put("properties", buildJsonObject { }) }
 
-    private fun completionsTools(tools: List<AiToolSpec>): List<ChatCompletionTool>? =
-        tools.takeIf { it.isNotEmpty() }?.map {
-            ChatCompletionTool(function = ChatFunctionDef(it.name, it.description, schemaOf(it)))
+    private fun completionsTools(tools: List<AiToolSpec>, webSearch: Boolean = false): List<JsonElement>? {
+        val list = buildList {
+            tools.forEach {
+                add(
+                    json.encodeToJsonElement(
+                        ChatCompletionTool.serializer(),
+                        ChatCompletionTool(function = ChatFunctionDef(it.name, it.description, schemaOf(it)))
+                    )
+                )
+            }
+            // 模型内置联网搜索：与函数工具同属 tools 数组，模型拒绝时随 400 重试一并去掉
+            if (webSearch) add(buildJsonObject { put("type", "web_search") })
         }
+        return list.takeIf { it.isNotEmpty() }
+    }
 
     private fun responsesTools(tools: List<AiToolSpec>): List<ResponsesTool>? =
         tools.takeIf { it.isNotEmpty() }?.map { ResponsesTool(name = it.name, description = it.description, parameters = schemaOf(it)) }
@@ -315,7 +349,8 @@ class AiClient(
     private suspend fun chatCompletions(
         endpoint: ModelEndpoint,
         turns: List<ChatTurn>,
-        tools: List<AiToolSpec>
+        tools: List<AiToolSpec>,
+        webSearch: Boolean = false
     ): AiResult {
         val rf = reasoningFields(endpoint, ApiType.CHAT_COMPLETIONS)
         val payload = ChatCompletionRequest(
@@ -326,7 +361,7 @@ class AiClient(
             reasoningEffort = rf.effort,
             thinking = rf.thinking,
             chatTemplateKwargs = rf.kwargs,
-            tools = completionsTools(tools)
+            tools = completionsTools(tools, webSearch)
         )
         val body = json.encodeToString(ChatCompletionRequest.serializer(), payload)
             .toRequestBody(JSON_MEDIA)
@@ -376,6 +411,7 @@ class AiClient(
         endpoint: ModelEndpoint,
         turns: List<ChatTurn>,
         tools: List<AiToolSpec>,
+        webSearch: Boolean = false,
         onDelta: (String, String) -> Unit
     ): AiResult {
         val rf = reasoningFields(endpoint, ApiType.CHAT_COMPLETIONS)
@@ -389,7 +425,7 @@ class AiClient(
             reasoningEffort = rf.effort,
             thinking = rf.thinking,
             chatTemplateKwargs = rf.kwargs,
-            tools = completionsTools(tools)
+            tools = completionsTools(tools, webSearch)
         )
         val body = json.encodeToString(ChatCompletionRequest.serializer(), payload)
             .toRequestBody(JSON_MEDIA)

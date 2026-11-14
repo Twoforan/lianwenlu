@@ -1,7 +1,13 @@
 package com.lianwenqi.app.ui.screens
 
+import android.content.Context
+import android.net.Uri
+import android.provider.OpenableColumns
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -55,10 +61,15 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Article
+import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.TravelExplore
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.EditNote
@@ -78,6 +89,8 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
@@ -112,8 +125,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
@@ -138,10 +153,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import coil.compose.AsyncImage
 import com.lianwenqi.app.ai.GenerationDialog
 import com.lianwenqi.app.ai.MemoryScopePick
 import com.lianwenqi.app.ai.RefreshRetrievalChoice
 import com.lianwenqi.app.ai.SummaryFailureChoice
+import com.lianwenqi.app.data.AttachmentStore
+import com.lianwenqi.app.data.ChatAttachment
 import com.lianwenqi.app.data.GEN_KIND_SUMMARY
 import com.lianwenqi.app.data.PromptLog
 import com.lianwenqi.app.data.entity.AiModel
@@ -171,8 +189,10 @@ import com.lianwenqi.app.util.AiToolInfo
 import com.lianwenqi.app.util.TextTool
 import com.lianwenqi.app.util.detectImportKindHint
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -244,12 +264,33 @@ fun AiChatScreen(initialBookId: Long?) {
     var showPrompts by remember { mutableStateOf(false) }
     var manifestState by remember { mutableIntStateOf(0) }
 
+    // 附件与联网搜索：待发送附件列表、联网搜索开关、链接输入弹窗、附件预览
+    val pendingAttachments by vm.pendingAttachments.collectAsState()
+    val webSearchOn by vm.webSearchEnabled.collectAsState()
+    var showLinkDialog by remember { mutableStateOf(false) }
+    var linkInput by remember { mutableStateOf("") }
+    var previewAttachment by remember { mutableStateOf<ChatAttachment?>(null) }
+    val attachContext = LocalContext.current
+    val imagePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        uri?.let { vm.attachImage(it, displayNameOf(attachContext, it)) }
+    }
+    val filePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let { vm.attachFile(it, displayNameOf(attachContext, it)) }
+    }
+
     val clipboard = LocalClipboardManager.current
     val keyboard = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
     val scope = rememberCoroutineScope()
     val ui = remember { MessageUiState() }
     val modelName = models.firstOrNull { it.id == activeModelId }?.displayName ?: "未选择模型"
+    // 当前模型是否标记了「支持联网搜索」：只有标记过才显示搜索按钮
+    val activeModelWebSearch =
+        models.firstOrNull { it.id == activeModelId }?.webSearchEnabled == true
     // 「导入」按钮：仅当至少一个导入工具在导航栏 AI 中真正生效时显示
     val importOutlineOn = AI_TOOL_WRITE_OUTLINE in chatTools && outlineToolEnabled
     val importChapterOn = AI_TOOL_IMPORT_CHAPTER in chatTools && chapterToolEnabled
@@ -515,39 +556,97 @@ fun AiChatScreen(initialBookId: Long?) {
             val manifestCount =
                 manifestChapters.size + manifestOutline.size + manifestVolumeSummaries.size
 
-            // 底部工具条：常用提示词 / AI工具，右侧文件清单；超出宽度可横向滑动
+            // 底部工具条：常用提示词 / AI工具 / 图片 / 文件 / 链接 / 联网搜索，右侧文件清单
             Row(
                 Modifier
                     .fillMaxWidth()
                     .horizontalScroll(rememberScrollState())
                     .padding(horizontal = 8.dp, vertical = 2.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                horizontalArrangement = Arrangement.spacedBy(2.dp)
             ) {
-                FilterChip(
-                    selected = showPrompts,
+                // 常用提示词：闪电图标，展开/收起提示词面板
+                IconButton(
                     onClick = {
                         focusManager.clearFocus()
                         keyboard?.hide()
                         showPrompts = !showPrompts
                         if (showPrompts) manifestState = 0
-                    },
-                    label = { Text("常用提示词") }
-                )
-                // 长期记忆检索：勾选后发送时按「本章梗概 + 提示词」检索本书正文片段注入参考资料
-                // 未配置向量化工具（未选向量模型 / 未启用本地工具）时不可勾选
-                FilterChip(
-                    selected = memoryRetrieval,
-                    enabled = memoryToolReady && memoryVectorizing == null,
-                    onClick = { vm.toggleMemoryRetrieval() },
-                    label = { Text("记忆检索") }
-                )
-                // AI 工具多选（被工具页关闭的工具不出现在列表里）
-                if (outlineToolEnabled || chapterToolEnabled) {
-                    AssistChip(
-                        onClick = { showAiTools = true },
-                        label = { Text("AI工具(${chatTools.size})") }
+                    }
+                ) {
+                    Icon(
+                        Icons.Filled.Bolt,
+                        contentDescription = "常用提示词",
+                        tint = if (showPrompts) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                }
+                // AI 工具多选（被工具页关闭的工具不出现在列表里）；右上角角标显示已勾选数量
+                if (outlineToolEnabled || chapterToolEnabled) {
+                    IconButton(onClick = { showAiTools = true }) {
+                        BadgedBox(
+                            badge = {
+                                if (chatTools.isNotEmpty()) {
+                                    Badge { Text("${chatTools.size}") }
+                                }
+                            }
+                        ) {
+                            Icon(
+                                Icons.Filled.Build,
+                                contentDescription = "AI工具，已勾选 ${chatTools.size} 个",
+                                tint = if (chatTools.isNotEmpty()) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+                // 图片：相册选图后按多模态直传
+                IconButton(
+                    onClick = {
+                        imagePicker.launch(
+                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                        )
+                    }
+                ) {
+                    Icon(
+                        Icons.Filled.Image,
+                        contentDescription = "添加图片",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                // 文件：只收纯文本类，读取后作为参考资料注入
+                IconButton(
+                    onClick = { filePicker.launch(TEXT_FILE_MIME_TYPES) }
+                ) {
+                    Icon(
+                        Icons.Filled.AttachFile,
+                        contentDescription = "添加文件",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                // 链接：抓取网页正文
+                IconButton(
+                    onClick = {
+                        linkInput = ""
+                        showLinkDialog = true
+                    }
+                ) {
+                    Icon(
+                        Icons.Filled.Link,
+                        contentDescription = "添加链接",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                // 联网搜索：仅模型标记支持内置搜索时显示
+                if (activeModelWebSearch) {
+                    IconButton(onClick = { vm.toggleWebSearch() }) {
+                        Icon(
+                            Icons.Filled.TravelExplore,
+                            contentDescription = "联网搜索",
+                            tint = if (webSearchOn) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
                 if (manifestCount > 0) {
                     Row(
@@ -652,11 +751,45 @@ fun AiChatScreen(initialBookId: Long?) {
                 )
             }
 
+            // 待发送附件：图片 / 文件 / 链接以可删除的小卡片展示在输入框上方
+            if (pendingAttachments.isNotEmpty()) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(horizontal = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    pendingAttachments.forEach { attachment ->
+                        AssistChip(
+                            // 点击预览内容；只有点右侧 X 才删除
+                            onClick = { previewAttachment = attachment },
+                            label = { Text(attachmentLabel(attachment)) },
+                            leadingIcon = {
+                                Icon(attachmentIcon(attachment), null, Modifier.size(16.dp))
+                            },
+                            trailingIcon = {
+                                Box(
+                                    Modifier
+                                        .size(22.dp)
+                                        .clip(CircleShape)
+                                        .clickable { vm.removeAttachment(attachment) },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(Icons.Filled.Close, "移除附件", Modifier.size(14.dp))
+                                }
+                            }
+                        )
+                    }
+                }
+            }
+
             ChatComposer(
                 value = input,
                 onValueChange = { vm.input.value = it },
                 placeholder = "说点什么…",
-                sendEnabled = !sending && input.isNotBlank(),
+                sendEnabled = !sending && (input.isNotBlank() || pendingAttachments.isNotEmpty()),
                 onSend = {
                     focusManager.clearFocus()
                     keyboard?.hide()
@@ -665,6 +798,44 @@ fun AiChatScreen(initialBookId: Long?) {
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
             )
         }
+    }
+
+    if (showLinkDialog) {
+        AlertDialog(
+            onDismissRequest = { showLinkDialog = false },
+            title = { Text("添加链接") },
+            text = {
+                OutlinedTextField(
+                    value = linkInput,
+                    onValueChange = { linkInput = it },
+                    placeholder = { Text("https://…") },
+                    singleLine = true
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = linkInput.isNotBlank(),
+                    onClick = {
+                        vm.attachLink(linkInput)
+                        showLinkDialog = false
+                    }
+                ) { Text("添加") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showLinkDialog = false }) { Text("取消") }
+            }
+        )
+    }
+
+    previewAttachment?.let { attachment ->
+        AttachmentPreviewDialog(
+            attachment = attachment,
+            onDismiss = { previewAttachment = null },
+            onDelete = {
+                vm.removeAttachment(attachment)
+                previewAttachment = null
+            }
+        )
     }
 
     if (showBooks) {
@@ -1129,6 +1300,103 @@ fun AiAssistantDrawer(
             )
         }
     }
+}
+
+/** 需要读取纯文本的附件 MIME 类型 */
+private val TEXT_FILE_MIME_TYPES = arrayOf(
+    "text/*",
+    "application/json",
+    "application/xml",
+    "application/x-yaml",
+    "application/javascript"
+)
+
+/** 从 Uri 查询展示名，取不到时回落到路径末段 */
+private fun displayNameOf(context: Context, uri: Uri): String {
+    val name = runCatching {
+        context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            if (index >= 0 && cursor.moveToFirst()) cursor.getString(index) else null
+        }
+    }.getOrNull()
+    return name?.takeIf { it.isNotBlank() }
+        ?: uri.lastPathSegment?.substringAfterLast('/').orEmpty().ifBlank { "附件" }
+}
+
+/** 待发送附件的显示名：带类型前缀，过长时截断 */
+private fun attachmentLabel(attachment: ChatAttachment): String {
+    val prefix = when (attachment.type) {
+        "image" -> "图片："
+        "link" -> "链接："
+        else -> "文件："
+    }
+    return prefix + attachment.name.take(24)
+}
+
+/** 待发送附件的类型图标 */
+private fun attachmentIcon(attachment: ChatAttachment) = when (attachment.type) {
+    "image" -> Icons.Filled.Image
+    "link" -> Icons.Filled.Link
+    else -> Icons.Filled.AttachFile
+}
+
+/**
+ * 附件预览弹窗：图片直接显示，文件 / 链接显示提取出的正文。
+ * 只有点「删除」才会真正移除附件，点「关闭」或遮罩只是退出预览。
+ */
+@Composable
+private fun AttachmentPreviewDialog(
+    attachment: ChatAttachment,
+    onDismiss: () -> Unit,
+    onDelete: () -> Unit
+) {
+    val context = LocalContext.current
+    val body by produceState<String?>(initialValue = null, attachment.path) {
+        value = withContext(Dispatchers.IO) {
+            AttachmentStore(context).textContent(attachment.path)
+        }
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(attachment.name, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        },
+        text = {
+            if (attachment.type == "image") {
+                AsyncImage(
+                    model = java.io.File(attachment.path),
+                    contentDescription = attachment.name,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 420.dp),
+                    contentScale = ContentScale.Fit
+                )
+            } else {
+                val text = body
+                if (text == null) {
+                    Text("正在读取…", style = MaterialTheme.typography.bodySmall)
+                } else {
+                    SelectionContainer {
+                        Text(
+                            text = text,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier
+                                .heightIn(max = 420.dp)
+                                .verticalScroll(rememberScrollState())
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("关闭") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDelete) {
+                Text("删除", color = MaterialTheme.colorScheme.error)
+            }
+        }
+    )
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -3529,6 +3797,25 @@ private fun ChatMessageItem(
                         }
                     }
                 ) {
+                    // 本轮附件：只在气泡上方显示文件名，图片与文件正文本身随请求发送
+                    val attachCtx = LocalContext.current
+                    val attachmentNames = remember(msg.attachments) {
+                        if (msg.attachments.isBlank()) {
+                            emptyList()
+                        } else {
+                            AttachmentStore(attachCtx)
+                                .decode(msg.attachments)
+                                .map { it.name }
+                        }
+                    }
+                    if (attachmentNames.isNotEmpty() && !collapsed) {
+                        Text(
+                            text = attachmentNames.joinToString("　") { "📎 $it" },
+                            modifier = Modifier.fillMaxWidth(),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                     if (collapsed) {
                         // 小收起：只显示一行内容预览，点操作栏的展开图标恢复
                         Text(

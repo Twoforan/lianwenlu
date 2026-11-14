@@ -1,5 +1,6 @@
 package com.lianwenqi.app.ui.screens
 
+import android.net.Uri
 import android.util.Log
 
 import androidx.lifecycle.ViewModel
@@ -34,6 +35,8 @@ import com.lianwenqi.app.ai.contentDialogOrder
 import com.lianwenqi.app.ai.enforceWordRange
 import com.lianwenqi.app.data.AiChapterImporter
 import com.lianwenqi.app.data.AiOutlineImporter
+import com.lianwenqi.app.data.AttachmentStore
+import com.lianwenqi.app.data.ChatAttachment
 import com.lianwenqi.app.data.ChatEvent
 import com.lianwenqi.app.data.GEN_KIND_SUMMARY
 import com.lianwenqi.app.data.HistoryChapters
@@ -104,6 +107,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
@@ -299,6 +303,54 @@ class AiChatViewModel(
     val sending = MutableStateFlow(false)
     val errorMessage = MutableStateFlow<String?>(null)
     val input = MutableStateFlow("")
+
+    /** 附件本地存储：图片压缩落盘、文件与链接正文提取 */
+    private val attachmentStore = AttachmentStore(container.context)
+
+    /** 待发送的附件（图片 / 文件 / 链接），发送时随消息落库并清空 */
+    private val _pendingAttachments = MutableStateFlow<List<ChatAttachment>>(emptyList())
+    val pendingAttachments: StateFlow<List<ChatAttachment>> = _pendingAttachments
+
+    /** 联网搜索开关：仅对标记「支持联网搜索」的模型显示并生效 */
+    private val _webSearchEnabled = MutableStateFlow(false)
+    val webSearchEnabled: StateFlow<Boolean> = _webSearchEnabled
+
+    fun toggleWebSearch() {
+        _webSearchEnabled.value = !_webSearchEnabled.value
+    }
+
+    /** 添加图片附件：解码压缩后落盘，失败时给出提示 */
+    fun attachImage(uri: Uri, name: String) = viewModelScope.launch {
+        val attachment = withContext(Dispatchers.IO) { attachmentStore.saveImage(uri, name) }
+        if (attachment == null) {
+            errorMessage.value = "图片读取失败，请换一张试试"
+        } else {
+            _pendingAttachments.value = _pendingAttachments.value + attachment
+        }
+    }
+
+    /** 添加文本文件附件 */
+    fun attachFile(uri: Uri, name: String) = viewModelScope.launch {
+        val attachment = withContext(Dispatchers.IO) { attachmentStore.saveTextFile(uri, name) }
+        if (attachment == null) {
+            errorMessage.value = "文件读取失败：只支持纯文本类文件，且内容不能为空"
+        } else {
+            _pendingAttachments.value = _pendingAttachments.value + attachment
+        }
+    }
+
+    /** 添加链接附件：抓取网页正文，失败时回落为只带链接 */
+    fun attachLink(url: String) = viewModelScope.launch {
+        if (url.isBlank()) return@launch
+        val attachment = attachmentStore.fetchLink(url.trim())
+        _pendingAttachments.value = _pendingAttachments.value + attachment
+    }
+
+    /** 移除待发送附件（同时清理本地缓存文件） */
+    fun removeAttachment(attachment: ChatAttachment) {
+        _pendingAttachments.value = _pendingAttachments.value.filterNot { it == attachment }
+        attachmentStore.deleteFiles(listOf(attachment))
+    }
 
     /**
      * 「记忆检索」勾选框（导航栏 AI 聊天页与侧边 AI 助手共用）。
@@ -3244,8 +3296,11 @@ class AiChatViewModel(
 
     /** 真正开始一次发送（原 [send] 的生成逻辑；弹窗确认后也走这里） */
     private fun startSend(overrideText: String?, systemPrompt: String) = launchGenerating {
-        val text = (overrideText ?: input.value).trim()
-        if (text.isBlank() || sending.value) return@launchGenerating
+        val rawText = (overrideText ?: input.value).trim()
+        val hasAttachments = _pendingAttachments.value.isNotEmpty()
+        if ((rawText.isBlank() && !hasAttachments) || sending.value) return@launchGenerating
+        // 只有附件没有文字时给一句兜底指令，避免空内容落库与空 user 轮次
+        val text = rawText.ifBlank { "请查看附件内容" }
         val modelId = activeModelId.value
         if (modelId <= 0L) {
             errorMessage.value = "请先在设置中配置并选择一个模型"
@@ -3307,9 +3362,12 @@ class AiChatViewModel(
             contextSnapshot = currentSnapshot().encode(),
             promptExtra = extra,
             // 记录本轮对话发生在哪一章，供聊天页按章节分组收起历史对话
-            chapterId = currentRoundChapterId()
+            chapterId = currentRoundChapterId(),
+            // 附件清单随消息落库：图片与文件只存本地路径，重新生成时按路径重新读取
+            attachments = attachmentStore.encode(_pendingAttachments.value)
         )
         if (overrideText == null) input.value = ""
+        _pendingAttachments.value = emptyList()
         runGeneration(
             sid, modelId, systemPrompt,
             replyToUserId = userId, historyEndId = userId, variantIndex = 0, prefix = prefix,
@@ -3528,6 +3586,18 @@ class AiChatViewModel(
         val priorEndId = if (historyEndId == replyToUserId) historyEndId else historyEndId + 1
         // 历史对话块：按本会话已生效的角色开关，从截止位置之前的消息重新生成（不含本轮输入与未完成回复）
         val history = buildHistoryDialogue(p, sid, priorEndId)
+        // 本轮附件：图片转 data URL 供多模态直传，文件 / 链接正文作为参考块排在历史之后
+        val attachments = attachmentStore.decode(
+            chatRepository.getMessage(replyToUserId)?.attachments.orEmpty()
+        )
+        val imageDataUrls = withContext(Dispatchers.IO) {
+            attachments.filter { it.type == "image" }.mapNotNull { attachmentStore.imageDataUrl(it.path) }
+        }
+        val attachmentBlocks = withContext(Dispatchers.IO) {
+            attachments.filter { it.type != "image" }.mapNotNull { att ->
+                attachmentStore.textContent(att.path)?.let { text -> "【附件：${att.name}】\n$text" }
+            }
+        }
         val request = SendChatRequest(
             sessionId = sid,
             modelId = modelId,
@@ -3548,6 +3618,9 @@ class AiChatViewModel(
             },
             historyPrefix = history.text,
             historyTurns = history.turns,
+            images = imageDataUrls,
+            attachmentBlocks = attachmentBlocks,
+            webSearch = _webSearchEnabled.value,
             historySummary = if (p.historySummaryOn) p.historySummaryBlock else "",
             historyContent = if (p.historyContentOn) p.historyContentBlock else "",
             // 本轮所属章节：沿用该用户消息落库时的章节，重新生成 / 编辑重发不会跳到别的章节

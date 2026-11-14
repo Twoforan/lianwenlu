@@ -142,6 +142,12 @@ data class SendChatRequest(
      * 与 [referencePrefix] 互不重复（大纲已从参考资料前缀中剔除）。
      */
     val outlineBlocks: List<String> = emptyList(),
+    /** 本轮图片（data URL）：只附加在最后一条 user 消息上，供支持多模态的接口直传 */
+    val images: List<String> = emptyList(),
+    /** 本轮文件 / 链接附件提取出的正文块：逐条排在历史与大纲之后 */
+    val attachmentBlocks: List<String> = emptyList(),
+    /** 本轮是否请求模型内置联网搜索 */
+    val webSearch: Boolean = false,
     /**
      * 「历史对话前缀」（历史梗概 / 历史正文 / 每轮消息）渲染成的整段文本，
      * 仅用于提示词日志回显；真正发给模型的历史对话见 [historyTurns]。
@@ -217,7 +223,9 @@ interface ChatGateway {
         completionTokens: Int = 0,
         cachedTokens: Int = 0,
         chapterId: Long = 0,
-        promptLog: String = ""
+        promptLog: String = "",
+        /** 本轮附件清单（JSON，见 [ChatAttachment]）；为空表示没有附件 */
+        attachments: String = ""
     ): Long
 }
 
@@ -386,7 +394,11 @@ class SendChatMessageUseCase(
             // 拼回这条消息隐藏的附加提示词（如「＋本章梗概」「长期记忆检索片段」），
             // 顺序上附加提示词放在用户指令**之前**：让「用户的要求」始终是本轮最后一句话。
             val extra = it.promptExtra
-            ChatTurn(it.role, if (extra.isBlank()) it.content else extra + "\n\n" + it.content)
+            ChatTurn(
+                it.role,
+                if (extra.isBlank()) it.content else extra + "\n\n" + it.content,
+                images = request.images
+            )
         }
         val turns = buildList {
             // 「自定义前缀 / 参考资料前缀」与生成路径共用同一段只读前缀
@@ -408,6 +420,8 @@ class SendChatMessageUseCase(
             }
             // 大纲逐条排在历史对话之后：新增条目只影响其后内容，不会顶掉历史段已建立的缓存
             request.outlineBlocks.forEach { add(ChatTurn(ChatRole.SYSTEM, it)) }
+            // 文件 / 链接附件的正文按条排在历史与大纲之后、本轮输入之前，同样不打断前面已建立的缓存
+            request.attachmentBlocks.forEach { add(ChatTurn(ChatRole.SYSTEM, it)) }
             // 最后一轮始终是真实的用户输入；历史以助手消息结尾时（编辑回答后继续）补兜底指令
             if (finalTurn != null && finalTurn.role == ChatRole.USER) {
                 add(finalTurn)

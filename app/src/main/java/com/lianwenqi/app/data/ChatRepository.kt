@@ -98,7 +98,8 @@ class ChatRepository(private val db: AppDatabase) : ChatGateway {
         completionTokens: Int,
         cachedTokens: Int,
         chapterId: Long,
-        promptLog: String
+        promptLog: String,
+        attachments: String
     ): Long {
         val id = chatDao.insertMessage(
             ChatMessage(
@@ -114,7 +115,8 @@ class ChatRepository(private val db: AppDatabase) : ChatGateway {
                 completionTokens = completionTokens,
                 cachedTokens = cachedTokens,
                 chapterId = chapterId,
-                promptLog = promptLog.capStored(MAX_STORED_PROMPT_LOG)
+                promptLog = promptLog.capStored(MAX_STORED_PROMPT_LOG),
+                attachments = attachments
             )
         )
         chatDao.getSession(sessionId)?.let {
