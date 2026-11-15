@@ -53,9 +53,12 @@ object MemorySearchScope {
 const val MEMORY_BLOCK_QUOTA_MIN = 5
 const val MEMORY_BLOCK_QUOTA_MAX = 20
 
-/** 生成梗概 / 生成正文 字数滑条的合法上限（下限 0 表示不约束） */
+/** 生成梗概 / 生成正文 字数区间的默认上限（滑条默认范围；用户可直接输入更大的值） */
 const val GEN_SUMMARY_WORDS_MAX = 500
 const val GEN_CONTENT_WORDS_MAX = 6000
+
+/** 用户自定义字数的硬上限：只用于防止误输入天文数字，不限制正常写作长度 */
+const val GEN_WORDS_HARD_MAX = 99_999
 
 /** 全局偏好设置：夜间模式、排序、排版、样式等 */
 class Prefs(private val context: Context) {
@@ -266,18 +269,18 @@ class Prefs(private val context: Context) {
     val prefixAdaptiveFilterEnabled: Flow<Boolean> =
         context.dataStore.data.map { it[K.prefixAdaptiveFilter] ?: false }
 
-    /** 「生成梗概」的字数区间（0..500，下限 0 表示不约束） */
+    /** 「生成梗概」的字数区间（默认 0..500，可自定义；下限 0 表示不约束） */
     val genSummaryWordRange: Flow<IntRange> = context.dataStore.data.map {
-        wordsRange(it[K.genSummaryMinWords] ?: 0, it[K.genSummaryMaxWords] ?: GEN_SUMMARY_WORDS_MAX, GEN_SUMMARY_WORDS_MAX)
+        wordsRange(it[K.genSummaryMinWords] ?: 0, it[K.genSummaryMaxWords] ?: GEN_SUMMARY_WORDS_MAX, GEN_WORDS_HARD_MAX)
     }
 
     /** 「生成梗概」是否限定梗概范围（开启后点击需先选择大纲标签，默认关闭） */
     val genSummaryLimitScope: Flow<Boolean> =
         context.dataStore.data.map { it[K.genSummaryLimitScope] ?: false }
 
-    /** 「生成正文」的字数区间（0..6000，下限 0 表示不约束） */
+    /** 「生成正文」的字数区间（默认 0..6000，可自定义；下限 0 表示不约束） */
     val genContentWordRange: Flow<IntRange> = context.dataStore.data.map {
-        wordsRange(it[K.genContentMinWords] ?: 0, it[K.genContentMaxWords] ?: GEN_CONTENT_WORDS_MAX, GEN_CONTENT_WORDS_MAX)
+        wordsRange(it[K.genContentMinWords] ?: 0, it[K.genContentMaxWords] ?: GEN_CONTENT_WORDS_MAX, GEN_WORDS_HARD_MAX)
     }
 
     /** 「生成正文」是否同时生成梗概（生成后静默写入本章梗概，默认关闭） */
@@ -489,13 +492,13 @@ class Prefs(private val context: Context) {
     suspend fun setPrefixCustomText(v: String) = writePrefs { it[K.prefixCustomText] = v }
     suspend fun setPrefixAdaptiveFilterEnabled(v: Boolean) = writePrefs { it[K.prefixAdaptiveFilter] = v }
     suspend fun setGenSummaryWordRange(min: Int, max: Int) = writePrefs {
-        val r = wordsRange(min, max, GEN_SUMMARY_WORDS_MAX)
+        val r = wordsRange(min, max, GEN_WORDS_HARD_MAX)
         it[K.genSummaryMinWords] = r.first
         it[K.genSummaryMaxWords] = r.last
     }
     suspend fun setGenSummaryLimitScope(v: Boolean) = writePrefs { it[K.genSummaryLimitScope] = v }
     suspend fun setGenContentWordRange(min: Int, max: Int) = writePrefs {
-        val r = wordsRange(min, max, GEN_CONTENT_WORDS_MAX)
+        val r = wordsRange(min, max, GEN_WORDS_HARD_MAX)
         it[K.genContentMinWords] = r.first
         it[K.genContentMaxWords] = r.last
     }

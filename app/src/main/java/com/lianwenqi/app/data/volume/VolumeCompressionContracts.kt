@@ -133,12 +133,15 @@ data class CompressionUsage(
     val totalTokens: Int get() = promptTokens + completionTokens
 
     fun plus(result: AiResult): CompressionUsage {
+        val reportedCached = result.cachedTokens
         val hasUsage =
-            result.promptTokens > 0 || result.completionTokens > 0 || result.cachedTokens > 0
+            result.usageReported || result.promptTokens > 0 || result.completionTokens > 0 ||
+                (reportedCached ?: 0) > 0
         return copy(
             promptTokens = promptTokens + result.promptTokens,
             completionTokens = completionTokens + result.completionTokens,
-            cachedTokens = cachedTokens + result.cachedTokens,
+            // 未提供缓存统计的请求按 0 计入本聚合值；[requestsWithUsage] 仍只统计有 usage 的请求
+            cachedTokens = cachedTokens + (reportedCached ?: 0),
             requestCount = requestCount + 1,
             requestsWithUsage = requestsWithUsage + if (hasUsage) 1 else 0
         )

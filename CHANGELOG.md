@@ -1,5 +1,29 @@
 # 更新日志
 
+## v4.7.3（versionCode 88）
+
+> 文风档案、文风样式与文风样本仍为测试功能。
+
+### 优化
+
+- 缓存 Token 统计改为三态：服务端未提供缓存字段时显示「缓存统计未提供」，明确报告 0 时显示 0%，正数正常计算命中率；不再把字段缺失当成未命中。
+- Chat Completions / Responses 补充缓存字段兼容：标准 `prompt_tokens_details.cached_tokens`、DeepSeek `prompt_cache_hit_tokens`、Responses `input_tokens_details.cached_tokens` 以及部分中转站字段；普通与流式请求共用同一套解析逻辑。
+- Anthropic 严格区分缓存读取与缓存创建：只有 `cache_read_input_tokens` 计入命中量，`cache_creation_input_tokens` 单独保留，不再把创建量当命中量。
+- 流式请求统一累积 usage，最后一个 usage 数据块生效；没有收到 usage 或没有缓存字段时保持未知，不推算、不伪造缓存命中。
+- 历史对话重放与真实发送内容对齐：生成轮次去掉「生成正文 / 生成梗概」标记，普通聊天拼回附加提示词，助手消息不再裁剪空白，减少跨轮前缀差异。
+- Chat Completions / Responses 的相邻 system 消息合并为一条，保持原文顺序与空行分隔，提升 MiniMax、Gemini OpenAI 兼容接口及中转站的稳定前缀复用率。
+- 新增 `AiCache` 诊断日志：记录 system / tools / 对话前缀 / 完整请求的分段摘要、首个差异段、角色字符数、工具摘要、请求间隔与延迟；不输出 Prompt 正文、小说正文或 API Key。
+
+### 修复
+
+- 修复供应商未返回缓存字段时缓存命中率固定显示 0% 的问题。
+- 修复历史对话开关开启时丢弃附加提示词、裁剪历史消息导致请求前缀变化的问题。
+
+### 验证
+
+- 新增缓存字段解析、流式 usage 累积、历史重放与请求前缀一致性测试；JVM 全量 429 项测试，428 项通过，1 项真实供应商探测因未配置凭据默认跳过。
+- 真实供应商缓存命中率需使用 `CacheHitProbeTest` 配合实际 API 凭据运行验证；本次发布不对具体供应商的命中率数值作承诺。
+
 ## v4.7.2（versionCode 87）
 
 > 文风档案、文风样式与文风样本仍为测试功能。

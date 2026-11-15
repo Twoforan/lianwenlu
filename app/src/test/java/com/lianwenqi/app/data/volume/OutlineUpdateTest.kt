@@ -2,6 +2,7 @@ package com.lianwenqi.app.data.volume
 
 import com.lianwenqi.app.ai.AiRequest
 import com.lianwenqi.app.ai.AiResult
+import com.lianwenqi.app.ai.CacheUsage
 import com.lianwenqi.app.data.CompressionOutlineScopeMode
 import com.lianwenqi.app.data.CompressionOutlineUpdateMode
 import com.lianwenqi.app.data.OutlineWriteCommand
@@ -337,7 +338,7 @@ class OutlineUpdateTest {
                     "{\"suggestions\":[]}",
                     promptTokens = 120,
                     completionTokens = 30,
-                    cachedTokens = 10
+                    cacheUsage = CacheUsage(cachedTokens = 10, usageReported = true)
                 )
             }
         )

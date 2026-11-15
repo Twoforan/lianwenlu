@@ -3,6 +3,7 @@ package com.lianwenqi.app.data.volume
 import com.lianwenqi.app.ai.AiError
 import com.lianwenqi.app.ai.AiRequest
 import com.lianwenqi.app.ai.AiResult
+import com.lianwenqi.app.ai.CacheUsage
 import com.lianwenqi.app.data.entity.AiModel
 import com.lianwenqi.app.data.entity.Chapter
 import com.lianwenqi.app.data.entity.VolumeSummarySourceType
@@ -411,10 +412,15 @@ class VolumeCompressionServiceTest {
                         extractionJson(listOf(1L), "第1章"),
                         promptTokens = 100,
                         completionTokens = 20,
-                        cachedTokens = 30
+                        cacheUsage = CacheUsage(cachedTokens = 30, usageReported = true)
                     )
                 } else {
-                    AiResult.ok(finalText, promptTokens = 200, completionTokens = 50, cachedTokens = 60)
+                    AiResult.ok(
+                        finalText,
+                        promptTokens = 200,
+                        completionTokens = 50,
+                        cacheUsage = CacheUsage(cachedTokens = 60, usageReported = true)
+                    )
                 }
             }
         )

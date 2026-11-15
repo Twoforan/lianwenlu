@@ -3,6 +3,7 @@ package com.lianwenqi.app.data.volume
 import com.lianwenqi.app.ai.AiError
 import com.lianwenqi.app.ai.AiRequest
 import com.lianwenqi.app.ai.AiResult
+import com.lianwenqi.app.ai.CacheUsage
 import com.lianwenqi.app.data.entity.AiModel
 import com.lianwenqi.app.data.entity.Chapter
 import com.lianwenqi.app.data.entity.VolumeSummarySourceType
@@ -408,7 +409,7 @@ class VolumeContentCompressionTest {
                     if (user.contains("【整合轮次】")) finalText else respondToExtraction(user),
                     promptTokens = 100,
                     completionTokens = 20,
-                    cachedTokens = 30
+                    cacheUsage = CacheUsage(cachedTokens = 30, usageReported = true)
                 )
             }
         )

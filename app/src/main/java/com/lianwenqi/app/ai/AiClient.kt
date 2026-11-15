@@ -1,5 +1,6 @@
 package com.lianwenqi.app.ai
 
+import android.util.Log
 import com.lianwenqi.app.data.entity.ApiType
 import com.lianwenqi.app.data.entity.ChatRole
 import com.lianwenqi.app.util.extractLeakedToolCalls
@@ -12,6 +13,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.put
@@ -22,6 +24,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okio.BufferedSource
 import java.io.IOException
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -210,13 +213,61 @@ class AiClient(
     }
 
     private fun buildMessages(endpoint: ModelEndpoint, turns: List<ChatTurn>): List<OutboundMessageDto> =
-        buildList {
+        mergeAdjacentSystemTurns(buildList {
             val system = systemPromptOf(endpoint)
             if (system.isNotBlank()) add(OutboundMessageDto.text("system", system))
             turns.forEach {
                 add(OutboundMessageDto.of(it.role.name.lowercase(), it.content, it.images))
             }
+        })
+
+    /**
+     * chat/completions 的相邻 system 消息合并为一条。
+     *
+     * 目的：MiniMax 等供应商的被动缓存顺序是「System Prompt → 工具列表 → 用户消息」，
+     * 把模型预设提示 + 文风 / 自定义前缀 / 参考资料合并进同一条 system 消息，
+     * 可避免它们被拆到 system 段之外；同时减少连续 system 消息触发的网关校验差异。
+     * 只合并纯文本 system，保持原文顺序，用空行分隔，不改变任何指令内容。
+     */
+    private fun mergeAdjacentSystemTurns(messages: List<OutboundMessageDto>): List<OutboundMessageDto> {
+        val merged = ArrayList<OutboundMessageDto>(messages.size)
+        messages.forEach { msg ->
+            val last = merged.lastOrNull()
+            val lastText = last?.content as? JsonPrimitive
+            val currentText = msg.content as? JsonPrimitive
+            if (last != null && lastText != null && currentText != null &&
+                last.role == "system" && msg.role == "system" &&
+                lastText.isString && currentText.isString &&
+                last.reasoningContent == null && last.toolCalls == null &&
+                msg.reasoningContent == null && msg.toolCalls == null
+            ) {
+                merged[merged.lastIndex] = last.copy(
+                    content = JsonPrimitive(lastText.content + "\n\n" + currentText.content)
+                )
+            } else {
+                merged += msg
+            }
         }
+        return merged
+    }
+
+    /** responses 的 input 同样合并相邻 system 消息（纯文本，顺序不变） */
+    private fun mergeAdjacentSystemInputs(messages: List<ChatMessageDto>): List<ChatMessageDto> {
+        val merged = ArrayList<ChatMessageDto>(messages.size)
+        messages.forEach { msg ->
+            val last = merged.lastOrNull()
+            if (last != null &&
+                last.role == "system" && msg.role == "system" &&
+                last.reasoningContent == null && last.toolCalls == null &&
+                msg.reasoningContent == null && msg.toolCalls == null
+            ) {
+                merged[merged.lastIndex] = last.copy(content = last.content + "\n\n" + msg.content)
+            } else {
+                merged += msg
+            }
+        }
+        return merged
+    }
 
     /**
      * 不支持多模态的接口（Responses / Anthropic）遇到图片时降级：
@@ -363,14 +414,15 @@ class AiClient(
             chatTemplateKwargs = rf.kwargs,
             tools = completionsTools(tools, webSearch)
         )
-        val body = json.encodeToString(ChatCompletionRequest.serializer(), payload)
-            .toRequestBody(JSON_MEDIA)
+        val bodyText = json.encodeToString(ChatCompletionRequest.serializer(), payload)
+        val body = bodyText.toRequestBody(JSON_MEDIA)
         val request = Request.Builder()
             .url(endpoint(endpoint.provider.baseUrl, ApiType.CHAT_COMPLETIONS))
             .header("Authorization", "Bearer ${endpoint.provider.apiKey}")
             .header("Content-Type", "application/json")
             .post(body)
             .build()
+        val startedNs = System.nanoTime()
         execute(request).use { resp ->
             val text = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) return AiResult.fail(errorForStatus(resp.code, text.take(300)))
@@ -384,13 +436,14 @@ class AiClient(
                 tools
             )
             val promptTokens = parsed.usage?.promptTokens ?: estimateTokens(turns.joinToString("") { it.content })
-            return if (content.isBlank()) {
+            val cacheUsage = CacheUsageParser.fromChatCompletion(parsed.usage)
+            val result = if (content.isBlank()) {
                 if (calls.isNotEmpty()) AiResult.ok(
                     "",
                     reasoning,
                     promptTokens,
                     parsed.usage?.completionTokens ?: 0,
-                    parsed.usage?.promptTokensDetails?.cachedTokens ?: 0,
+                    cacheUsage,
                     calls
                 )
                 else if (choice?.finishReason == "length") AiResult.fail(TRUNCATED_HINT) else AiResult.fail("模型返回为空")
@@ -399,10 +452,16 @@ class AiClient(
                 reasoning,
                 promptTokens,
                 parsed.usage?.completionTokens ?: estimateTokens(content + reasoning),
-                parsed.usage?.promptTokensDetails?.cachedTokens ?: 0,
+                cacheUsage,
                 calls,
                 leakedToolSyntax = leaked
             )
+            logCacheDiagnostics(
+                endpoint, streaming = false, result = result, resp = resp, turns = turns,
+                fullRequestBody = bodyText, toolsText = toolsText(payload.tools),
+                toolCount = payload.tools?.size ?: 0, latencyMs = elapsedMs(startedNs)
+            )
+            return result
         }
     }
 
@@ -427,14 +486,15 @@ class AiClient(
             chatTemplateKwargs = rf.kwargs,
             tools = completionsTools(tools, webSearch)
         )
-        val body = json.encodeToString(ChatCompletionRequest.serializer(), payload)
-            .toRequestBody(JSON_MEDIA)
+        val bodyText = json.encodeToString(ChatCompletionRequest.serializer(), payload)
+        val body = bodyText.toRequestBody(JSON_MEDIA)
         val request = Request.Builder()
             .url(endpoint(endpoint.provider.baseUrl, ApiType.CHAT_COMPLETIONS))
             .header("Authorization", "Bearer ${endpoint.provider.apiKey}")
             .header("Content-Type", "application/json")
             .post(body)
             .build()
+        val startedNs = System.nanoTime()
         execute(request).use { resp ->
             if (!resp.isSuccessful) {
                 return AiResult.fail(errorForStatus(resp.code, resp.body?.string().orEmpty().take(300)))
@@ -443,7 +503,7 @@ class AiClient(
             val content = StringBuilder()
             val reasoning = StringBuilder()
             val toolAcc = ToolCallAccumulator()
-            var usage: Usage? = null
+            val usageAcc = StreamUsageAccumulator()
             var truncated = false
             var errorMessage: String? = null
             // 是否收到协议结束标志（[DONE] 或 finish_reason）。未收到就 EOF，视为中途断流
@@ -470,7 +530,7 @@ class AiClient(
                 }.getOrNull() ?: continue
                 idleGuard.touch()
                 chunk.error?.message?.let { errorMessage = it }
-                chunk.usage?.let { usage = it }
+                usageAcc.onChatChunk(chunk)
                 val choice = chunk.choices.firstOrNull()
                 if (choice?.finishReason != null) terminated = true
                 if (choice?.finishReason == "length") truncated = true
@@ -500,15 +560,22 @@ class AiClient(
             if (finalText.isBlank() && finalCalls.isEmpty()) {
                 return if (truncated) AiResult.fail(TRUNCATED_HINT) else AiResult.fail("模型返回为空")
             }
-            return AiResult.ok(
+            val usage = usageAcc.chatUsage
+            val result = AiResult.ok(
                 finalText,
                 reasoning.toString(),
                 usage?.promptTokens ?: estimateTokens(turns.joinToString("") { it.content }),
                 usage?.completionTokens ?: estimateTokens(finalText + reasoning),
-                usage?.promptTokensDetails?.cachedTokens ?: 0,
+                CacheUsageParser.fromChatCompletion(usage),
                 finalCalls,
                 leakedToolSyntax = leaked
             )
+            logCacheDiagnostics(
+                endpoint, streaming = true, result = result, resp = resp, turns = turns,
+                fullRequestBody = bodyText, toolsText = toolsText(payload.tools),
+                toolCount = payload.tools?.size ?: 0, latencyMs = elapsedMs(startedNs)
+            )
+            return result
         }
     }
 
@@ -519,7 +586,7 @@ class AiClient(
     ): AiResult {
         val payload = ResponsesRequest(
             model = endpoint.modelName,
-            input = turns.map { ChatMessageDto(it.role.name.lowercase(), it.content) },
+            input = mergeAdjacentSystemInputs(turns.map { ChatMessageDto(it.role.name.lowercase(), it.content) }),
             temperature = endpoint.temperature,
             maxOutputTokens = endpoint.maxTokens.takeIf { it > 0 },
             instructions = systemPromptOf(endpoint).ifBlank { null },
@@ -527,14 +594,15 @@ class AiClient(
             reasoning = reasoningFields(endpoint, ApiType.RESPONSES).reasoning,
             tools = responsesTools(tools)
         )
-        val body = json.encodeToString(ResponsesRequest.serializer(), payload)
-            .toRequestBody(JSON_MEDIA)
+        val bodyText = json.encodeToString(ResponsesRequest.serializer(), payload)
+        val body = bodyText.toRequestBody(JSON_MEDIA)
         val request = Request.Builder()
             .url(endpoint(endpoint.provider.baseUrl, ApiType.RESPONSES))
             .header("Authorization", "Bearer ${endpoint.provider.apiKey}")
             .header("Content-Type", "application/json")
             .post(body)
             .build()
+        val startedNs = System.nanoTime()
         execute(request).use { resp ->
             val text = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) return AiResult.fail(errorForStatus(resp.code, text.take(300)))
@@ -546,16 +614,22 @@ class AiClient(
                 toolCallsOf(parsed),
                 tools
             )
-            return if (content.isBlank() && calls.isEmpty()) AiResult.fail("模型返回为空")
+            val result = if (content.isBlank() && calls.isEmpty()) AiResult.fail("模型返回为空")
             else AiResult.ok(
                 content,
                 reasoning,
                 parsed.usage?.inputTokens ?: estimateTokens(turns.joinToString("") { it.content }),
                 parsed.usage?.outputTokens ?: estimateTokens(content + reasoning),
-                parsed.usage?.inputTokensDetails?.cachedTokens ?: 0,
+                CacheUsageParser.fromResponses(parsed.usage),
                 calls,
                 leakedToolSyntax = leaked
             )
+            logCacheDiagnostics(
+                endpoint, streaming = false, result = result, resp = resp, turns = turns,
+                fullRequestBody = bodyText, toolsText = toolsText(payload.tools),
+                toolCount = payload.tools?.size ?: 0, latencyMs = elapsedMs(startedNs)
+            )
+            return result
         }
     }
 
@@ -568,7 +642,7 @@ class AiClient(
     ): AiResult {
         val payload = ResponsesRequest(
             model = endpoint.modelName,
-            input = turns.map { ChatMessageDto(it.role.name.lowercase(), it.content) },
+            input = mergeAdjacentSystemInputs(turns.map { ChatMessageDto(it.role.name.lowercase(), it.content) }),
             temperature = endpoint.temperature,
             maxOutputTokens = endpoint.maxTokens.takeIf { it > 0 },
             instructions = systemPromptOf(endpoint).ifBlank { null },
@@ -577,14 +651,15 @@ class AiClient(
             reasoning = reasoningFields(endpoint, ApiType.RESPONSES).reasoning,
             tools = responsesTools(tools)
         )
-        val body = json.encodeToString(ResponsesRequest.serializer(), payload)
-            .toRequestBody(JSON_MEDIA)
+        val bodyText = json.encodeToString(ResponsesRequest.serializer(), payload)
+        val body = bodyText.toRequestBody(JSON_MEDIA)
         val request = Request.Builder()
             .url(endpoint(endpoint.provider.baseUrl, ApiType.RESPONSES))
             .header("Authorization", "Bearer ${endpoint.provider.apiKey}")
             .header("Content-Type", "application/json")
             .post(body)
             .build()
+        val startedNs = System.nanoTime()
         execute(request).use { resp ->
             if (!resp.isSuccessful) {
                 return AiResult.fail(errorForStatus(resp.code, resp.body?.string().orEmpty().take(300)))
@@ -593,7 +668,7 @@ class AiClient(
             val content = StringBuilder()
             val reasoning = StringBuilder()
             val toolAcc = ToolCallAccumulator()
-            var usage: ResponsesUsage? = null
+            val usageAcc = StreamUsageAccumulator()
             var errorMessage: String? = null
             // 结束标志：response.completed（或 [DONE]）。未收到就 EOF，视为中途断流
             var terminated = false
@@ -618,6 +693,7 @@ class AiClient(
                 }.getOrNull() ?: continue
                 idleGuard.touch()
                 event.error?.message?.let { errorMessage = it }
+                usageAcc.onResponsesEvent(event)
                 when {
                     event.type == "response.output_text.delta" && !event.delta.isNullOrEmpty() -> {
                         content.append(event.delta)
@@ -635,7 +711,6 @@ class AiClient(
                     }
                     event.type == "response.completed" -> {
                         terminated = true
-                        event.response?.usage?.let { usage = it }
                     }
                 }
             }
@@ -649,15 +724,22 @@ class AiClient(
             if (finalText.isBlank() && finalCalls.isEmpty()) {
                 return AiResult.fail("模型返回为空")
             }
-            return AiResult.ok(
+            val usage = usageAcc.responsesUsage
+            val result = AiResult.ok(
                 finalText,
                 reasoning.toString(),
                 usage?.inputTokens ?: estimateTokens(turns.joinToString("") { it.content }),
                 usage?.outputTokens ?: estimateTokens(finalText + reasoning),
-                usage?.inputTokensDetails?.cachedTokens ?: 0,
+                CacheUsageParser.fromResponses(usage),
                 finalCalls,
                 leakedToolSyntax = leaked
             )
+            logCacheDiagnostics(
+                endpoint, streaming = true, result = result, resp = resp, turns = turns,
+                fullRequestBody = bodyText, toolsText = toolsText(payload.tools),
+                toolCount = payload.tools?.size ?: 0, latencyMs = elapsedMs(startedNs)
+            )
+            return result
         }
     }
 
@@ -755,14 +837,14 @@ class AiClient(
         )
     }
 
-    private fun anthropicRequest(endpoint: ModelEndpoint, payload: AnthropicRequest): Request =
+    private fun anthropicRequest(endpoint: ModelEndpoint, bodyText: String): Request =
         Request.Builder()
             .url(endpoint(endpoint.provider.baseUrl, ApiType.ANTHROPIC_MESSAGES))
             .header("x-api-key", endpoint.provider.apiKey)
             .header("Authorization", "Bearer ${endpoint.provider.apiKey}")
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header("Content-Type", "application/json")
-            .post(json.encodeToString(AnthropicRequest.serializer(), payload).toRequestBody(JSON_MEDIA))
+            .post(bodyText.toRequestBody(JSON_MEDIA))
             .build()
 
     private suspend fun anthropicMessages(
@@ -771,7 +853,9 @@ class AiClient(
         tools: List<AiToolSpec>
     ): AiResult {
         val payload = buildAnthropicRequest(endpoint, turns, stream = false, tools = tools)
-        execute(anthropicRequest(endpoint, payload)).use { resp ->
+        val bodyText = json.encodeToString(AnthropicRequest.serializer(), payload)
+        val startedNs = System.nanoTime()
+        execute(anthropicRequest(endpoint, bodyText)).use { resp ->
             val text = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) return AiResult.fail(errorForStatus(resp.code, text.take(300)))
             val parsed = json.decodeFromString<AnthropicResponse>(text)
@@ -793,15 +877,21 @@ class AiClient(
             }
             val u = parsed.usage
             val totalInput = (u?.inputTokens ?: 0) + (u?.cacheReadInputTokens ?: 0) + (u?.cacheCreationInputTokens ?: 0)
-            return AiResult.ok(
+            val result = AiResult.ok(
                 content,
                 reasoning,
                 if (totalInput > 0) totalInput else estimateTokens(turns.joinToString("") { it.content }),
                 u?.outputTokens ?: estimateTokens(content + reasoning),
-                u?.cacheReadInputTokens ?: 0,
+                CacheUsageParser.fromAnthropic(u),
                 finalCalls,
                 leakedToolSyntax = leaked
             )
+            logCacheDiagnostics(
+                endpoint, streaming = false, result = result, resp = resp, turns = turns,
+                fullRequestBody = bodyText, toolsText = toolsText(payload.tools),
+                toolCount = payload.tools?.size ?: 0, latencyMs = elapsedMs(startedNs)
+            )
+            return result
         }
     }
 
@@ -812,7 +902,9 @@ class AiClient(
         onDelta: (String, String) -> Unit
     ): AiResult {
         val payload = buildAnthropicRequest(endpoint, turns, stream = true, tools = tools)
-        execute(anthropicRequest(endpoint, payload)).use { resp ->
+        val bodyText = json.encodeToString(AnthropicRequest.serializer(), payload)
+        val startedNs = System.nanoTime()
+        execute(anthropicRequest(endpoint, bodyText)).use { resp ->
             if (!resp.isSuccessful) {
                 return AiResult.fail(errorForStatus(resp.code, resp.body?.string().orEmpty().take(300)))
             }
@@ -820,10 +912,7 @@ class AiClient(
             val content = StringBuilder()
             val reasoning = StringBuilder()
             val toolAcc = ToolCallAccumulator()
-            var inputTokens = 0
-            var outputTokens = 0
-            var cacheRead = 0
-            var cacheCreation = 0
+            val usageAcc = StreamUsageAccumulator()
             var truncated = false
             var errorMessage: String? = null
             // 结束标志：message_stop。未收到就 EOF，视为中途断流
@@ -845,14 +934,9 @@ class AiClient(
                 }.getOrNull() ?: continue
                 idleGuard.touch()
                 event.error?.message?.let { errorMessage = it }
+                usageAcc.onAnthropicEvent(event)
                 when (event.type) {
-                    "message_start" -> event.message?.usage?.let {
-                        inputTokens = it.inputTokens
-                        cacheRead = it.cacheReadInputTokens
-                        cacheCreation = it.cacheCreationInputTokens
-                    }
                     "message_delta" -> {
-                        event.usage?.let { outputTokens = it.outputTokens }
                         if (event.delta?.stopReason == "max_tokens") truncated = true
                     }
                     "message_stop" -> terminated = true
@@ -890,16 +974,23 @@ class AiClient(
             if (finalText.isBlank() && finalCalls.isEmpty()) {
                 return if (truncated) AiResult.fail(TRUNCATED_HINT) else AiResult.fail("模型返回为空")
             }
-            val totalInput = inputTokens + cacheRead + cacheCreation
-            return AiResult.ok(
+            val u = usageAcc.anthropicUsage
+            val totalInput = (u?.inputTokens ?: 0) + (u?.cacheReadInputTokens ?: 0) + (u?.cacheCreationInputTokens ?: 0)
+            val result = AiResult.ok(
                 finalText,
                 reasoning.toString(),
                 if (totalInput > 0) totalInput else estimateTokens(turns.joinToString("") { it.content }),
-                outputTokens.takeIf { it > 0 } ?: estimateTokens(finalText + reasoning),
-                cacheRead,
+                u?.outputTokens?.takeIf { it > 0 } ?: estimateTokens(finalText + reasoning),
+                CacheUsageParser.fromAnthropic(u),
                 finalCalls,
                 leakedToolSyntax = leaked
             )
+            logCacheDiagnostics(
+                endpoint, streaming = true, result = result, resp = resp, turns = turns,
+                fullRequestBody = bodyText, toolsText = toolsText(payload.tools),
+                toolCount = payload.tools?.size ?: 0, latencyMs = elapsedMs(startedNs)
+            )
+            return result
         }
     }
 
@@ -912,8 +1003,88 @@ class AiClient(
         return (cjk + other / 4).coerceAtLeast(1)
     }
 
+    /**
+     * 缓存统计与 Prompt 前缀诊断日志：只记录计数、摘要、角色统计与字段路径，
+     * 绝不记录系统提示词、用户消息、小说正文、API Key 或完整请求体。
+     *
+     * 日志级别为 Debug；可通过 `adb shell setprop log.tag.AiCache DEBUG` 单独打开。
+     */
+    private fun logCacheDiagnostics(
+        endpoint: ModelEndpoint,
+        streaming: Boolean,
+        result: AiResult,
+        resp: Response,
+        turns: List<ChatTurn>,
+        fullRequestBody: String,
+        toolsText: String,
+        toolCount: Int,
+        latencyMs: Long
+    ) {
+        if (!result.success) return
+        val cache = result.cacheUsage
+        val fingerprint = PromptDiagnostics.fingerprint(
+            systemPrompt = systemPromptOf(endpoint),
+            turns = turns,
+            toolsText = toolsText,
+            toolCount = toolCount,
+            fullRequestBody = fullRequestBody
+        )
+        val diff = PromptDiagnostics.remember(
+            PromptDiagnostics.endpointKey(endpoint, streaming),
+            fingerprint
+        )
+        // 命中率只在 promptTokens > 0 且 cachedTokens 已知时计算；未知不显示成 0%
+        val hitRate = cache.cachedTokens
+            ?.takeIf { result.promptTokens > 0 }
+            ?.let { String.format(Locale.US, "%.1f%%", it * 100.0 / result.promptTokens) }
+            ?: "null"
+        val cacheMode = when (endpoint.apiType) {
+            ApiType.ANTHROPIC_MESSAGES -> "anthropic-explicit"
+            // Responses 的 prompt_cache_key 只做路由提示，不改变缓存匹配方式
+            ApiType.RESPONSES -> "passive-prefix+prompt-cache-key"
+            ApiType.CHAT_COMPLETIONS -> "passive-prefix"
+        }
+        val cacheState = when {
+            cache.cachedTokens == null -> "unknown"
+            cache.cachedTokens == 0 -> "zero"
+            else -> "hit"
+        }
+        Log.d(
+            CACHE_LOG_TAG,
+            "provider=${endpoint.provider.name} apiType=${endpoint.apiType} model=${endpoint.modelName} " +
+                "stream=$streaming cacheMode=$cacheMode " +
+                "promptTokens=${result.promptTokens} cachedTokens=${cache.cachedTokens ?: "null"} " +
+                "cacheHitRate=$hitRate cacheState=$cacheState usageReported=${cache.usageReported} " +
+                "cacheField=${cache.cacheField ?: "null"} " +
+                "cacheCreationTokens=${cache.cacheCreationTokens ?: "null"} " +
+                "systemChars=${fingerprint.systemChars} historyChars=${fingerprint.historyChars} " +
+                "tailChars=${fingerprint.tailChars} roleSummary=${fingerprint.roleSummary} " +
+                "toolCount=${fingerprint.toolCount} " +
+                "systemHash=${fingerprint.systemHash} toolsHash=${fingerprint.toolsHash} " +
+                "conversationPrefixHash=${fingerprint.conversationPrefixHash} " +
+                "fullRequestHash=${fingerprint.fullRequestHash} " +
+                "firstDifferent=${diff.firstDifferentSegment ?: "none"} " +
+                "intervalMs=${diff.intervalMs ?: "null"} latencyMs=$latencyMs " +
+                "requestId=${requestIdOf(resp) ?: "null"}"
+        )
+    }
+
+    private fun requestIdOf(resp: Response): String? =
+        resp.header("x-request-id")
+            ?: resp.header("request-id")
+            ?: resp.header("x-oneapi-request-id")
+
+    /** 工具定义摘要输入：只用于计算 toolsHash，不写日志正文 */
+    private fun toolsText(tools: List<*>?): String =
+        tools?.joinToString("\u0000") { it.toString() }.orEmpty()
+
+    private fun elapsedMs(startedNs: Long): Long = (System.nanoTime() - startedNs) / 1_000_000
+
     companion object {
         private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
+
+        /** 缓存统计诊断日志的 tag */
+        private const val CACHE_LOG_TAG = "AiCache"
 
         /** 推理模型的思考过程吃满 max_tokens 时，正文会为空，给出可操作的提示 */
         private const val TRUNCATED_HINT = "回复被截断：模型思考过长占满了最大输出 token，请在「设置 → 模型」中调大「最大输出 token」后重试"

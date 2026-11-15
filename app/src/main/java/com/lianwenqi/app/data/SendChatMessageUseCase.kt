@@ -3,7 +3,9 @@ package com.lianwenqi.app.data
 import com.lianwenqi.app.ai.AiError
 import com.lianwenqi.app.ai.AiRequest
 import com.lianwenqi.app.ai.AiResult
+import com.lianwenqi.app.ai.CONTENT_FALLBACK_INPUT
 import com.lianwenqi.app.ai.ChatTurn
+import com.lianwenqi.app.ai.SUMMARY_FALLBACK_INPUT
 import com.lianwenqi.app.ai.buildGenerationPrefixTurns
 import com.lianwenqi.app.data.entity.AiModel
 import com.lianwenqi.app.data.entity.ChatMessage
@@ -221,7 +223,8 @@ interface ChatGateway {
         promptExtra: String = "",
         promptTokens: Int = 0,
         completionTokens: Int = 0,
-        cachedTokens: Int = 0,
+        /** null 表示服务端未提供缓存统计（由实现层落库为「未知」） */
+        cachedTokens: Int? = null,
         chapterId: Long = 0,
         promptLog: String = "",
         /** 本轮附件清单（JSON，见 [ChatAttachment]）；为空表示没有附件 */
@@ -289,6 +292,49 @@ object HistoryPrefix {
         }
         pendingUser?.let { rounds += PromptLogRound(it, "") }
         return rounds
+    }
+}
+
+/**
+ * 历史消息重放：尽量逐字复现「上一轮实际发送给模型的 user 内容」，
+ * 否则每次重建历史都会出现内容差异，供应商的前缀缓存会从差异点开始失效。
+ *
+ * - 生成轮次：实际发送的是去掉「生成正文 / 生成梗概」标记后的原始提示词，
+ *   为空时使用与生成请求相同的兜底指令；不能把标记或 promptExtra 当成 user 正文重放；
+ * - 普通聊天：实际发送的是 promptExtra + 空行 + content（与 [SendChatMessageUseCase] 一致）；
+ * - 助手消息：按落库原文重放，不做 trim，避免空白差异破坏前缀；
+ * - SYSTEM 消息不参与对话历史。
+ */
+object HistoryReplay {
+    const val CONTENT_LABEL = "生成正文"
+    const val SUMMARY_LABEL = "生成梗概"
+
+    fun kindOf(content: String): String? = when {
+        content == CONTENT_LABEL || content.startsWith("$CONTENT_LABEL\n") -> CONTENT_LABEL
+        content == SUMMARY_LABEL || content.startsWith("$SUMMARY_LABEL\n") -> SUMMARY_LABEL
+        else -> null
+    }
+
+    fun promptOf(content: String, label: String): String =
+        content.removePrefix(label).trimStart('\n')
+
+    fun of(message: ChatMessage): ChatTurn? {
+        val historyContent = when (message.role) {
+            ChatRole.USER -> {
+                val kind = kindOf(message.content)
+                if (kind != null) {
+                    promptOf(message.content, kind).ifBlank {
+                        if (kind == SUMMARY_LABEL) SUMMARY_FALLBACK_INPUT else CONTENT_FALLBACK_INPUT
+                    }
+                } else {
+                    val extra = message.promptExtra
+                    if (extra.isBlank()) message.content else extra + "\n\n" + message.content
+                }
+            }
+            ChatRole.ASSISTANT -> message.content
+            ChatRole.SYSTEM -> return null
+        }
+        return ChatTurn(message.role, historyContent).takeIf { it.content.isNotBlank() }
     }
 }
 

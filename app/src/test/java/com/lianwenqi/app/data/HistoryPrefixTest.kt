@@ -6,6 +6,7 @@ import com.lianwenqi.app.data.entity.ChatRole
 import com.lianwenqi.app.data.entity.SessionPrefix
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -165,5 +166,64 @@ class HistoryPrefixTest {
             listOf(PromptLogRound("问1", "答1"), PromptLogRound("问2", "")),
             HistoryPrefix.rounds(messages)
         )
+    }
+
+    // 10. 普通聊天：历史重放必须拼回 promptExtra，与上一轮实际发送的 user 内容一致
+    @Test
+    fun replay_chatUser_includesPromptExtraExactly() {
+        val msg = ChatMessage(
+            id = 1,
+            sessionId = 1L,
+            role = ChatRole.USER,
+            content = "继续写",
+            promptExtra = "【本章】第1章\n梗概：前情"
+        )
+        val turn = HistoryReplay.of(msg)!!
+        assertEquals(ChatRole.USER, turn.role)
+        assertEquals("【本章】第1章\n梗概：前情\n\n继续写", turn.content)
+    }
+
+    // 11. 生成轮次：实际发送的是去掉标记后的原始提示词，不重放「生成正文」标记与 promptExtra
+    @Test
+    fun replay_generationUser_stripsLabelAndExtra() {
+        val msg = ChatMessage(
+            id = 2,
+            sessionId = 1L,
+            role = ChatRole.USER,
+            content = "生成正文\n继续写这一章",
+            promptExtra = "本轮参考材料"
+        )
+        assertEquals("继续写这一章", HistoryReplay.of(msg)!!.content)
+    }
+
+    // 12. 生成轮次输入为空：与生成请求使用同一句兜底指令
+    @Test
+    fun replay_generationUser_blankPromptUsesFallback() {
+        val summary = ChatMessage(
+            id = 3, sessionId = 1L, role = ChatRole.USER, content = "生成梗概"
+        )
+        assertEquals(com.lianwenqi.app.ai.SUMMARY_FALLBACK_INPUT, HistoryReplay.of(summary)!!.content)
+        val content = ChatMessage(
+            id = 4, sessionId = 1L, role = ChatRole.USER, content = "生成正文\n"
+        )
+        assertEquals(com.lianwenqi.app.ai.CONTENT_FALLBACK_INPUT, HistoryReplay.of(content)!!.content)
+    }
+
+    // 13. 助手消息按落库原文重放，不 trim，避免空白差异破坏前缀
+    @Test
+    fun replay_assistant_keepsStoredBytes() {
+        val msg = ChatMessage(
+            id = 5, sessionId = 1L, role = ChatRole.ASSISTANT, content = "正文结尾\n\n"
+        )
+        assertEquals("正文结尾\n\n", HistoryReplay.of(msg)!!.content)
+    }
+
+    // 14. SYSTEM 消息不进入对话历史
+    @Test
+    fun replay_systemMessageReturnsNull() {
+        val msg = ChatMessage(
+            id = 6, sessionId = 1L, role = ChatRole.SYSTEM, content = "系统"
+        )
+        assertNull(HistoryReplay.of(msg))
     }
 }

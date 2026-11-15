@@ -4040,14 +4040,17 @@ private fun AssistantBlock(
                     val tokens = msg.promptTokens + msg.completionTokens
                     if (tokens > 0) {
                         Spacer(Modifier.weight(1f))
-                        // 缓存命中率 = 命中缓存的输入 token / 总输入 token
-                        val hit = if (msg.promptTokens > 0) msg.cachedTokens * 100 / msg.promptTokens else 0
                         Text(
                             buildString {
                                 append("消耗 $tokens tokens（输入 ${msg.promptTokens} / 输出 ${msg.completionTokens}）")
-                                // 只要记录了输入 token 就展示命中率：首轮没有缓存命中时显示 0%，
-                                // 避免「第一次生成看不到缓存命中率」的观感问题
-                                if (msg.promptTokens > 0) append(" · 缓存命中 $hit%")
+                                // 缓存统计三态：未知不显示成 0%；明确 0 显示 0%；正数显示命中率
+                                when {
+                                    msg.cachedTokens < 0 -> append(" · 缓存统计未提供")
+                                    msg.promptTokens > 0 -> {
+                                        val hit = msg.cachedTokens * 100 / msg.promptTokens
+                                        append(" · 缓存命中 $hit%")
+                                    }
+                                }
                             },
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant

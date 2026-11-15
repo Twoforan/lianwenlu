@@ -28,8 +28,8 @@ android {
         applicationId = "com.lianwenqi.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 87
-        versionName = "4.7.2"
+        versionCode = 88
+        versionName = "4.7.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -90,6 +90,11 @@ android {
 
     buildFeatures {
         compose = true
+    }
+
+    testOptions {
+        // JVM 单元测试里 Android 的 Log 等桩方法返回默认值，便于直接测试 AiClient 的请求组装
+        unitTests.isReturnDefaultValues = true
     }
 
     packaging {

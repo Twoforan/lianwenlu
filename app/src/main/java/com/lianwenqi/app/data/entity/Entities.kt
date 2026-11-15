@@ -300,7 +300,11 @@ data class ChatMessage(
     val promptTokens: Int = 0,
     /* 本次回答消耗的输出 token（usage.completion_tokens），0 表示未记录 */
     val completionTokens: Int = 0,
-    /** 本次输入中命中缓存的 token 数，用于计算缓存命中率，0 表示未记录 */
+    /**
+     * 本次输入中命中缓存的 token 数，用于计算缓存命中率。
+     * 0 表示服务端明确报告未命中；[CACHE_TOKENS_UNKNOWN]（-1）表示服务端未提供缓存统计。
+     * 旧版本写入的 0 无法区分「明确未命中」与「当时未解析到字段」，保留原值不做改写。
+     */
     val cachedTokens: Int = 0,
     /** 回答正文是否被用户收起；收起后再次打开会话仍保持收起 */
     val contentCollapsed: Boolean = false,
@@ -326,7 +330,12 @@ data class ChatMessage(
     @ColumnInfo(defaultValue = "''")
     val attachments: String = "",
     val createdAt: Long = System.currentTimeMillis()
-)
+) {
+    companion object {
+        /** [cachedTokens] 的未知哨兵：服务端没有提供可识别的缓存统计（不是命中 0） */
+        const val CACHE_TOKENS_UNKNOWN = -1
+    }
+}
 
 /**
  * 一条消息发送时的上下文选择快照。

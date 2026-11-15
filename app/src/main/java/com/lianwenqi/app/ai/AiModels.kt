@@ -65,8 +65,8 @@ data class AiResult(
     val promptTokens: Int = 0,
     /** 本次消耗的输出 token（usage.completion_tokens） */
     val completionTokens: Int = 0,
-    /** 本次输入中命中缓存的 token 数（OpenAI cached_tokens / Anthropic cache_read_input_tokens） */
-    val cachedTokens: Int = 0,
+    /** 本次请求的缓存统计（区分「未提供」「明确 0」「正数命中」三态） */
+    val cacheUsage: CacheUsage = CacheUsage(),
     /** 模型本轮发起的工具调用（参数已按流式分片累积完整） */
     val toolCalls: List<AiToolCall> = emptyList(),
     /** 本次带 tools 的请求被供应商拒绝后，已自动重试一次无 tools 请求（用于提示用户手动手动导入） */
@@ -74,13 +74,25 @@ data class AiResult(
     /** 正文里出现了工具调用语法，但没能还原成可用的工具调用（用于明确提示而不是静默失败） */
     val leakedToolSyntax: Boolean = false
 ) {
+    /** 本次输入中命中缓存的 token 数；null 表示服务端未提供（不等于未命中） */
+    val cachedTokens: Int? get() = cacheUsage.cachedTokens
+
+    /** 服务端是否返回了 usage 对象 */
+    val usageReported: Boolean get() = cacheUsage.usageReported
+
+    /** 实际解析成功的缓存字段路径；null 表示没有可识别的缓存字段 */
+    val cacheField: String? get() = cacheUsage.cacheField
+
+    /** Anthropic 缓存创建量（与命中量严格分开） */
+    val cacheCreationTokens: Int? get() = cacheUsage.cacheCreationTokens
+
     companion object {
         fun ok(
             text: String,
             reasoning: String = "",
             promptTokens: Int = 0,
             completionTokens: Int = 0,
-            cachedTokens: Int = 0,
+            cacheUsage: CacheUsage = CacheUsage(),
             toolCalls: List<AiToolCall> = emptyList(),
             leakedToolSyntax: Boolean = false
         ) = AiResult(
@@ -88,7 +100,7 @@ data class AiResult(
             reasoning = reasoning,
             promptTokens = promptTokens,
             completionTokens = completionTokens,
-            cachedTokens = cachedTokens,
+            cacheUsage = cacheUsage,
             toolCalls = toolCalls,
             leakedToolSyntax = leakedToolSyntax
         )
@@ -183,13 +195,22 @@ data class Usage(
     @SerialName("prompt_tokens") val promptTokens: Int = 0,
     @SerialName("completion_tokens") val completionTokens: Int = 0,
     @SerialName("total_tokens") val totalTokens: Int = 0,
-    /** 其中命中缓存的前缀 token 数 */
-    @SerialName("prompt_tokens_details") val promptTokensDetails: PromptTokensDetails? = null
+    /** 其中命中缓存的前缀 token 数（标准 OpenAI 字段） */
+    @SerialName("prompt_tokens_details") val promptTokensDetails: PromptTokensDetails? = null,
+    /** 部分中转站在 chat/completions 里复用 Responses 结构 */
+    @SerialName("input_tokens_details") val inputTokensDetails: PromptTokensDetails? = null,
+    /** DeepSeek 等供应商的顶层缓存命中字段（与 cached_tokens 同义） */
+    @SerialName("prompt_cache_hit_tokens") val promptCacheHitTokens: Int? = null,
+    /** 少量中转站直接放在 usage 下的缓存命中字段 */
+    @SerialName("cached_tokens") val cachedTokens: Int? = null
 )
 
-/** OpenAI 命中缓存的 token 数（usage.prompt_tokens_details.cached_tokens） */
+/**
+ * 命中缓存的 token 数。
+ * 字段缺失时必须是 null（而不是 0），否则无法区分「未提供」与「明确未命中」。
+ */
 @Serializable
-data class PromptTokensDetails(@SerialName("cached_tokens") val cachedTokens: Int = 0)
+data class PromptTokensDetails(@SerialName("cached_tokens") val cachedTokens: Int? = null)
 
 @Serializable
 data class ChatMessageDto(
@@ -336,7 +357,10 @@ data class ResponsesUsage(
     @SerialName("input_tokens") val inputTokens: Int = 0,
     @SerialName("output_tokens") val outputTokens: Int = 0,
     @SerialName("total_tokens") val totalTokens: Int = 0,
-    @SerialName("input_tokens_details") val inputTokensDetails: PromptTokensDetails? = null
+    @SerialName("input_tokens_details") val inputTokensDetails: PromptTokensDetails? = null,
+    /** 兼容部分中转站直接复用 chat/completions usage 结构 */
+    @SerialName("prompt_tokens_details") val promptTokensDetails: PromptTokensDetails? = null,
+    @SerialName("cached_tokens") val cachedTokens: Int? = null
 )
 
 /** Responses API 流式事件（SSE data: 行） */
@@ -432,13 +456,13 @@ data class AnthropicRequest(
 
 @Serializable
 data class AnthropicUsage(
-    /** 未命中缓存的输入 token */
-    @SerialName("input_tokens") val inputTokens: Int = 0,
-    @SerialName("output_tokens") val outputTokens: Int = 0,
+    /** 未命中缓存的输入 token（字段缺失为 null，不能默认成 0） */
+    @SerialName("input_tokens") val inputTokens: Int? = null,
+    @SerialName("output_tokens") val outputTokens: Int? = null,
     /** 本次从缓存读取（命中）的 token 数，即缓存命中率分子 */
-    @SerialName("cache_read_input_tokens") val cacheReadInputTokens: Int = 0,
-    /** 本次写入缓存的 token 数（首次会以 1.25 倍计价） */
-    @SerialName("cache_creation_input_tokens") val cacheCreationInputTokens: Int = 0
+    @SerialName("cache_read_input_tokens") val cacheReadInputTokens: Int? = null,
+    /** 本次写入缓存的 token 数（首次会以 1.25 倍计价），绝不并入命中量 */
+    @SerialName("cache_creation_input_tokens") val cacheCreationInputTokens: Int? = null
 )
 
 @Serializable

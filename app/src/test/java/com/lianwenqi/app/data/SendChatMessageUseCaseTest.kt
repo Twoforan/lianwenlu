@@ -64,7 +64,7 @@ class SendChatMessageUseCaseTest {
             promptExtra: String,
             promptTokens: Int,
             completionTokens: Int,
-            cachedTokens: Int,
+            cachedTokens: Int?,
             chapterId: Long,
             promptLog: String,
             attachments: String
@@ -81,7 +81,7 @@ class SendChatMessageUseCaseTest {
                     promptExtra = promptExtra,
                     promptTokens = promptTokens,
                     completionTokens = completionTokens,
-                    cachedTokens = cachedTokens,
+                    cachedTokens = cachedTokens ?: ChatMessage.CACHE_TOKENS_UNKNOWN,
                     chapterId = chapterId,
                     promptLog = promptLog,
                     attachments = attachments

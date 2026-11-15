@@ -96,7 +96,7 @@ class ChatRepository(private val db: AppDatabase) : ChatGateway {
         promptExtra: String,
         promptTokens: Int,
         completionTokens: Int,
-        cachedTokens: Int,
+        cachedTokens: Int?,
         chapterId: Long,
         promptLog: String,
         attachments: String
@@ -113,7 +113,8 @@ class ChatRepository(private val db: AppDatabase) : ChatGateway {
                 promptExtra = promptExtra.capStored(MAX_STORED_PROMPT_EXTRA),
                 promptTokens = promptTokens,
                 completionTokens = completionTokens,
-                cachedTokens = cachedTokens,
+                // null（服务端未提供）落库为哨兵值，UI 据此展示「未提供」而不是 0%
+                cachedTokens = cachedTokens ?: ChatMessage.CACHE_TOKENS_UNKNOWN,
                 chapterId = chapterId,
                 promptLog = promptLog.capStored(MAX_STORED_PROMPT_LOG),
                 attachments = attachments

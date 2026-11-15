@@ -42,6 +42,7 @@ import com.lianwenqi.app.data.GEN_KIND_SUMMARY
 import com.lianwenqi.app.data.HistoryChapters
 import com.lianwenqi.app.data.HistoryContentTurn
 import com.lianwenqi.app.data.HistoryPrefix
+import com.lianwenqi.app.data.HistoryReplay
 import com.lianwenqi.app.data.MAX_CHAT_MESSAGE_CHARS
 import com.lianwenqi.app.data.MemoryGateway
 import com.lianwenqi.app.data.PromptLog
@@ -664,7 +665,8 @@ class AiChatViewModel(
             val text: String,
             val promptTokens: Int = 0,
             val completionTokens: Int = 0,
-            val cachedTokens: Int = 0,
+            /** null 表示服务端未提供缓存统计 */
+            val cachedTokens: Int? = null,
             /** 本次同时生成并已落库的章节标签（未开启 / 未解析出来时为空） */
             val tags: List<ChapterSummaryTag> = emptyList()
         ) : SummaryCall
@@ -1804,7 +1806,7 @@ class AiChatViewModel(
         text: String,
         promptTokens: Int,
         completionTokens: Int,
-        cachedTokens: Int,
+        cachedTokens: Int?,
         chapterId: Long,
         promptLog: String
     ) {
@@ -1910,11 +1912,7 @@ class AiChatViewModel(
                 ?.let { configRepository.getModel(it)?.maxContext } ?: 0
             val picked = if (max > 0) history.takeLast(max) else history
             return HistoryDialogue(
-                turns = picked.mapNotNull { m ->
-                    val extra = m.promptExtra
-                    val content = if (extra.isBlank()) m.content else extra + "\n\n" + m.content
-                    ChatTurn(m.role, content).takeIf { it.content.isNotBlank() }
-                }
+                turns = picked.mapNotNull { HistoryReplay.of(it) }
             )
         }
         val messages = HistoryPrefix.pick(
@@ -1928,14 +1926,7 @@ class AiChatViewModel(
         return HistoryDialogue(
             text = HISTORY_DIALOGUE_HEADER + body,
             // 真正发给模型的历史对话：保持真实角色，前缀只会在尾部增长
-            turns = messages.mapNotNull { m ->
-                val role = when (m.role) {
-                    ChatRole.USER -> ChatRole.USER
-                    ChatRole.ASSISTANT -> ChatRole.ASSISTANT
-                    ChatRole.SYSTEM -> return@mapNotNull null
-                }
-                ChatTurn(role, m.content.trim()).takeIf { it.content.isNotBlank() }
-            },
+            turns = messages.mapNotNull { HistoryReplay.of(it) },
             rounds = HistoryPrefix.rounds(messages)
         )
     }
@@ -4185,22 +4176,18 @@ class AiChatViewModel(
     )
 
     /** 生成路径落库的「用户消息」标记：把生成轮次与普通对话区分开 */
-    private val genLabelSummary = "生成梗概"
-    private val genLabelContent = "生成正文"
+    private val genLabelSummary = HistoryReplay.SUMMARY_LABEL
+    private val genLabelContent = HistoryReplay.CONTENT_LABEL
 
     /**
      * 识别一条用户消息属于哪种生成轮次：内容以「生成正文 / 生成梗概」标记开头时返回该标记，
      * 普通聊天返回 null。「重新生成」据此决定是否复用生成流程（含本章梗概临时块、记忆检索、字数约束）。
      */
-    private fun generationKindOf(content: String): String? = when {
-        content == genLabelContent || content.startsWith("$genLabelContent\n") -> genLabelContent
-        content == genLabelSummary || content.startsWith("$genLabelSummary\n") -> genLabelSummary
-        else -> null
-    }
+    private fun generationKindOf(content: String): String? = HistoryReplay.kindOf(content)
 
     /** 从生成轮次的用户消息里取出原始提示词（去掉生成标记） */
     private fun generationPromptOf(content: String, label: String): String =
-        content.removePrefix(label).trimStart('\n')
+        HistoryReplay.promptOf(content, label)
 
     /**
      * 「＋本章梗概」：勾选时随消息发送但不在气泡显示的附加提示词（含章节名与梗概）。
