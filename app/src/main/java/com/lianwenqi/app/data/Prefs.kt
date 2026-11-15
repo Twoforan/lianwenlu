@@ -53,7 +53,7 @@ object MemorySearchScope {
 const val MEMORY_BLOCK_QUOTA_MIN = 5
 const val MEMORY_BLOCK_QUOTA_MAX = 20
 
-/** 生成梗概 / 生成正文 字数区间的默认上限（滑条默认范围；用户可直接输入更大的值） */
+/** 生成梗概 / 生成正文 字数区间的默认上限（用户可直接输入更大的值） */
 const val GEN_SUMMARY_WORDS_MAX = 500
 const val GEN_CONTENT_WORDS_MAX = 6000
 

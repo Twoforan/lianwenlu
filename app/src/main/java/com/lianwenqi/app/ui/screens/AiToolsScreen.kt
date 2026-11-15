@@ -19,7 +19,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -39,9 +38,7 @@ import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.RangeSlider
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -57,17 +54,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -112,7 +106,6 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import kotlin.math.roundToInt
 import kotlinx.coroutines.withContext
 
 class AiToolsViewModel(private val container: AppContainer) : ViewModel() {
@@ -561,13 +554,9 @@ private val GenCardBg = Color(0xFFFFFEFD)
 private val GenInk = Color(0xFF29275F)
 private val GenMuted = Color(0xFF8587B0)
 private val GenPurple = Color(0xFF6259DC)
-private val GenPurpleLight = Color(0xFF9189F0)
 private val GenBadgeBg = Color(0xFFF0EDFF)
 private val GenSoftBg = Color(0xFFF8F6FF)
-private val GenPillBg = Color(0xFFF5F2FF)
-private val GenPillText = Color(0xFF55558A)
 private val GenSelectedBg = Color(0xFFF6F3FF)
-private val GenTrackIdle = Color(0xFFE8E4FF)
 private val GenCardBorder = Color(0xFFF1EDF1)
 
 /**
@@ -611,8 +600,8 @@ private fun AiGenerateSettingsScreen(vm: AiToolsViewModel, onBack: () -> Unit) {
             // 生成梗概：字数区间 + 限定梗概范围
             GenCard {
                 GenSectionHead(SummarizeIcon, "生成梗概")
-                GenDesc("限定字数：可直接输入任意字数，生成结果会落在这个区间内；下限填 0 表示不约束下限。")
-                WordRangeSlider(summaryRange, GEN_SUMMARY_WORDS_MAX) { min, max ->
+                GenDesc("限定字数：填写上下限后点「保存」生效；下限填 0 表示不约束下限。")
+                WordRangeFields(summaryRange) { min, max ->
                     vm.setGenSummaryWordRange(min, max)
                 }
                 GenSubSetting(
@@ -628,8 +617,8 @@ private fun AiGenerateSettingsScreen(vm: AiToolsViewModel, onBack: () -> Unit) {
             // 生成正文：字数区间 + 记忆检索说明（开关状态跟随 AI 面板的勾选）
             GenCard {
                 GenSectionHead(Icons.AutoMirrored.Filled.Article, "生成正文")
-                GenDesc("限定字数：可直接输入任意字数，生成结果要落在这个区间内；下限填 0 表示不约束下限。")
-                WordRangeSlider(contentRange, GEN_CONTENT_WORDS_MAX) { min, max ->
+                GenDesc("限定字数：填写上下限后点「保存」生效；下限填 0 表示不约束下限。")
+                WordRangeFields(contentRange) { min, max ->
                     vm.setGenContentWordRange(min, max)
                 }
                 GenDesc("记忆检索跟随 AI 面板里「记忆检索」的勾选：勾选则生成正文前按本章梗概检索本书已写正文，" +
@@ -774,68 +763,28 @@ private fun GenToggleCard(
     }
 }
 
-/** 字数区间：滑条粗调 + 两个数字输入框精确自定义（输入框允许超过滑条默认上限） */
-@OptIn(ExperimentalMaterial3Api::class)
+/** 字数区间：两个数字输入框 + 保存按钮（只收数字；点「保存」后规整并持久化） */
 @Composable
-private fun WordRangeSlider(range: IntRange, cap: Int, onChange: (Int, Int) -> Unit) {
-    // 滑条上限：至少是默认上限；用户输入更大的值后自动扩展，避免 RangeSlider 的值越界
-    val sliderMax = maxOf(cap, range.last).coerceAtLeast(1)
+private fun WordRangeFields(range: IntRange, onSave: (Int, Int) -> Unit) {
     var minText by remember { mutableStateOf(range.first.toString()) }
     var maxText by remember { mutableStateOf(range.last.toString()) }
-    // 拖动滑条或外部值变化时同步输入框；输入过程中 range 不变，不会覆盖正在输入的内容
+    // 保存成功或外部值变化时同步输入框；输入过程中 range 不变，不会覆盖正在输入的内容
     LaunchedEffect(range) {
         minText = range.first.toString()
         maxText = range.last.toString()
     }
-    fun commit() {
+    fun save() {
         val min = minText.toIntOrNull()?.coerceIn(0, GEN_WORDS_HARD_MAX) ?: range.first
         val max = maxText.toIntOrNull()?.coerceIn(0, GEN_WORDS_HARD_MAX) ?: range.last
-        onChange(min, max)
+        onSave(min, max)
     }
 
     Column {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                "${range.first}",
-                color = GenPillText,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Medium,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.width(30.dp)
-            )
-            RangeSlider(
-                value = range.first.coerceAtMost(sliderMax).toFloat()..
-                    range.last.coerceAtMost(sliderMax).toFloat(),
-                onValueChange = { onChange(it.start.roundToInt(), it.endInclusive.roundToInt()) },
-                valueRange = 0f..sliderMax.toFloat(),
-                colors = SliderDefaults.colors(
-                    thumbColor = GenPurple,
-                    activeTrackColor = GenPurpleLight,
-                    inactiveTrackColor = GenTrackIdle,
-                    activeTickColor = Color.Transparent,
-                    inactiveTickColor = Color.Transparent
-                ),
-                modifier = Modifier.weight(1f)
-            )
-            Spacer(Modifier.width(10.dp))
-            Text(
-                "${range.first}–${range.last} 字",
-                color = GenPillText,
-                fontSize = 13.sp,
-                maxLines = 1,
-                softWrap = false,
-                modifier = Modifier
-                    .background(GenPillBg, RoundedCornerShape(22.dp))
-                    .padding(horizontal = 12.dp, vertical = 9.dp)
-            )
-        }
-        Spacer(Modifier.height(8.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             WordNumberField(
                 value = minText,
                 label = "下限（0 = 不限）",
                 onValueChange = { minText = it },
-                onCommit = { commit() },
                 modifier = Modifier.weight(1f)
             )
             Spacer(Modifier.width(10.dp))
@@ -843,23 +792,27 @@ private fun WordRangeSlider(range: IntRange, cap: Int, onChange: (Int, Int) -> U
                 value = maxText,
                 label = "上限",
                 onValueChange = { maxText = it },
-                onCommit = { commit() },
                 modifier = Modifier.weight(1f)
             )
+        }
+        Spacer(Modifier.height(10.dp))
+        Button(
+            onClick = { save() },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("保存")
         }
     }
 }
 
-/** 字数输入框：只收数字（最多 5 位），失焦或按「完成」时提交 */
+/** 字数输入框：只收数字（最多 5 位），由下方「保存」按钮统一提交 */
 @Composable
 private fun WordNumberField(
     value: String,
     label: String,
     onValueChange: (String) -> Unit,
-    onCommit: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var wasFocused by remember { mutableStateOf(false) }
     OutlinedTextField(
         value = value,
         onValueChange = { input -> onValueChange(input.filter { it.isDigit() }.take(5)) },
@@ -870,15 +823,7 @@ private fun WordNumberField(
             keyboardType = KeyboardType.Number,
             imeAction = ImeAction.Done
         ),
-        keyboardActions = KeyboardActions(onDone = { onCommit() }),
-        modifier = modifier.onFocusChanged { state ->
-            if (state.isFocused) {
-                wasFocused = true
-            } else if (wasFocused) {
-                wasFocused = false
-                onCommit()
-            }
-        }
+        modifier = modifier
     )
 }
 

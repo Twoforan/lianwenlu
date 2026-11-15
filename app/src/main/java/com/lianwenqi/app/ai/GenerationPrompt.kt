@@ -96,7 +96,7 @@ private val STYLE_SAMPLES_REMINDER = """
 private fun upperBound(range: IntRange?): Int? =
     range?.last?.takeIf { it > 0 }
 
-/** 是否校验下限：下限 <= 0 表示只约束上限（用户把滑条拉到 0 即不设下限） */
+/** 是否校验下限：下限 <= 0 表示只约束上限（用户把下限填 0 即不设下限） */
 private fun hasLowerBound(range: IntRange?): Boolean =
     range != null && range.first > 0 && range.first <= (upperBound(range) ?: Int.MAX_VALUE)
 
