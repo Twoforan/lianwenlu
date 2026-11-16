@@ -24,7 +24,6 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okio.BufferedSource
 import java.io.IOException
-import java.util.Locale
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -876,11 +875,15 @@ class AiClient(
                 else AiResult.fail("模型返回为空")
             }
             val u = parsed.usage
-            val totalInput = (u?.inputTokens ?: 0) + (u?.cacheReadInputTokens ?: 0) + (u?.cacheCreationInputTokens ?: 0)
+            // 分母只在供应商明确返回 input_tokens 时成立；缺失时保持未知，绝不用 0 补，
+            // 否则「纯缓存读取」会被错误算成 100%。本地估算只用于展示，不进入命中率。
+            val totalInput = u?.inputTokens?.let { input ->
+                input + (u.cacheReadInputTokens ?: 0) + (u.cacheCreationInputTokens ?: 0)
+            }
             val result = AiResult.ok(
                 content,
                 reasoning,
-                if (totalInput > 0) totalInput else estimateTokens(turns.joinToString("") { it.content }),
+                totalInput ?: estimateTokens(turns.joinToString("") { it.content }),
                 u?.outputTokens ?: estimateTokens(content + reasoning),
                 CacheUsageParser.fromAnthropic(u),
                 finalCalls,
@@ -975,11 +978,14 @@ class AiClient(
                 return if (truncated) AiResult.fail(TRUNCATED_HINT) else AiResult.fail("模型返回为空")
             }
             val u = usageAcc.anthropicUsage
-            val totalInput = (u?.inputTokens ?: 0) + (u?.cacheReadInputTokens ?: 0) + (u?.cacheCreationInputTokens ?: 0)
+            // 同非流式：input_tokens 缺失时分母未知，不参与命中率计算
+            val totalInput = u?.inputTokens?.let { input ->
+                input + (u.cacheReadInputTokens ?: 0) + (u.cacheCreationInputTokens ?: 0)
+            }
             val result = AiResult.ok(
                 finalText,
                 reasoning.toString(),
-                if (totalInput > 0) totalInput else estimateTokens(turns.joinToString("") { it.content }),
+                totalInput ?: estimateTokens(turns.joinToString("") { it.content }),
                 u?.outputTokens?.takeIf { it > 0 } ?: estimateTokens(finalText + reasoning),
                 CacheUsageParser.fromAnthropic(u),
                 finalCalls,
@@ -1033,30 +1039,40 @@ class AiClient(
             PromptDiagnostics.endpointKey(endpoint, streaming),
             fingerprint
         )
-        // 命中率只在 promptTokens > 0 且 cachedTokens 已知时计算；未知不显示成 0%
-        val hitRate = cache.cachedTokens
-            ?.takeIf { result.promptTokens > 0 }
-            ?.let { String.format(Locale.US, "%.1f%%", it * 100.0 / result.promptTokens) }
-            ?: "null"
+        // 命中率只使用供应商明确提供的分母；分母缺失时标记 incomplete，绝不补 0
+        val denominator = cache.promptTokens
+        val rate = CacheRateCalculator.of(denominator, cache.cachedTokens)
+        val hitRate = when (rate.state) {
+            CacheRateState.HIT, CacheRateState.ZERO -> "${rate.percent}%"
+            CacheRateState.ANOMALY -> "anomaly"
+            CacheRateState.INCOMPLETE -> "incomplete"
+            CacheRateState.UNKNOWN -> "unknown"
+            CacheRateState.NO_REQUEST -> "none"
+        }
         val cacheMode = when (endpoint.apiType) {
             ApiType.ANTHROPIC_MESSAGES -> "anthropic-explicit"
             // Responses 的 prompt_cache_key 只做路由提示，不改变缓存匹配方式
             ApiType.RESPONSES -> "passive-prefix+prompt-cache-key"
             ApiType.CHAT_COMPLETIONS -> "passive-prefix"
         }
-        val cacheState = when {
-            cache.cachedTokens == null -> "unknown"
-            cache.cachedTokens == 0 -> "zero"
-            else -> "hit"
+        val cacheState = when (rate.state) {
+            CacheRateState.UNKNOWN -> "unknown"
+            CacheRateState.INCOMPLETE -> "incomplete"
+            CacheRateState.ANOMALY -> "anomaly"
+            CacheRateState.ZERO -> "zero"
+            CacheRateState.HIT -> "hit"
+            CacheRateState.NO_REQUEST -> "none"
         }
         Log.d(
             CACHE_LOG_TAG,
             "provider=${endpoint.provider.name} apiType=${endpoint.apiType} model=${endpoint.modelName} " +
                 "stream=$streaming cacheMode=$cacheMode " +
-                "promptTokens=${result.promptTokens} cachedTokens=${cache.cachedTokens ?: "null"} " +
+                "promptTokens=${result.promptTokens} reportedPromptTokens=${denominator ?: "null"} " +
+                "cachedTokens=${cache.cachedTokens ?: "null"} " +
                 "cacheHitRate=$hitRate cacheState=$cacheState usageReported=${cache.usageReported} " +
                 "cacheField=${cache.cacheField ?: "null"} " +
                 "cacheCreationTokens=${cache.cacheCreationTokens ?: "null"} " +
+                "cacheConflicts=${cache.cacheConflicts.joinToString(";").ifBlank { "none" }} " +
                 "systemChars=${fingerprint.systemChars} historyChars=${fingerprint.historyChars} " +
                 "tailChars=${fingerprint.tailChars} roleSummary=${fingerprint.roleSummary} " +
                 "toolCount=${fingerprint.toolCount} " +

@@ -94,7 +94,9 @@ interface VolumeCompressionDao {
         "UPDATE volume_compression_session SET completedBatchCount = :completedBatchCount, " +
             "actualRequestCount = :actualRequestCount, promptTokens = :promptTokens, " +
             "completionTokens = :completionTokens, cachedTokens = :cachedTokens, " +
-            "requestsWithUsage = :requestsWithUsage, updatedAt = :time WHERE id = :id"
+            "requestsWithUsage = :requestsWithUsage, " +
+            "unknownCacheRequests = :unknownCacheRequests, " +
+            "unknownPromptRequests = :unknownPromptRequests, updatedAt = :time WHERE id = :id"
     )
     suspend fun updateUsage(
         id: Long,
@@ -104,6 +106,8 @@ interface VolumeCompressionDao {
         completionTokens: Int,
         cachedTokens: Int,
         requestsWithUsage: Int,
+        unknownCacheRequests: Int,
+        unknownPromptRequests: Int,
         time: Long
     )
 

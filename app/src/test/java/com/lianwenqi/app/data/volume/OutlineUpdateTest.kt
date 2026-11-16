@@ -338,7 +338,12 @@ class OutlineUpdateTest {
                     "{\"suggestions\":[]}",
                     promptTokens = 120,
                     completionTokens = 30,
-                    cacheUsage = CacheUsage(cachedTokens = 10, usageReported = true)
+                    cacheUsage = CacheUsage(
+                        cachedTokens = 10,
+                        usageReported = true,
+                        promptTokens = 120,
+                        completionTokens = 30
+                    )
                 )
             }
         )

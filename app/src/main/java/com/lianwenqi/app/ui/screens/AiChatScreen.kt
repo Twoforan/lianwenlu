@@ -154,6 +154,8 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import coil.compose.AsyncImage
+import com.lianwenqi.app.ai.CacheRateCalculator
+import com.lianwenqi.app.ai.CacheRateState
 import com.lianwenqi.app.ai.GenerationDialog
 import com.lianwenqi.app.ai.MemoryScopePick
 import com.lianwenqi.app.ai.RefreshRetrievalChoice
@@ -4037,19 +4039,41 @@ private fun AssistantBlock(
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    val tokens = msg.promptTokens + msg.completionTokens
-                    if (tokens > 0) {
+                    val promptKnown = msg.promptTokens >= 0
+                    val tokens = (if (promptKnown) msg.promptTokens else 0) + msg.completionTokens
+                    // 旧记录可能全是 0（当时没有可用统计），保持原来的「不显示」行为
+                    val hasStats = msg.promptTokens > 0 || msg.completionTokens > 0 ||
+                        msg.cachedTokens > 0 || msg.promptTokens < 0 || msg.cachedTokens < 0
+                    if (hasStats) {
                         Spacer(Modifier.weight(1f))
                         Text(
                             buildString {
-                                append("消耗 $tokens tokens（输入 ${msg.promptTokens} / 输出 ${msg.completionTokens}）")
-                                // 缓存统计三态：未知不显示成 0%；明确 0 显示 0%；正数显示命中率
-                                when {
-                                    msg.cachedTokens < 0 -> append(" · 缓存统计未提供")
-                                    msg.promptTokens > 0 -> {
-                                        val hit = msg.cachedTokens * 100 / msg.promptTokens
-                                        append(" · 缓存命中 $hit%")
-                                    }
+                                append(
+                                    "消耗 $tokens tokens（输入 ${
+                                        if (promptKnown) msg.promptTokens else "未知"
+                                    } / 输出 ${msg.completionTokens}）"
+                                )
+                                // 缓存三态 + 分母三态：未知不显示成 0%，分母未知不计算百分比
+                                val rate = CacheRateCalculator.of(msg.promptTokens, msg.cachedTokens)
+                                when (rate.state) {
+                                    CacheRateState.UNKNOWN ->
+                                        append(" · 缓存命中率：暂无供应商数据")
+                                    CacheRateState.INCOMPLETE ->
+                                        append(
+                                            " · 缓存读取 Token：${msg.cachedTokens}" +
+                                                " / 总输入 Token：未知 · 缓存命中率：统计口径不完整"
+                                        )
+                                    CacheRateState.ANOMALY ->
+                                        append(
+                                            " · 缓存读取 Token：${msg.cachedTokens}" +
+                                                " / 总输入 Token：${msg.promptTokens} · 上游 usage 数据异常"
+                                        )
+                                    else ->
+                                        append(
+                                            " · 缓存读取 Token：${msg.cachedTokens}" +
+                                                " / 总输入 Token：${msg.promptTokens}" +
+                                                " / 缓存命中率：${rate.percent}%"
+                                        )
                                 }
                             },
                             style = MaterialTheme.typography.labelSmall,

@@ -117,9 +117,13 @@ data class CompressionPlan(
 }
 
 /**
- * 真实 usage 汇总：每次 [AiResult] 的 prompt / completion / cached 原样累加。
- * 没有返回 usage 的请求只计入 [requestCount]，不虚报 Token；
- * [inputTokenEstimate] 是字符启发式估算，永远与真实 usage 分开。
+ * 真实 usage 汇总：每次 [AiResult] 中「供应商明确报告」的 prompt / completion / cached 原样累加。
+ *
+ * - 没有返回 usage 的请求只计入 [requestCount]，不虚报 Token；
+ * - 返回了 usage 但没有缓存字段的请求计入 [unknownCacheRequests]，不按 0 累计；
+ * - 返回了 usage 但没有输入 Token 的请求计入 [unknownPromptRequests]，
+ *   此时不允许用估算值补分母，也不在界面上计算命中率；
+ * - [inputTokenEstimate] 是字符启发式估算，永远与真实 usage 分开。
  */
 data class CompressionUsage(
     val promptTokens: Int = 0,
@@ -127,23 +131,34 @@ data class CompressionUsage(
     val cachedTokens: Int = 0,
     val requestCount: Int = 0,
     val requestsWithUsage: Int = 0,
+    /** 有 usage 但服务端未提供可识别缓存字段的请求数（未知，不是明确 0） */
+    val unknownCacheRequests: Int = 0,
+    /** 有 usage 但服务端未提供输入 Token 的请求数（命中率分母未知） */
+    val unknownPromptRequests: Int = 0,
     val inputTokenEstimate: Int = 0,
     val estimateMethod: String = CompressionTokenEstimator.METHOD
 ) {
     val totalTokens: Int get() = promptTokens + completionTokens
 
     fun plus(result: AiResult): CompressionUsage {
+        val reportedPrompt = result.cacheUsage.promptTokens
         val reportedCached = result.cachedTokens
-        val hasUsage =
-            result.usageReported || result.promptTokens > 0 || result.completionTokens > 0 ||
-                (reportedCached ?: 0) > 0
+        val hasUsage = result.usageReported
         return copy(
-            promptTokens = promptTokens + result.promptTokens,
-            completionTokens = completionTokens + result.completionTokens,
-            // 未提供缓存统计的请求按 0 计入本聚合值；[requestsWithUsage] 仍只统计有 usage 的请求
-            cachedTokens = cachedTokens + (reportedCached ?: 0),
+            // 只累加供应商明确报告的值；估算 Token 绝不进入真实 usage
+            promptTokens = promptTokens + if (hasUsage) (reportedPrompt ?: 0) else 0,
+            completionTokens = completionTokens + if (hasUsage) {
+                (result.cacheUsage.completionTokens ?: 0)
+            } else {
+                0
+            },
+            cachedTokens = cachedTokens + if (hasUsage) (reportedCached ?: 0) else 0,
             requestCount = requestCount + 1,
-            requestsWithUsage = requestsWithUsage + if (hasUsage) 1 else 0
+            requestsWithUsage = requestsWithUsage + if (hasUsage) 1 else 0,
+            unknownCacheRequests = unknownCacheRequests +
+                if (hasUsage && reportedCached == null) 1 else 0,
+            unknownPromptRequests = unknownPromptRequests +
+                if (hasUsage && reportedPrompt == null) 1 else 0
         )
     }
 
@@ -154,9 +169,30 @@ data class CompressionUsage(
         cachedTokens = cachedTokens + other.cachedTokens,
         requestCount = requestCount + other.requestCount,
         requestsWithUsage = requestsWithUsage + other.requestsWithUsage,
+        unknownCacheRequests = unknownCacheRequests + other.unknownCacheRequests,
+        unknownPromptRequests = unknownPromptRequests + other.unknownPromptRequests,
         inputTokenEstimate = if (other.inputTokenEstimate > 0) other.inputTokenEstimate else inputTokenEstimate,
         estimateMethod = if (other.inputTokenEstimate > 0) other.estimateMethod else estimateMethod
     )
+
+    /** 单条大纲记录没有独立的未知计数列，落库时用 -1 保留「未知」语义 */
+    val cachedTokensOrUnknown: Int get() = when {
+        requestsWithUsage <= 0 -> TOKENS_UNKNOWN
+        unknownCacheRequests > 0 -> TOKENS_UNKNOWN
+        else -> cachedTokens
+    }
+
+    /** 分母缺失同样写 -1，界面 / 后续统计据此判断「统计口径不完整」 */
+    val promptTokensOrUnknown: Int get() = when {
+        requestsWithUsage <= 0 -> TOKENS_UNKNOWN
+        unknownPromptRequests > 0 -> TOKENS_UNKNOWN
+        else -> promptTokens
+    }
+
+    companion object {
+        /** 数据库哨兵：供应商未提供该统计（不等于 0） */
+        const val TOKENS_UNKNOWN = -1
+    }
 }
 
 /** 输出规模规划所需的复杂度指标；事件 / 人物 / 变化等来自各批次的结构化提取结果 */

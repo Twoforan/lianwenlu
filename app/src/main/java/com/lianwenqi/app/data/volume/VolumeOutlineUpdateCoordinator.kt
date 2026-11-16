@@ -115,6 +115,9 @@ class VolumeOutlineUpdateCoordinator(
                     scopeIds = scopeIds.joinToString(","),
                     scopeLabel = scopeLabel(config, scopeIds.size),
                     summaryId = session.candidateSummaryId,
+                    // 尚未发生任何请求：未知就用 -1，不用 0 冒充「明确未命中」
+                    promptTokens = CompressionUsage.TOKENS_UNKNOWN,
+                    cachedTokens = CompressionUsage.TOKENS_UNKNOWN,
                     createdAt = now,
                     updatedAt = now
                 )
@@ -127,9 +130,9 @@ class VolumeOutlineUpdateCoordinator(
                 scopeIds = scopeIds.joinToString(","),
                 scopeLabel = scopeLabel(config, scopeIds.size),
                 summaryId = session.candidateSummaryId,
-                promptTokens = 0,
+                promptTokens = CompressionUsage.TOKENS_UNKNOWN,
                 completionTokens = 0,
-                cachedTokens = 0,
+                cachedTokens = CompressionUsage.TOKENS_UNKNOWN,
                 requestCount = 0,
                 requestsWithUsage = 0,
                 rawResponse = "",
@@ -560,9 +563,9 @@ class VolumeOutlineUpdateCoordinator(
         dao.updateUpdate(
             current.copy(
                 status = OutlineUpdateStatus.READY,
-                promptTokens = usage.promptTokens,
+                promptTokens = usage.promptTokensOrUnknown,
                 completionTokens = usage.completionTokens,
-                cachedTokens = usage.cachedTokens,
+                cachedTokens = usage.cachedTokensOrUnknown,
                 requestCount = usage.requestCount,
                 requestsWithUsage = usage.requestsWithUsage,
                 rawResponse = raw.take(MAX_RAW_DIAGNOSTIC),
@@ -583,9 +586,9 @@ class VolumeOutlineUpdateCoordinator(
         dao.updateUpdate(
             update.copy(
                 status = OutlineUpdateStatus.FAILED,
-                promptTokens = usage.promptTokens,
+                promptTokens = usage.promptTokensOrUnknown,
                 completionTokens = usage.completionTokens,
-                cachedTokens = usage.cachedTokens,
+                cachedTokens = usage.cachedTokensOrUnknown,
                 requestCount = usage.requestCount,
                 requestsWithUsage = usage.requestsWithUsage,
                 rawResponse = raw.take(MAX_RAW_DIAGNOSTIC),

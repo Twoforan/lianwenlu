@@ -409,7 +409,12 @@ class VolumeContentCompressionTest {
                     if (user.contains("【整合轮次】")) finalText else respondToExtraction(user),
                     promptTokens = 100,
                     completionTokens = 20,
-                    cacheUsage = CacheUsage(cachedTokens = 30, usageReported = true)
+                    cacheUsage = CacheUsage(
+                        cachedTokens = 30,
+                        usageReported = true,
+                        promptTokens = 100,
+                        completionTokens = 20
+                    )
                 )
             }
         )

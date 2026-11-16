@@ -412,14 +412,24 @@ class VolumeCompressionServiceTest {
                         extractionJson(listOf(1L), "第1章"),
                         promptTokens = 100,
                         completionTokens = 20,
-                        cacheUsage = CacheUsage(cachedTokens = 30, usageReported = true)
+                        cacheUsage = CacheUsage(
+                            cachedTokens = 30,
+                            usageReported = true,
+                            promptTokens = 100,
+                            completionTokens = 20
+                        )
                     )
                 } else {
                     AiResult.ok(
                         finalText,
                         promptTokens = 200,
                         completionTokens = 50,
-                        cacheUsage = CacheUsage(cachedTokens = 60, usageReported = true)
+                        cacheUsage = CacheUsage(
+                            cachedTokens = 60,
+                            usageReported = true,
+                            promptTokens = 200,
+                            completionTokens = 50
+                        )
                     )
                 }
             }

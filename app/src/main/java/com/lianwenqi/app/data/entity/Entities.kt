@@ -296,7 +296,10 @@ data class ChatMessage(
      * 它与 content 一起落库，重建历史时原样拼回，保证跨轮请求前缀逐字节一致。
      */
     val promptExtra: String = "",
-    /** 本次回答消耗的输入 token（usage.prompt_tokens），0 表示未记录 */
+    /**
+     * 本次回答消耗的输入 token（usage.prompt_tokens）。
+     * [PROMPT_TOKENS_UNKNOWN]（-1）表示服务商没有提供分母，不能按 0 计算命中率。
+     */
     val promptTokens: Int = 0,
     /* 本次回答消耗的输出 token（usage.completion_tokens），0 表示未记录 */
     val completionTokens: Int = 0,
@@ -334,6 +337,9 @@ data class ChatMessage(
     companion object {
         /** [cachedTokens] 的未知哨兵：服务端没有提供可识别的缓存统计（不是命中 0） */
         const val CACHE_TOKENS_UNKNOWN = -1
+
+        /** [promptTokens] 的未知哨兵：服务端没有提供输入 Token（不是输入 0） */
+        const val PROMPT_TOKENS_UNKNOWN = -1
     }
 }
 

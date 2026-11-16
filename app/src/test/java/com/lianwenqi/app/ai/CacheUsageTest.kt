@@ -350,4 +350,221 @@ class CacheUsageTest {
         val text = json.encodeToString(ChatCompletionRequest.serializer(), payload)
         assertTrue(text.contains("\"stream_options\":{\"include_usage\":true}"))
     }
+
+    // ---------------- 分母三态与命中率状态 ----------------
+
+    @Test
+    fun `Anthropic input_tokens 缺失时分母为 null 且不计算命中率`() {
+        val usage = anthropicUsage(
+            """{"content":[],"usage":{"cache_read_input_tokens":8000,
+               "cache_creation_input_tokens":0}}"""
+        )
+        assertEquals(8000, usage.cachedTokens)
+        assertNull(usage.promptTokens)
+        val rate = CacheRateCalculator.of(usage.promptTokens, usage.cachedTokens)
+        assertEquals(CacheRateState.INCOMPLETE, rate.state)
+        assertNull(rate.percent)
+    }
+
+    @Test
+    fun `Anthropic input 200 cacheRead 7800 时分母为 8000 且命中 97`() {
+        val usage = anthropicUsage(
+            """{"content":[],"usage":{"input_tokens":200,"output_tokens":10,
+               "cache_read_input_tokens":7800}}"""
+        )
+        assertEquals(8000, usage.promptTokens)
+        assertEquals(7800, usage.cachedTokens)
+        val rate = CacheRateCalculator.of(usage.promptTokens, usage.cachedTokens)
+        assertEquals(CacheRateState.HIT, rate.state)
+        assertEquals(97, rate.percent)
+    }
+
+    @Test
+    fun `Anthropic cache_creation 只进分母且绝不进命中量`() {
+        val usage = anthropicUsage(
+            """{"content":[],"usage":{"input_tokens":100,"output_tokens":10,
+               "cache_read_input_tokens":1000,"cache_creation_input_tokens":400}}"""
+        )
+        assertEquals(1000, usage.cachedTokens)
+        assertEquals(400, usage.cacheCreationTokens)
+        assertEquals(1500, usage.promptTokens)
+    }
+
+    @Test
+    fun `明确 0 与未知缓存的状态不同`() {
+        val zero = CacheRateCalculator.of(2000, 0)
+        assertEquals(CacheRateState.ZERO, zero.state)
+        assertEquals(0, zero.percent)
+
+        val unknown = CacheRateCalculator.of(2000, null)
+        assertEquals(CacheRateState.UNKNOWN, unknown.state)
+        assertNull(unknown.percent)
+    }
+
+    @Test
+    fun `缓存量大于输入量时标记异常且不 clamp`() {
+        val rate = CacheRateCalculator.of(200, 7800)
+        assertEquals(CacheRateState.ANOMALY, rate.state)
+        assertNull(rate.percent)
+    }
+
+    @Test
+    fun `聊天 usage 缺 prompt_tokens 时分母保持未知`() {
+        val usage = chatUsage(
+            """{"choices":[],"usage":{"completion_tokens":10,
+               "prompt_tokens_details":{"cached_tokens":6000}}}"""
+        )
+        assertEquals(6000, usage.cachedTokens)
+        assertNull(usage.promptTokens)
+    }
+
+    @Test
+    fun `Responses 协议混用时缓存可解析但分母未知`() {
+        val usage = responsesUsage(
+            """{"output":[],"usage":{"output_tokens":10,
+               "prompt_tokens_details":{"cached_tokens":6000}}}"""
+        )
+        assertEquals(6000, usage.cachedTokens)
+        assertNull(usage.promptTokens)
+    }
+
+    @Test
+    fun `多个缓存字段冲突时保留优先级并记录字段与数值`() {
+        val usage = chatUsage(
+            """{"choices":[],"usage":{"prompt_tokens":8000,"completion_tokens":10,
+               "prompt_tokens_details":{"cached_tokens":8000},
+               "prompt_cache_hit_tokens":6000}}"""
+        )
+        // 优先级不变：仍取第一个非空字段
+        assertEquals(8000, usage.cachedTokens)
+        assertEquals(CacheUsageParser.FIELD_CHAT_PROMPT_DETAILS, usage.cacheField)
+        assertEquals(1, usage.cacheConflicts.size)
+        assertTrue(usage.cacheConflicts.single().contains("usage.prompt_tokens_details.cached_tokens=8000"))
+        assertTrue(usage.cacheConflicts.single().contains("usage.prompt_cache_hit_tokens=6000"))
+    }
+
+    @Test
+    fun `流式最后事件缺少字段时保留此前的完整 usage`() {
+        val acc = StreamUsageAccumulator()
+        acc.onChatChunk(
+            chatChunk(
+                """{"choices":[],"usage":{"prompt_tokens":2000,"completion_tokens":10,
+                   "prompt_tokens_details":{"cached_tokens":1500}}}"""
+            )
+        )
+        acc.onChatChunk(chatChunk("""{"choices":[],"usage":{"completion_tokens":30}}"""))
+        val usage = CacheUsageParser.fromChatCompletion(acc.chatUsage)
+        assertEquals(2000, acc.chatUsage?.promptTokens)
+        assertEquals(1500, usage.cachedTokens)
+        assertEquals(30, acc.chatUsage?.completionTokens)
+    }
+
+    @Test
+    fun `流式 chat 的较小增量快照不会覆盖完整输入`() {
+        val acc = StreamUsageAccumulator()
+        acc.onChatChunk(
+            chatChunk(
+                """{"choices":[],"usage":{"prompt_tokens":2000,"completion_tokens":10,
+                   "prompt_tokens_details":{"cached_tokens":1500}}}"""
+            )
+        )
+        acc.onChatChunk(
+            chatChunk(
+                """{"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":5}}"""
+            )
+        )
+        assertEquals(2000, acc.chatUsage?.promptTokens)
+        assertEquals(1500, acc.chatUsage?.promptTokensDetails?.cachedTokens)
+        assertEquals(10, acc.chatUsage?.completionTokens)
+    }
+
+    @Test
+    fun `流式 anthropic 的较小增量不会覆盖完整输入`() {
+        val acc = StreamUsageAccumulator()
+        acc.onAnthropicEvent(
+            json.decodeFromString(
+                AnthropicStreamEvent.serializer(),
+                """{"type":"message_start","message":{"content":[],"usage":{"input_tokens":100,
+                   "cache_read_input_tokens":900,"cache_creation_input_tokens":300}}}"""
+            )
+        )
+        acc.onAnthropicEvent(
+            json.decodeFromString(
+                AnthropicStreamEvent.serializer(),
+                """{"type":"message_delta","usage":{"input_tokens":5,"output_tokens":30}}"""
+            )
+        )
+        assertEquals(100, acc.anthropicUsage?.inputTokens)
+        assertEquals(900, acc.anthropicUsage?.cacheReadInputTokens)
+        assertEquals(300, acc.anthropicUsage?.cacheCreationInputTokens)
+        assertEquals(30, acc.anthropicUsage?.outputTokens)
+    }
+
+    @Test
+    fun `未提供分母时落库使用未知哨兵而不是估算值`() {
+        val unknown = AiResult.ok(
+            "正文",
+            promptTokens = 9999,
+            cacheUsage = CacheUsage(usageReported = true, promptTokens = null)
+        )
+        assertEquals(PROMPT_TOKENS_UNKNOWN, unknown.storedPromptTokens)
+
+        // 供应商明确报告 0 时保留 0，不能和「未提供」混为一谈
+        val explicitZero = AiResult.ok(
+            "正文",
+            promptTokens = 9999,
+            cacheUsage = CacheUsage(usageReported = true, promptTokens = 0)
+        )
+        assertEquals(0, explicitZero.storedPromptTokens)
+    }
+
+    @Test
+    fun `聚合口径在存在未知缓存或未知分母时不给百分比`() {
+        val unknownCache = CacheRateCalculator.ofAggregate(
+            promptTokens = 1000,
+            cachedTokens = 500,
+            requestCount = 1,
+            requestsWithUsage = 1,
+            unknownCacheRequests = 1,
+            unknownPromptRequests = 0
+        )
+        assertEquals(CacheRateState.UNKNOWN, unknownCache.state)
+
+        val unknownPrompt = CacheRateCalculator.ofAggregate(
+            promptTokens = 1000,
+            cachedTokens = 500,
+            requestCount = 1,
+            requestsWithUsage = 1,
+            unknownCacheRequests = 0,
+            unknownPromptRequests = 1
+        )
+        assertEquals(CacheRateState.INCOMPLETE, unknownPrompt.state)
+
+        val noRequest = CacheRateCalculator.ofAggregate(
+            promptTokens = 0,
+            cachedTokens = 0,
+            requestCount = 0,
+            requestsWithUsage = 0,
+            unknownCacheRequests = 0,
+            unknownPromptRequests = 0
+        )
+        assertEquals(CacheRateState.NO_REQUEST, noRequest.state)
+
+        // 旧库只有 0/0（没有可用统计）时不显示成 100% 或 0%，按未知处理
+        val legacy = CacheRateCalculator.ofAggregate(
+            promptTokens = 0,
+            cachedTokens = 0,
+            requestCount = 2,
+            requestsWithUsage = 2,
+            unknownCacheRequests = 0,
+            unknownPromptRequests = 0
+        )
+        assertEquals(CacheRateState.UNKNOWN, legacy.state)
+
+        // 数据库哨兵 -1 与 null 同义
+        assertEquals(
+            CacheRateState.INCOMPLETE,
+            CacheRateCalculator.of(-1, 8000).state
+        )
+    }
 }

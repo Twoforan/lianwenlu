@@ -1125,7 +1125,7 @@ class AiChatViewModel(
             sid = sid,
             round = round,
             text = enforced.text,
-            promptTokens = result.promptTokens,
+            promptTokens = result.storedPromptTokens,
             completionTokens = result.completionTokens,
             cachedTokens = result.cachedTokens,
             chapterId = chapterId,
@@ -1457,7 +1457,7 @@ class AiChatViewModel(
         }
         return SummaryCall.Ok(
             enforced.text,
-            promptTokens = result.promptTokens,
+            promptTokens = result.storedPromptTokens,
             completionTokens = result.completionTokens,
             cachedTokens = result.cachedTokens,
             tags = tags

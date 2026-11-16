@@ -338,6 +338,8 @@ class VolumeCompressionCoordinator(
                 completionTokens = usage.completionTokens,
                 cachedTokens = usage.cachedTokens,
                 requestsWithUsage = usage.requestsWithUsage,
+                unknownCacheRequests = usage.unknownCacheRequests,
+                unknownPromptRequests = usage.unknownPromptRequests,
                 errorKind = if (success) null else VolumeCompressionErrorKind.REQUEST_FAILED,
                 errorMessage = if (success) "" else message,
                 createdAt = existing?.createdAt ?: now,
@@ -479,6 +481,8 @@ class VolumeCompressionCoordinator(
                             completionTokens = result.usage.completionTokens,
                             cachedTokens = result.usage.cachedTokens,
                             requestsWithUsage = result.usage.requestsWithUsage,
+                            unknownCacheRequests = result.usage.unknownCacheRequests,
+                            unknownPromptRequests = result.usage.unknownPromptRequests,
                             extractionJson = VolumeCompressionCodec.encodeExtraction(result.extraction),
                             rawContent = result.rawContent,
                             createdAt = existing?.createdAt ?: batchNow,
@@ -505,6 +509,8 @@ class VolumeCompressionCoordinator(
                             completionTokens = outcome.usage.completionTokens,
                             cachedTokens = outcome.usage.cachedTokens,
                             requestsWithUsage = outcome.usage.requestsWithUsage,
+                            unknownCacheRequests = outcome.usage.unknownCacheRequests,
+                            unknownPromptRequests = outcome.usage.unknownPromptRequests,
                             rawContent = outcome.rawContent,
                             errorKind = errorKindOf(outcome.failure),
                             errorMessage = outcome.failure.message,
@@ -600,7 +606,9 @@ class VolumeCompressionCoordinator(
                 completionTokens = record.completionTokens,
                 cachedTokens = record.cachedTokens,
                 requestCount = record.requestCount,
-                requestsWithUsage = record.requestsWithUsage
+                requestsWithUsage = record.requestsWithUsage,
+                unknownCacheRequests = record.unknownCacheRequests,
+                unknownPromptRequests = record.unknownPromptRequests
             )
         )
     }
@@ -629,6 +637,8 @@ class VolumeCompressionCoordinator(
                     completionTokens = snapshot.usage.completionTokens,
                     cachedTokens = snapshot.usage.cachedTokens,
                     requestsWithUsage = snapshot.usage.requestsWithUsage,
+                    unknownCacheRequests = snapshot.usage.unknownCacheRequests,
+                    unknownPromptRequests = snapshot.usage.unknownPromptRequests,
                     rawContent = snapshot.rawContent,
                     errorKind = snapshot.failure?.let { errorKindOf(it) },
                     errorMessage = snapshot.failure?.message ?: "",
@@ -654,6 +664,8 @@ class VolumeCompressionCoordinator(
             completionTokens = records.sumOf { it.completionTokens },
             cachedTokens = records.sumOf { it.cachedTokens },
             requestsWithUsage = records.sumOf { it.requestsWithUsage },
+            unknownCacheRequests = records.sumOf { it.unknownCacheRequests },
+            unknownPromptRequests = records.sumOf { it.unknownPromptRequests },
             time = System.currentTimeMillis()
         )
     }

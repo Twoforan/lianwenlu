@@ -50,7 +50,9 @@ class VolumeSummaryMigrationTest {
                 AppDatabase.MIGRATION_20_21,
                 AppDatabase.MIGRATION_21_22,
                 AppDatabase.MIGRATION_22_23,
-                AppDatabase.MIGRATION_23_24
+                AppDatabase.MIGRATION_23_24,
+                AppDatabase.MIGRATION_24_25,
+                AppDatabase.MIGRATION_25_26
             )
             .allowMainThreadQueries()
             .build()
@@ -103,13 +105,14 @@ class VolumeSummaryMigrationTest {
     }
 
     /**
-     * v19 → v20 → v21 → v22 → v23 → v24 逐级升级：
+     * v19 → v20 → v21 → v22 → v23 → v24 → v25 → v26 逐级升级：
      * 证明旧库不是只在 v19→v20 可用，而是一路升到当前版本后旧数据完整、压缩相关新表可读写、
      * 卷梗概「每卷仅一条当前生效版」唯一约束在真实升级后的库上生效。
-     * v23 新增的大纲「可更新」列、v24 新增的「常驻化」列默认关闭，旧条目行为不变。
+     * v23 新增的大纲「可更新」列、v24 新增的「常驻化」列默认关闭，旧条目行为不变；
+     * v26 新增的未知计数默认 0，旧记录的 Token 数值保持不变。
      */
     @Test
-    fun 旧库逐级升级到v24后旧数据保留且压缩相关表可用() {
+    fun 旧库逐级升级到v26后旧数据保留且压缩相关表可用() {
         createV19Database()
 
         val db = Room.databaseBuilder(context, AppDatabase::class.java, dbName)
@@ -118,13 +121,15 @@ class VolumeSummaryMigrationTest {
                 AppDatabase.MIGRATION_20_21,
                 AppDatabase.MIGRATION_21_22,
                 AppDatabase.MIGRATION_22_23,
-                AppDatabase.MIGRATION_23_24
+                AppDatabase.MIGRATION_23_24,
+                AppDatabase.MIGRATION_24_25,
+                AppDatabase.MIGRATION_25_26
             )
             .allowMainThreadQueries()
             .build()
 
         try {
-            assertEquals(24, db.openHelper.writableDatabase.version)
+            assertEquals(26, db.openHelper.writableDatabase.version)
             runBlocking {
                 // 旧数据保留
                 assertEquals("旧书", db.bookDao().getById(1)!!.title)
@@ -198,6 +203,10 @@ class VolumeSummaryMigrationTest {
                 val batches = db.volumeCompressionDao().batches(sessionId)
                 assertEquals(1, batches.size)
                 assertEquals(12, batches.single().promptTokens)
+                // v26：旧记录的未知计数默认 0，不改变原有 Token 数值
+                assertEquals(0, batches.single().unknownCacheRequests)
+                assertEquals(0, batches.single().unknownPromptRequests)
+                assertEquals(0, db.volumeCompressionDao().sessionById(sessionId)!!.unknownCacheRequests)
                 assertEquals(1, db.volumeCompressionDao().inFlightByBook(1).size)
             }
         } finally {

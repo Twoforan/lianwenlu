@@ -44,6 +44,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lianwenqi.app.AppContainer
+import com.lianwenqi.app.ai.CacheRateCalculator
+import com.lianwenqi.app.ai.CacheRateState
 import com.lianwenqi.app.data.CompressionOutlineScopeMode
 import com.lianwenqi.app.data.CompressionOutlineUpdateMode
 import com.lianwenqi.app.data.CompressionSourceMode
@@ -873,15 +875,23 @@ private fun CompressionProgressDialog(
                     }
                     Spacer(Modifier.height(8.dp))
                     Text("真实用量（来自服务商返回）", style = MaterialTheme.typography.titleSmall)
-                    Text(
-                        "输入 ${current.promptTokens} · 输出 ${current.completionTokens} · 缓存 ${current.cachedTokens}",
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                    if (current.requestsWithUsage < current.actualRequestCount) {
+                    compressionUsageLines(
+                        promptTokens = current.promptTokens,
+                        completionTokens = current.completionTokens,
+                        cachedTokens = current.cachedTokens,
+                        requestCount = current.actualRequestCount,
+                        requestsWithUsage = current.requestsWithUsage,
+                        unknownCacheRequests = current.unknownCacheRequests,
+                        unknownPromptRequests = current.unknownPromptRequests
+                    ).forEach { line ->
                         Text(
-                            "其中 ${current.actualRequestCount - current.requestsWithUsage} 次未返回用量，未虚报 Token",
+                            line,
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = if (line.startsWith("上游 usage 数据异常")) {
+                                MaterialTheme.colorScheme.error
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            }
                         )
                     }
                     Text(
@@ -988,13 +998,15 @@ private fun CompressionCandidateDialog(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Spacer(Modifier.height(8.dp))
-                    val hitRate = if (current.promptTokens > 0) {
-                        "${(current.cachedTokens * 100 / current.promptTokens)}%"
-                    } else {
-                        "—"
-                    }
-                    val usageLine = "真实用量：输入 ${current.promptTokens} · 输出 ${current.completionTokens} · " +
-                        "缓存命中率 $hitRate · 请求 ${current.actualRequestCount} 次"
+                    val usageLines = compressionUsageLines(
+                        promptTokens = current.promptTokens,
+                        completionTokens = current.completionTokens,
+                        cachedTokens = current.cachedTokens,
+                        requestCount = current.actualRequestCount,
+                        requestsWithUsage = current.requestsWithUsage,
+                        unknownCacheRequests = current.unknownCacheRequests,
+                        unknownPromptRequests = current.unknownPromptRequests
+                    )
                     if (editing) {
                         OutlinedTextField(
                             value = text,
@@ -1003,11 +1015,13 @@ private fun CompressionCandidateDialog(
                             label = { Text("确认前可编辑（仅影响生效内容，不改模型原文）") }
                         )
                         Spacer(Modifier.height(6.dp))
-                        Text(
-                            usageLine,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        usageLines.forEach { line ->
+                            Text(
+                                line,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     } else {
                         // 固定高度预览，内容在自己的框内滚动，用量附在梗概末尾
                         Surface(
@@ -1027,11 +1041,13 @@ private fun CompressionCandidateDialog(
                                 Spacer(Modifier.height(12.dp))
                                 HorizontalDivider()
                                 Spacer(Modifier.height(8.dp))
-                                Text(
-                                    usageLine,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
+                                usageLines.forEach { line ->
+                                    Text(
+                                        line,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
                             }
                         }
                     }
@@ -1106,16 +1122,18 @@ private fun CompressionSummaryDialog(
     val missing = freshness?.missingChapterCount ?: 0
     val stale = freshness?.stale ?: false
     val usage = session
-    val hitRate = if ((usage?.promptTokens ?: 0) > 0) {
-        "${usage!!.cachedTokens * 100 / usage!!.promptTokens}%"
+    val usageLines = if (usage == null) {
+        listOf("真实用量：无记录")
     } else {
-        "—"
-    }
-    val usageLine = if (usage == null) {
-        "真实用量：无记录"
-    } else {
-        "真实用量：输入 ${usage.promptTokens} · 输出 ${usage.completionTokens} · " +
-            "缓存命中率 $hitRate · 请求 ${usage.actualRequestCount} 次"
+        compressionUsageLines(
+            promptTokens = usage.promptTokens,
+            completionTokens = usage.completionTokens,
+            cachedTokens = usage.cachedTokens,
+            requestCount = usage.actualRequestCount,
+            requestsWithUsage = usage.requestsWithUsage,
+            unknownCacheRequests = usage.unknownCacheRequests,
+            unknownPromptRequests = usage.unknownPromptRequests
+        )
     }
 
     fun closeWithGuard() {
@@ -1183,11 +1201,13 @@ private fun CompressionSummaryDialog(
                         label = { Text("直接编辑生效内容") }
                     )
                     Spacer(Modifier.height(6.dp))
-                    Text(
-                        usageLine,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    usageLines.forEach { line ->
+                        Text(
+                            line,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 } else {
                     // 与候选确认弹窗一致：固定高度预览，内容在框内滚动，用量附在梗概末尾
                     Surface(
@@ -1204,11 +1224,13 @@ private fun CompressionSummaryDialog(
                             Spacer(Modifier.height(12.dp))
                             HorizontalDivider()
                             Spacer(Modifier.height(8.dp))
-                            Text(
-                                usageLine,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                            usageLines.forEach { line ->
+                                Text(
+                                    line,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                         }
                     }
                 }
@@ -1383,5 +1405,59 @@ private fun ConfigRadioRow(
     ) {
         RadioButton(selected = selected, onClick = onClick)
         Text(label, style = MaterialTheme.typography.bodyMedium)
+    }
+}
+
+/**
+ * 压缩任务的真实用量展示：原始 Token 与命中率状态分开呈现。
+ * 未知（供应商未提供）与明确 0 必须区分；分母缺失时不计算百分比。
+ */
+private fun compressionUsageLines(
+    promptTokens: Int,
+    completionTokens: Int,
+    cachedTokens: Int,
+    requestCount: Int,
+    requestsWithUsage: Int,
+    unknownCacheRequests: Int,
+    unknownPromptRequests: Int
+): List<String> {
+    val rate = CacheRateCalculator.ofAggregate(
+        promptTokens = promptTokens,
+        cachedTokens = cachedTokens,
+        requestCount = requestCount,
+        requestsWithUsage = requestsWithUsage,
+        unknownCacheRequests = unknownCacheRequests,
+        unknownPromptRequests = unknownPromptRequests
+    )
+    val promptText = when {
+        unknownPromptRequests <= 0 -> promptTokens.toString()
+        promptTokens > 0 -> "$promptTokens（另有 $unknownPromptRequests 次未提供）"
+        else -> "未知（$unknownPromptRequests 次未提供）"
+    }
+    val completionText = if (requestsWithUsage < requestCount) {
+        "$completionTokens（另有 ${requestCount - requestsWithUsage} 次未提供）"
+    } else {
+        completionTokens.toString()
+    }
+    val cachedText = when {
+        unknownCacheRequests <= 0 -> cachedTokens.toString()
+        cachedTokens > 0 -> "$cachedTokens（另有 $unknownCacheRequests 次未提供）"
+        else -> "未知（$unknownCacheRequests 次未提供）"
+    }
+    val rateText = when (rate.state) {
+        CacheRateState.NO_REQUEST -> "缓存命中率：—"
+        CacheRateState.UNKNOWN -> "缓存命中率：暂无供应商数据"
+        CacheRateState.INCOMPLETE -> "缓存命中率：统计口径不完整"
+        CacheRateState.ANOMALY ->
+            "上游 usage 数据异常（缓存读取 $cachedTokens / 总输入 $promptTokens）"
+        CacheRateState.ZERO, CacheRateState.HIT ->
+            "缓存命中率：${rate.percent}%（缓存读取 $cachedTokens / 总输入 $promptTokens）"
+    }
+    return buildList {
+        add("真实用量：输入 $promptText · 输出 $completionText · 缓存读取 $cachedText")
+        add("$rateText · 请求 $requestCount 次")
+        if (requestsWithUsage < requestCount) {
+            add("其中 ${requestCount - requestsWithUsage} 次未返回用量，未虚报 Token")
+        }
     }
 }

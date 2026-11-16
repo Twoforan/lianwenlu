@@ -54,6 +54,9 @@ data class AiRequest(
     val webSearch: Boolean = false
 )
 
+/** 数据库 / 展示层表示「供应商未提供输入 Token」的哨兵；与 cachedTokens 的 -1 语义一致 */
+const val PROMPT_TOKENS_UNKNOWN = -1
+
 data class AiResult(
     val success: Boolean,
     val content: String = "",
@@ -79,6 +82,15 @@ data class AiResult(
 
     /** 服务端是否返回了 usage 对象 */
     val usageReported: Boolean get() = cacheUsage.usageReported
+
+    /** 服务端是否明确提供了命中率分母（prompt / input token） */
+    val promptTokensReported: Boolean get() = cacheUsage.promptTokens != null
+
+    /**
+     * 落库用的输入 Token：只有供应商明确提供时才写真实值，
+     * 否则写 [PROMPT_TOKENS_UNKNOWN]，不能把本地估算值伪装成 usage。
+     */
+    val storedPromptTokens: Int get() = cacheUsage.promptTokens ?: PROMPT_TOKENS_UNKNOWN
 
     /** 实际解析成功的缓存字段路径；null 表示没有可识别的缓存字段 */
     val cacheField: String? get() = cacheUsage.cacheField
@@ -192,9 +204,10 @@ data class StreamOptions(@EncodeDefault @SerialName("include_usage") val include
 
 @Serializable
 data class Usage(
-    @SerialName("prompt_tokens") val promptTokens: Int = 0,
-    @SerialName("completion_tokens") val completionTokens: Int = 0,
-    @SerialName("total_tokens") val totalTokens: Int = 0,
+    /** 字段缺失为 null，与「明确为 0」区分；命中率分母缺失时不得补 0 */
+    @SerialName("prompt_tokens") val promptTokens: Int? = null,
+    @SerialName("completion_tokens") val completionTokens: Int? = null,
+    @SerialName("total_tokens") val totalTokens: Int? = null,
     /** 其中命中缓存的前缀 token 数（标准 OpenAI 字段） */
     @SerialName("prompt_tokens_details") val promptTokensDetails: PromptTokensDetails? = null,
     /** 部分中转站在 chat/completions 里复用 Responses 结构 */
@@ -354,9 +367,10 @@ data class ResponsesResponse(
 
 @Serializable
 data class ResponsesUsage(
-    @SerialName("input_tokens") val inputTokens: Int = 0,
-    @SerialName("output_tokens") val outputTokens: Int = 0,
-    @SerialName("total_tokens") val totalTokens: Int = 0,
+    /** 字段缺失为 null，与「明确为 0」区分；命中率分母缺失时不得补 0 */
+    @SerialName("input_tokens") val inputTokens: Int? = null,
+    @SerialName("output_tokens") val outputTokens: Int? = null,
+    @SerialName("total_tokens") val totalTokens: Int? = null,
     @SerialName("input_tokens_details") val inputTokensDetails: PromptTokensDetails? = null,
     /** 兼容部分中转站直接复用 chat/completions usage 结构 */
     @SerialName("prompt_tokens_details") val promptTokensDetails: PromptTokensDetails? = null,

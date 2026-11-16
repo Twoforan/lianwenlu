@@ -1,5 +1,6 @@
 package com.lianwenqi.app.data.entity
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
@@ -131,14 +132,20 @@ data class VolumeCompressionSession(
     val estimatedInputTokens: Int = 0,
     /** 预计输出 Token（启发式） */
     val estimatedOutputTokens: Int = 0,
-    /** 真实 usage：输入 Token */
+    /** 真实 usage：输入 Token（只含供应商明确报告的请求） */
     val promptTokens: Int = 0,
-    /** 真实 usage：输出 Token */
+    /** 真实 usage：输出 Token（只含供应商明确报告的请求） */
     val completionTokens: Int = 0,
-    /** 真实 usage：命中缓存的输入 Token（只来自服务商返回） */
+    /** 真实 usage：命中缓存的输入 Token（只来自服务商返回，未知不计入） */
     val cachedTokens: Int = 0,
     /** 有 usage 返回的请求数；用于区分「供应商没返回 usage」和「确实为 0」 */
     val requestsWithUsage: Int = 0,
+    /** 有 usage 但未提供缓存字段的请求数（未知，不是明确 0） */
+    @ColumnInfo(defaultValue = "0")
+    val unknownCacheRequests: Int = 0,
+    /** 有 usage 但未提供输入 Token 的请求数（命中率分母不完整） */
+    @ColumnInfo(defaultValue = "0")
+    val unknownPromptRequests: Int = 0,
     /** 本次任务产出的候选卷梗概 id；确认后清空或保留均可，界面按 id 查询 */
     val candidateSummaryId: Long? = null,
     /** 重新压缩时关联的旧任务 */
@@ -194,6 +201,12 @@ data class VolumeCompressionBatchRecord(
     val cachedTokens: Int = 0,
     /** 本次记录中有 usage 返回的真实请求数（其余请求只有 requestCount，不虚报 Token） */
     val requestsWithUsage: Int = 0,
+    /** 有 usage 但未提供缓存字段的请求数（未知，不是明确 0） */
+    @ColumnInfo(defaultValue = "0")
+    val unknownCacheRequests: Int = 0,
+    /** 有 usage 但未提供输入 Token 的请求数（命中率分母不完整） */
+    @ColumnInfo(defaultValue = "0")
+    val unknownPromptRequests: Int = 0,
     /** 结构化提取结果（规范化 JSON）；恢复时优先用它，不依赖原始响应 */
     val extractionJson: String = "",
     /** 模型原始响应（用于诊断；确认永不使用它作为正式内容） */

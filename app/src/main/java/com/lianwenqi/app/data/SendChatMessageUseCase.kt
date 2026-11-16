@@ -523,7 +523,7 @@ class SendChatMessageUseCase(
                 replyToId = request.replyToUserId,
                 variantIndex = request.variantIndex,
                 reasoning = result.reasoning,
-                promptTokens = result.promptTokens,
+                promptTokens = result.storedPromptTokens,
                 completionTokens = result.completionTokens,
                 cachedTokens = result.cachedTokens,
                 chapterId = request.chapterId,

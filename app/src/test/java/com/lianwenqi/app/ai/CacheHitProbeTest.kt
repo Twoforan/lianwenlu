@@ -8,7 +8,6 @@ import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertTrue
 import org.junit.Assume
 import org.junit.Test
-import java.util.Locale
 
 /**
  * 真实供应商缓存命中率对照探测（默认跳过）。
@@ -33,15 +32,24 @@ class CacheHitProbeTest {
     private data class ProbeRow(
         val scenario: String,
         val promptTokens: Int,
+        val reportedPromptTokens: Int?,
         val cachedTokens: Int?,
         val usageReported: Boolean,
         val cacheField: String?,
+        val rateState: String,
         val latencyMs: Long
     ) {
         val hitRate: String
-            get() = if (promptTokens > 0 && cachedTokens != null) {
-                String.format(Locale.US, "%.1f%%", cachedTokens * 100.0 / promptTokens)
-            } else "未知/未提供"
+            get() {
+                val rate = CacheRateCalculator.of(reportedPromptTokens, cachedTokens)
+                return when (rate.state) {
+                    CacheRateState.HIT, CacheRateState.ZERO -> "${rate.percent}%"
+                    CacheRateState.UNKNOWN -> "暂无供应商数据"
+                    CacheRateState.INCOMPLETE -> "统计口径不完整"
+                    CacheRateState.ANOMALY -> "上游 usage 数据异常"
+                    CacheRateState.NO_REQUEST -> "无请求"
+                }
+            }
     }
 
     private fun env(name: String, default: String = ""): String =
@@ -127,9 +135,14 @@ class CacheHitProbeTest {
             rows += ProbeRow(
                 scenario = scenario,
                 promptTokens = result.promptTokens,
+                reportedPromptTokens = result.cacheUsage.promptTokens,
                 cachedTokens = result.cachedTokens,
                 usageReported = result.usageReported,
                 cacheField = result.cacheField,
+                rateState = CacheRateCalculator.of(
+                    result.cacheUsage.promptTokens,
+                    result.cachedTokens
+                ).state.name,
                 latencyMs = latency
             )
             return result
@@ -176,11 +189,12 @@ class CacheHitProbeTest {
         probe("G 非流式", base + fixedLast)
         probe("G 流式", base + fixedLast, streaming = true)
 
-        println("| 测试场景 | promptTokens | cachedTokens | 命中率 | usageReported | cacheField | latencyMs |")
-        println("|---|---:|---:|---:|---|---|---:|")
+        println("| 测试场景 | promptTokens | 供应商输入 | cachedTokens | 命中率 | 状态 | usageReported | cacheField | latencyMs |")
+        println("|---|---:|---:|---:|---|---|---|---|---:|")
         rows.forEach {
             println(
-                "| ${it.scenario} | ${it.promptTokens} | ${it.cachedTokens ?: "未提供"} | ${it.hitRate} | " +
+                "| ${it.scenario} | ${it.promptTokens} | ${it.reportedPromptTokens ?: "未提供"} | " +
+                    "${it.cachedTokens ?: "未提供"} | ${it.hitRate} | ${it.rateState} | " +
                     "${it.usageReported} | ${it.cacheField ?: "-"} | ${it.latencyMs} |"
             )
         }
