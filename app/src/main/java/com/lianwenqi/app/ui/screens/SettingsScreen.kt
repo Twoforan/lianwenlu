@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.imePadding
@@ -76,7 +77,9 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lianwenqi.app.AppContainer
+import com.lianwenqi.app.ai.AiError
 import com.lianwenqi.app.ai.AiException
+import com.lianwenqi.app.ai.AiResult
 import com.lianwenqi.app.ai.ReasoningLevel
 import com.lianwenqi.app.data.entity.AiModel
 import com.lianwenqi.app.data.entity.ApiType
@@ -122,6 +125,28 @@ class SettingsViewModel(private val container: AppContainer) : ViewModel() {
                 .onSuccess { onResult(it, null) }
                 // 失败时展示按类型区分后的提示（未填 key / 非法字符 / 鉴权 / 超时 / 服务器错误…）
                 .onFailure { onResult(emptyList(), (it as? AiException)?.error?.userMessage ?: it.message) }
+        }
+
+    /**
+     * 真实对话测试：`/models` 能通不代表 `/chat/completions` 能通。
+     * 用该供应商下的模型真实发一次最小对话，并回传实际请求地址，便于定位 404。
+     */
+    fun testChat(provider: Provider, model: AiModel?, onResult: (Boolean, String) -> Unit) =
+        viewModelScope.launch {
+            if (model == null) {
+                onResult(false, "该供应商下还没有模型：请先点「添加模型」填写中转站返回的模型名（如 gemini-2.5-pro）")
+                return@launch
+            }
+            val url = container.aiClient.chatUrl(provider.baseUrl, provider.apiType)
+            val result = runCatching { container.aiClient.testChat(provider, model.name) }
+                .getOrElse { AiResult.fail((it as? AiException)?.error ?: AiError.fromThrowable(it)) }
+            val message = if (result.success) {
+                val reply = result.content.trim().replace(Regex("\\s+"), " ").take(40)
+                "对话测试成功（${model.name}）" + if (reply.isBlank()) "" else "，模型返回：$reply"
+            } else {
+                result.error?.userMessage ?: "对话测试失败"
+            }
+            onResult(result.success, "$message\n请求地址：$url")
         }
 
     fun saveModel(model: AiModel) = viewModelScope.launch { configRepository.saveModel(model) }
@@ -316,7 +341,8 @@ fun SettingsScreen(
                         onEditModel = { editModel = it },
                         onDeleteModel = { vm.deleteModel(it.id) },
                         onSetActive = { vm.setActiveModel(it.id) },
-                        onFetchModels = { p, cb -> vm.fetchModels(p, cb) }
+                        onFetchModels = { p, cb -> vm.fetchModels(p, cb) },
+                        onTestChat = { p, m, cb -> vm.testChat(p, m, cb) }
                     )
                     1 -> PromptsTab(
                         prompts = prompts,
@@ -805,11 +831,13 @@ private fun ProvidersTab(
     onEditModel: (AiModel) -> Unit,
     onDeleteModel: (AiModel) -> Unit,
     onSetActive: (AiModel) -> Unit,
-    onFetchModels: (Provider, (List<String>, String?) -> Unit) -> Unit
+    onFetchModels: (Provider, (List<String>, String?) -> Unit) -> Unit,
+    onTestChat: (Provider, AiModel?, (Boolean, String) -> Unit) -> Unit
 ) {
     val context = LocalContext.current
-    // 「测试读取模型」正在测试的供应商 id，与测试结果文案（key = provider id）
+    // 「测试读取模型 / 测试对话」正在测试的供应商 id，与测试结果文案（key = provider id）
     var testingId by remember { mutableStateOf<Long?>(null) }
+    var testingChatId by remember { mutableStateOf<Long?>(null) }
     val testResults = remember { mutableStateMapOf<Long, String>() }
     val testOk = remember { mutableStateMapOf<Long, Boolean>() }
 
@@ -885,11 +913,20 @@ private fun ProvidersTab(
                         }
                     }
                     Spacer(Modifier.height(4.dp))
-                    Row {
-                        OutlinedButton(onClick = { onAddModel(p) }) { Text("添加模型") }
-                        Spacer(Modifier.width(8.dp))
+                    // 三个操作均分同一行；窄屏时压缩按钮内边距，保证文字不换行
+                    val compactPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = { onAddModel(p) },
+                            modifier = Modifier.weight(1f),
+                            contentPadding = compactPadding
+                        ) {
+                            Text("添加模型", style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                        }
                         OutlinedButton(
                             enabled = testingId != p.id,
+                            modifier = Modifier.weight(1f),
+                            contentPadding = compactPadding,
                             onClick = {
                                 // 真实请求一次模型列表：能连上并解析成功即视为连通
                                 testingId = p.id
@@ -898,16 +935,48 @@ private fun ProvidersTab(
                                     testingId = null
                                     val ok = err == null
                                     testOk[p.id] = ok
+                                    val hint = if (p.baseUrl.trim().trimEnd('/').endsWith("/v1")) ""
+                                    else "；可尝试在 baseUrl 后面添加 /v1 试试看"
                                     testResults[p.id] = when {
                                         // 直接展示错误原因（未填写 API Key / 含非法字符 / 鉴权失败 / 超时…）
-                                        err != null -> err
-                                        list.isEmpty() -> "连接成功，但未读取到模型（请检查 apiKey / baseUrl）"
+                                        err != null -> err + hint
+                                        list.isEmpty() -> "连接成功，但未读取到模型（请检查 apiKey / baseUrl）" + hint
                                         else -> "连接成功，读取到 ${list.size} 个模型"
                                     }
                                     Toast.makeText(context, testResults[p.id], Toast.LENGTH_SHORT).show()
                                 }
                             }
-                        ) { Text(if (testingId == p.id) "测试中…" else "测试读取模型") }
+                        ) {
+                            Text(
+                                if (testingId == p.id) "测试中…" else "测试读取模型",
+                                style = MaterialTheme.typography.labelMedium,
+                                maxLines = 1
+                            )
+                        }
+                        OutlinedButton(
+                            enabled = testingChatId != p.id,
+                            modifier = Modifier.weight(1f),
+                            contentPadding = compactPadding,
+                            onClick = {
+                                // 真实发一次对话：/models 能通不代表 /chat/completions 能通（404 多为此处）
+                                val model = providerModels.firstOrNull { it.id == activeModelId }
+                                    ?: providerModels.firstOrNull()
+                                testingChatId = p.id
+                                testResults.remove(p.id)
+                                onTestChat(p, model) { ok, msg ->
+                                    testingChatId = null
+                                    testOk[p.id] = ok
+                                    testResults[p.id] = msg
+                                    Toast.makeText(context, msg.lineSequence().first(), Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        ) {
+                            Text(
+                                if (testingChatId == p.id) "测试对话中…" else "测试对话",
+                                style = MaterialTheme.typography.labelMedium,
+                                maxLines = 1
+                            )
+                        }
                     }
                     testResults[p.id]?.let { msg ->
                         Spacer(Modifier.height(6.dp))

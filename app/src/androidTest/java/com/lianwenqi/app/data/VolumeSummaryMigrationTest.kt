@@ -52,7 +52,13 @@ class VolumeSummaryMigrationTest {
                 AppDatabase.MIGRATION_22_23,
                 AppDatabase.MIGRATION_23_24,
                 AppDatabase.MIGRATION_24_25,
-                AppDatabase.MIGRATION_25_26
+                AppDatabase.MIGRATION_25_26,
+                AppDatabase.MIGRATION_26_27,
+                AppDatabase.MIGRATION_27_28,
+                AppDatabase.MIGRATION_28_29,
+                AppDatabase.MIGRATION_29_30,
+                AppDatabase.MIGRATION_30_31,
+                AppDatabase.MIGRATION_31_32
             )
             .allowMainThreadQueries()
             .build()
@@ -123,13 +129,19 @@ class VolumeSummaryMigrationTest {
                 AppDatabase.MIGRATION_22_23,
                 AppDatabase.MIGRATION_23_24,
                 AppDatabase.MIGRATION_24_25,
-                AppDatabase.MIGRATION_25_26
+                AppDatabase.MIGRATION_25_26,
+                AppDatabase.MIGRATION_26_27,
+                AppDatabase.MIGRATION_27_28,
+                AppDatabase.MIGRATION_28_29,
+                AppDatabase.MIGRATION_29_30,
+                AppDatabase.MIGRATION_30_31,
+                AppDatabase.MIGRATION_31_32
             )
             .allowMainThreadQueries()
             .build()
 
         try {
-            assertEquals(26, db.openHelper.writableDatabase.version)
+            assertEquals(32, db.openHelper.writableDatabase.version)
             runBlocking {
                 // 旧数据保留
                 assertEquals("旧书", db.bookDao().getById(1)!!.title)

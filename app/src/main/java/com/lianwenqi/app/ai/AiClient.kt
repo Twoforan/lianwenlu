@@ -3,6 +3,7 @@ package com.lianwenqi.app.ai
 import android.util.Log
 import com.lianwenqi.app.data.entity.ApiType
 import com.lianwenqi.app.data.entity.ChatRole
+import com.lianwenqi.app.data.entity.Provider
 import com.lianwenqi.app.util.extractLeakedToolCalls
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -104,6 +105,33 @@ class AiClient(
             }
         }
     }
+
+    /**
+     * 当前配置下实际请求的对话地址。
+     * 设置页「测试对话」会把它展示出来，便于直接核对 baseUrl 是否少了 /v1、接口类型是否选错。
+     */
+    fun chatUrl(baseUrl: String, apiType: ApiType): String = endpoint(baseUrl, apiType)
+
+    /**
+     * 真实对话连通性测试：发送一次最小的非流式请求，
+     * 同时验证 baseUrl + apiKey + 接口类型 + 模型名 四项是否都可用。
+     *
+     * 与「测试读取模型」不同：`/models` 能通并不代表 `/chat/completions` 能通，
+     * 中转站经常只实现其中一部分，所以必须真正发一次对话请求才能确认。
+     */
+    suspend fun testChat(provider: Provider, modelName: String): AiResult =
+        chat(
+            endpoint = ModelEndpoint(
+                provider = provider,
+                modelName = modelName,
+                apiType = provider.apiType,
+                temperature = 0.3f,
+                // 0 表示不发送 max_tokens，避免测试被输出上限截断
+                maxTokens = 0,
+                reasoningEnabled = false
+            ),
+            turns = listOf(ChatTurn(ChatRole.USER, "连通性测试：请只回复 OK"))
+        )
 
     /**
      * 发送对话请求。

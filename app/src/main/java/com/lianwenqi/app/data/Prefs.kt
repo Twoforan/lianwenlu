@@ -115,6 +115,18 @@ class Prefs(private val context: Context) {
         // AI 聊天页勾选的 AI 工具 id 集合（可多选，跨会话保持）
         val aiChatTools = stringSetPreferencesKey("ai_chat_tools")
 
+        // AI 聊天页运行模式：NORMAL（普通聊天）/ AGENT（AI 全权接管）；只影响页面展示，不改会话数据
+        val aiChatMode = stringPreferencesKey("ai_chat_mode")
+
+        // F6：Agent 写入权限策略；默认每次操作都询问
+        val agentWritePolicy = stringPreferencesKey("agent_write_policy")
+
+        // Agent 新任务的工作模式：AUTO（自动）/ PLAN（计划）；创建任务时固化到任务
+        val agentWorkMode = stringPreferencesKey("agent_work_mode")
+
+        // Agent 模式上次打开的会话 id（0 表示无）；退出重进后恢复该会话
+        val agentLastSessionId = longPreferencesKey("agent_last_session_id")
+
         // 前缀词管理：上下文前缀化 / 大纲前缀化（均默认开启）
         val prefixContextEnabled = booleanPreferencesKey("prefix_context_enabled")
         val prefixOutlineEnabled = booleanPreferencesKey("prefix_outline_enabled")
@@ -253,6 +265,22 @@ class Prefs(private val context: Context) {
 
     /** AI 聊天页勾选的 AI 工具 id 集合 */
     val aiChatTools: Flow<Set<String>> = context.dataStore.data.map { it[K.aiChatTools] ?: emptySet() }
+
+    /** AI 聊天页运行模式：NORMAL / AGENT；只影响展示，不修改任何会话数据 */
+    val aiChatMode: Flow<String> = context.dataStore.data.map { it[K.aiChatMode] ?: "NORMAL" }
+
+    /** F6：Agent 写入权限策略；默认 ASK_EVERY_TIME */
+    val agentWritePolicy: Flow<String> = context.dataStore.data.map {
+        it[K.agentWritePolicy] ?: "ASK_EVERY_TIME"
+    }
+
+    /** Agent 模式上次打开的会话 id（0 表示无） */
+    val agentLastSessionId: Flow<Long> = context.dataStore.data.map { it[K.agentLastSessionId] ?: 0L }
+
+    /** Agent 新任务工作模式；默认计划模式，保持原有流程 */
+    val agentWorkMode: Flow<String> = context.dataStore.data.map {
+        it[K.agentWorkMode] ?: "PLAN"
+    }
 
     /** 「上下文前缀化」：勾选的书籍 / 章节写进会话前缀后只增不减（默认开启） */
     val prefixContextEnabled: Flow<Boolean> =
@@ -487,6 +515,14 @@ class Prefs(private val context: Context) {
     suspend fun setAiToolOutlineEnabled(v: Boolean) = writePrefs { it[K.aiToolOutlineEnabled] = v }
     suspend fun setAiToolChapterEnabled(v: Boolean) = writePrefs { it[K.aiToolChapterEnabled] = v }
     suspend fun setAiChatTools(v: Set<String>) = writePrefs { it[K.aiChatTools] = v }
+    suspend fun setAiChatMode(v: String) = writePrefs { it[K.aiChatMode] = v }
+
+    /** F6：修改 Agent 写入权限策略；只影响后续写入提议，不回溯已确认操作 */
+    suspend fun setAgentWritePolicy(v: String) = writePrefs { it[K.agentWritePolicy] = v }
+    suspend fun setAgentLastSessionId(v: Long) = writePrefs { it[K.agentLastSessionId] = v }
+
+    /** 修改 Agent 新任务工作模式；不改变已创建任务固化的模式 */
+    suspend fun setAgentWorkMode(v: String) = writePrefs { it[K.agentWorkMode] = v }
     suspend fun setPrefixContextEnabled(v: Boolean) = writePrefs { it[K.prefixContextEnabled] = v }
     suspend fun setPrefixOutlineEnabled(v: Boolean) = writePrefs { it[K.prefixOutlineEnabled] = v }
     suspend fun setPrefixCustomText(v: String) = writePrefs { it[K.prefixCustomText] = v }

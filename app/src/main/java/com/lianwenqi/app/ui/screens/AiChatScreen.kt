@@ -82,6 +82,7 @@ import androidx.compose.material.icons.filled.NoteAdd
 import androidx.compose.material.icons.filled.ReceiptLong
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
@@ -108,6 +109,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
@@ -131,6 +133,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -154,6 +157,8 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import coil.compose.AsyncImage
+import com.lianwenqi.app.agent.ui.AgentChatMode
+import com.lianwenqi.app.agent.ui.AgentChatScreen
 import com.lianwenqi.app.ai.CacheRateCalculator
 import com.lianwenqi.app.ai.CacheRateState
 import com.lianwenqi.app.ai.GenerationDialog
@@ -190,15 +195,46 @@ import com.lianwenqi.app.util.AI_TOOL_WRITE_OUTLINE
 import com.lianwenqi.app.util.AiToolInfo
 import com.lianwenqi.app.util.TextTool
 import com.lianwenqi.app.util.detectImportKindHint
+import com.lianwenqi.app.appContainer
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-@OptIn(ExperimentalMaterial3Api::class)
+/**
+ * AI 聊天页入口：按模式分发到普通聊天或 Agent 模式。
+ *
+ * 模式只保存在 DataStore 偏好里，不修改任何会话数据；
+ * 普通模式仍由原来的 [NormalAiChatScreen] 承载，行为保持不变。
+ */
 @Composable
 fun AiChatScreen(initialBookId: Long?) {
+    val context = LocalContext.current
+    val prefs = remember(context) { context.appContainer.prefs }
+    val mode by prefs.aiChatMode.collectAsState(initial = AgentChatMode.NORMAL)
+    val scope = rememberCoroutineScope()
+    val onModeChange: (String) -> Unit = { next ->
+        if (next != mode) scope.launch { prefs.setAiChatMode(next) }
+    }
+    if (mode == AgentChatMode.AGENT) {
+        AgentChatScreen(onModeChange = onModeChange)
+    } else {
+        NormalAiChatScreen(
+            initialBookId = initialBookId,
+            mode = mode,
+            onModeChange = onModeChange
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun NormalAiChatScreen(
+    initialBookId: Long?,
+    mode: String,
+    onModeChange: (String) -> Unit
+) {
     val vm = appViewModel(key = "ai-main") { AiChatViewModel(it, initialBookId) }
     val models by vm.models.collectAsState()
     val providers by vm.providers.collectAsState()
@@ -304,7 +340,7 @@ fun AiChatScreen(initialBookId: Long?) {
         topBar = {
             TopAppBar(
                 title = {
-                    // 模型选择移到标题右侧，与「AI 聊天」同排
+                    // 模型选择与「AI 聊天」同排
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("AI 聊天")
                         Spacer(Modifier.width(8.dp))
@@ -322,6 +358,20 @@ fun AiChatScreen(initialBookId: Long?) {
                         Icon(Icons.Filled.Add, contentDescription = "新对话")
                     }
                     TextButton(onClick = { showSessions = true }) { Text("会话") }
+                    // 机器人图标与开关固定在最右侧
+                    Icon(
+                        Icons.Filled.SmartToy,
+                        contentDescription = "Agent 模式",
+                        modifier = Modifier.size(20.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Switch(
+                        checked = mode == AgentChatMode.AGENT,
+                        onCheckedChange = { on ->
+                            if (on) onModeChange(AgentChatMode.AGENT)
+                        },
+                        modifier = Modifier.scale(0.75f)
+                    )
                 }
             )
         }
@@ -1304,8 +1354,8 @@ fun AiAssistantDrawer(
     }
 }
 
-/** 需要读取纯文本的附件 MIME 类型 */
-private val TEXT_FILE_MIME_TYPES = arrayOf(
+/** 需要读取纯文本的附件 MIME 类型（普通聊天与 Agent 输入栏共用） */
+internal val TEXT_FILE_MIME_TYPES = arrayOf(
     "text/*",
     "application/json",
     "application/xml",
@@ -1314,7 +1364,7 @@ private val TEXT_FILE_MIME_TYPES = arrayOf(
 )
 
 /** 从 Uri 查询展示名，取不到时回落到路径末段 */
-private fun displayNameOf(context: Context, uri: Uri): String {
+internal fun displayNameOf(context: Context, uri: Uri): String {
     val name = runCatching {
         context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
             val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
@@ -1326,7 +1376,7 @@ private fun displayNameOf(context: Context, uri: Uri): String {
 }
 
 /** 待发送附件的显示名：带类型前缀，过长时截断 */
-private fun attachmentLabel(attachment: ChatAttachment): String {
+internal fun attachmentLabel(attachment: ChatAttachment): String {
     val prefix = when (attachment.type) {
         "image" -> "图片："
         "link" -> "链接："
@@ -1336,7 +1386,7 @@ private fun attachmentLabel(attachment: ChatAttachment): String {
 }
 
 /** 待发送附件的类型图标 */
-private fun attachmentIcon(attachment: ChatAttachment) = when (attachment.type) {
+internal fun attachmentIcon(attachment: ChatAttachment) = when (attachment.type) {
     "image" -> Icons.Filled.Image
     "link" -> Icons.Filled.Link
     else -> Icons.Filled.AttachFile
@@ -1347,7 +1397,7 @@ private fun attachmentIcon(attachment: ChatAttachment) = when (attachment.type) 
  * 只有点「删除」才会真正移除附件，点「关闭」或遮罩只是退出预览。
  */
 @Composable
-private fun AttachmentPreviewDialog(
+internal fun AttachmentPreviewDialog(
     attachment: ChatAttachment,
     onDismiss: () -> Unit,
     onDelete: () -> Unit
@@ -2601,9 +2651,10 @@ private val ContextColumnWidth = 56.dp
 
 /** 上下文选择（对齐设计稿）：全选 / 梗概 / 正文 + 分卷章节树（章节 / 梗概 / 正文 三列） */
 @Composable
-private fun ContextPicker(
+internal fun ContextPicker(
     chapters: List<Chapter>,
     volumes: List<Volume>,
+    title: String = "选择上下文",
     selected: Set<Long>,
     summarySelected: Set<Long>,
     contentSelected: Set<Long>,
@@ -2655,7 +2706,7 @@ private fun ContextPicker(
                 )
             }
             Spacer(Modifier.width(10.dp))
-            Text("选择上下文", color = PickerInk, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+            Text(title, color = PickerInk, fontSize = 17.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.weight(1f))
             Text(
                 "已选 ${selectedVolumeSummaryIds.size} 卷 · ${selected.size} 章",
@@ -2839,7 +2890,7 @@ private fun GenChapterRow(
 
 /** 大纲内容选择（对齐设计稿）：按分类（人设 / 世界观 / 故事大纲 / 灵感库 / 自定义标签）分组整组勾选 */
 @Composable
-private fun OutlinePicker(
+internal fun OutlinePicker(
     items: List<OutlineItem>,
     selected: Set<Long>,
     onToggleAll: (Set<Long>) -> Unit,
@@ -4130,7 +4181,7 @@ private fun MessageCard(
  * 侧边 AI 抽屉的发送按钮已挪到底部操作行，故该入口传 [showSend] = false 隐藏内嵌圆形发送按钮。
  */
 @Composable
-private fun ChatComposer(
+internal fun ChatComposer(
     value: String,
     onValueChange: (String) -> Unit,
     placeholder: String,
@@ -4803,7 +4854,7 @@ internal fun BookPickerDialog(
 
 /** 章节多选弹窗：按分卷筛选 + 搜索标题 / 内容 / 梗概 */
 @Composable
-private fun ChapterPickerDialog(
+internal fun ChapterPickerDialog(
     chapters: List<Chapter>,
     volumes: List<Volume>,
     selected: Set<Long>,
@@ -4906,7 +4957,7 @@ private fun ChapterPickerDialog(
 
 /** 大纲多选弹窗（对齐设计稿）：搜索标题 / 内容 + 分类标签筛选 + 全选 + 取消 / 确定 */
 @Composable
-private fun OutlinePickerDialog(
+internal fun OutlinePickerDialog(
     items: List<OutlineItem>,
     selected: Set<Long>,
     onToggle: (Long) -> Unit,

@@ -244,6 +244,14 @@ interface ChapterDao {
     @Query("UPDATE chapter SET title = :title, summary = :summary, content = :content, lastCursor = :cursor, updatedAt = :time WHERE id = :id")
     suspend fun saveContent(id: Long, title: String, summary: String, content: String, cursor: Int, time: Long)
 
+    /** F6：只更新梗概，保留标题 / 正文 / 光标，避免为写入梗概加载整章正文 */
+    @Query("UPDATE chapter SET summary = :summary, updatedAt = :time WHERE id = :id")
+    suspend fun updateSummary(id: Long, summary: String, time: Long)
+
+    /** F6：只更新正文，保留标题 / 梗概 / 光标 */
+    @Query("UPDATE chapter SET content = :content, updatedAt = :time WHERE id = :id")
+    suspend fun updateContent(id: Long, content: String, time: Long)
+
     @Query("UPDATE chapter SET sortOrder = :order WHERE id = :id")
     suspend fun setOrder(id: Long, order: Int)
 

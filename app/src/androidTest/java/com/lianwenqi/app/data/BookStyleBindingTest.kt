@@ -111,7 +111,7 @@ class BookStyleBindingTest {
         val profile = createProfile()
         val sourceId = createBook(title = "原书", styleId = profile.id)
 
-        val copyId = bookRepo.copyBookOutline(sourceId)
+        val copyId = bookRepo.copyBook(sourceId, copyOutline = true, copySummaries = false, copyContent = false)
 
         val copy = bookRepo.getBook(copyId)!!
         assertEquals(profile.id, copy.styleId)
@@ -123,7 +123,7 @@ class BookStyleBindingTest {
     fun 复制未绑定文风的书籍仍为零() = runBlocking {
         val sourceId = createBook(title = "空白书")
 
-        val copyId = bookRepo.copyBookOutline(sourceId)
+        val copyId = bookRepo.copyBook(sourceId, copyOutline = true, copySummaries = false, copyContent = false)
 
         assertEquals(0L, bookRepo.getBook(copyId)!!.styleId)
     }

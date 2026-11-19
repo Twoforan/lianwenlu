@@ -149,6 +149,8 @@ class MemoryRepositoryTest {
         override suspend fun saveContent(
             id: Long, title: String, summary: String, content: String, cursor: Int, time: Long
         ) = error("未使用")
+        override suspend fun updateSummary(id: Long, summary: String, time: Long) = error("未使用")
+        override suspend fun updateContent(id: Long, content: String, time: Long) = error("未使用")
         override suspend fun setOrder(id: Long, order: Int) = error("未使用")
         override suspend fun moveToVolume(id: Long, volumeId: Long?, order: Int) = error("未使用")
         override suspend fun deleteById(id: Long) = error("未使用")

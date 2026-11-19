@@ -135,7 +135,7 @@ class StyleRepositoryTest {
         val src = bookRepo.createBook("原书", "简介", null, 0, "第%n卷", "第%n章")
         styleRepo.bindBook(src, styleId)
 
-        val newId = bookRepo.copyBookOutline(src)
+        val newId = bookRepo.copyBook(src, copyOutline = true, copySummaries = false, copyContent = false)
         val copied = db.bookDao().getById(newId)!!
         assertEquals(styleId, copied.styleId)
         assertEquals(1, styleRepo.allProfiles().size)

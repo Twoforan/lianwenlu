@@ -1,5 +1,10 @@
 package com.lianwenqi.app.ai
 
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+
 /**
  * AI 请求错误的分类。
  *
@@ -17,8 +22,26 @@ sealed class AiError(val userMessage: String) {
     /** SocketTimeoutException：连接 / 读取超时 */
     class Timeout : AiError("请求超时")
 
-    /** 非 2xx 的 HTTP 响应（401 / 403 已单独归为 Unauthorized） */
-    class Server(val code: Int, val body: String?) : AiError("服务器返回错误：$code")
+    /**
+     * 非 2xx 的 HTTP 响应（401 / 403 已单独归为 Unauthorized）。
+     *
+     * 404 最常见的原因是「请求地址不存在」：baseUrl 少了 /v1，或接口类型（chat completions /
+     * responses / anthropic messages）与中转站实际支持的不一致。这里把服务端返回的具体
+     * message 一并带出来，避免用户只看到一句「服务器返回错误：404」无法定位。
+     */
+    class Server(val code: Int, val body: String?) : AiError(
+        buildString {
+            if (code == 404) {
+                append("服务器返回 404（请求地址不存在）")
+            } else {
+                append("服务器返回错误：$code")
+            }
+            errorDetailOf(body)?.let { append("：").append(it) }
+            if (code == 404) {
+                append("。请检查：baseUrl 是否需要以 /v1 结尾、接口类型是否与中转站一致")
+            }
+        }
+    )
 
     /** kotlinx.serialization 反序列化失败 */
     class Parse(val cause: Throwable) : AiError("响应格式异常")
@@ -43,6 +66,25 @@ sealed class AiError(val userMessage: String) {
             else -> Unknown(e)
         }
     }
+}
+
+/**
+ * 从服务端错误响应里提取一句可读的 message。
+ * 兼容 {"error":{"message":"..."}} / {"message":"..."}；纯文本直传；
+ * HTML 错误页（如网关 404 页）不展示，避免把整段标签塞进提示。
+ */
+private fun errorDetailOf(body: String?): String? {
+    val text = body?.trim().orEmpty()
+    if (text.isEmpty()) return null
+    val obj = runCatching { Json.parseToJsonElement(text) as? JsonObject }.getOrNull()
+    val message = ((obj?.get("error") as? JsonObject)?.get("message") as? JsonPrimitive)?.contentOrNull
+        ?: (obj?.get("message") as? JsonPrimitive)?.contentOrNull
+    val detail = message ?: text.takeUnless { it.startsWith("<") }
+    return detail
+        ?.replace(Regex("\\s+"), " ")
+        ?.trim()
+        ?.take(160)
+        ?.takeIf { it.isNotBlank() }
 }
 
 /**

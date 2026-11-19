@@ -154,6 +154,8 @@ class AiChatViewModel(
     private val configRepository = container.configRepository
     private val prefs = container.prefs
     private val styleRepository = container.styleRepository
+    /** 梗概 / 正文生成的共享入口；Agent 生成工具复用同一实现 */
+    private val chapterGenerationService = container.chapterGenerationService
 
     /** 「发送消息」用例：组装上下文 → 流式请求 → 写回助手消息 → 解析工具区块 */
     private val sendChatMessage = SendChatMessageUseCase(chatRepository, configRepository)
@@ -1095,23 +1097,18 @@ class AiChatViewModel(
         // 「同时生成梗概」时梗概子调用保持静默，只把正文输出实时回显到对话中
         generationStage.value = "生成文本中"
         beginGenerationStreaming(round.userId)
-        val result = configRepository.sendToModel(
-            modelId,
-            AiRequest(turns = turns, model = "", temperature = 0f, maxTokens = 0),
+        val completion = chapterGenerationService.complete(
+            modelId = modelId,
+            turns = turns,
             onDelta = generationDeltaHandler()
         )
         if (generationCancelled) return
-        if (!result.success) {
-            generationMessage.value = result.error?.userMessage ?: "生成失败"
+        if (!completion.success) {
+            generationMessage.value = completion.errorMessage.ifBlank { "生成失败" }
             _generationState.value = FlowState.Failed
             return
         }
-        val raw = result.content.trim()
-        if (raw.isBlank()) {
-            generationMessage.value = "模型返回空内容"
-            _generationState.value = FlowState.Failed
-            return
-        }
+        val raw = completion.text
         val enforced = enforceWordRange(raw, plan.contentWordRange)
         // 落库的是截断 / 校正后的正文：把回显内容同步成最终文本，避免完成后内容突变
         if (streamingContent.value.isNotEmpty()) streamingContent.value = enforced.text
@@ -1125,9 +1122,9 @@ class AiChatViewModel(
             sid = sid,
             round = round,
             text = enforced.text,
-            promptTokens = result.storedPromptTokens,
-            completionTokens = result.completionTokens,
-            cachedTokens = result.cachedTokens,
+            promptTokens = completion.promptTokens,
+            completionTokens = completion.completionTokens,
+            cachedTokens = completion.cachedTokens,
             chapterId = chapterId,
             promptLog = buildGenerationLog(
                 modelId = modelId,
@@ -1416,14 +1413,15 @@ class AiChatViewModel(
     ): SummaryCall {
         val modelId = activeModelId.value
         if (modelId <= 0L) return SummaryCall.Failed("请先在设置中配置并选择一个模型")
-        val result = configRepository.sendToModel(
-            modelId,
-            AiRequest(turns = turns, model = "", temperature = 0f, maxTokens = 0),
+        val completion = chapterGenerationService.complete(
+            modelId = modelId,
+            turns = turns,
             onDelta = if (stream) generationDeltaHandler() else null
         )
-        if (!result.success) return SummaryCall.Failed(result.error?.userMessage ?: "生成梗概失败")
-        val raw = result.content.trim()
-        if (raw.isBlank()) return SummaryCall.Failed("梗概生成失败：模型返回空内容")
+        if (!completion.success) {
+            return SummaryCall.Failed(completion.errorMessage.ifBlank { "生成梗概失败" })
+        }
+        val raw = completion.text
         // 标签解析失败时绝不能丢梗概：解析不出来就把原始文本当梗概
         val structured = if (withTags) SummaryWithTagsCodec.parse(raw) else null
         val synopsis = structured?.synopsis ?: raw
@@ -1457,9 +1455,9 @@ class AiChatViewModel(
         }
         return SummaryCall.Ok(
             enforced.text,
-            promptTokens = result.storedPromptTokens,
-            completionTokens = result.completionTokens,
-            cachedTokens = result.cachedTokens,
+            promptTokens = completion.promptTokens,
+            completionTokens = completion.completionTokens,
+            cachedTokens = completion.cachedTokens,
             tags = tags
         )
     }

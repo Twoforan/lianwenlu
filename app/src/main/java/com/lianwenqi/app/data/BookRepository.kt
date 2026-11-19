@@ -368,6 +368,16 @@ class BookRepository(
         chapterDao.saveContent(id, title, summary, content, cursor, System.currentTimeMillis())
     }
 
+    /** F6：Agent 受控写入只改梗概，保留标题 / 正文 / 光标 */
+    suspend fun updateChapterSynopsis(id: Long, summary: String) {
+        chapterDao.updateSummary(id, summary, System.currentTimeMillis())
+    }
+
+    /** F6：Agent 受控写入只改正文，保留标题 / 梗概 / 光标 */
+    suspend fun updateChapterContent(id: Long, content: String) {
+        chapterDao.updateContent(id, content, System.currentTimeMillis())
+    }
+
     suspend fun deleteChapter(bookId: Long, chapterId: Long) {
         chapterDao.deleteById(chapterId)
         // 同步清理该章节的全部向量块：删章节即意味着「不要了」，残留在向量库会污染后续检索

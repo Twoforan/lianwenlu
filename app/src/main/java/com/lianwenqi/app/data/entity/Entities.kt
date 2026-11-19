@@ -200,9 +200,10 @@ data class Prompt(
 )
 
 enum class ApiType(val label: String) {
-    CHAT_COMPLETIONS("chat completions"),
-    RESPONSES("responses"),
-    ANTHROPIC_MESSAGES("anthropic messages")
+    /** 中转站 / 绝大多数兼容接口只实现这一种，选错会直接 404 */
+    CHAT_COMPLETIONS("OpenAI Chat Completions（中转站通用）"),
+    RESPONSES("OpenAI Responses（仅部分官方接口）"),
+    ANTHROPIC_MESSAGES("Anthropic Messages（Claude 原生）")
 }
 
 /** AI 供应商 */

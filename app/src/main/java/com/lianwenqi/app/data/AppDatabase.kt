@@ -8,6 +8,21 @@ import androidx.room.RoomDatabase
 import androidx.room.TypeConverters
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import com.lianwenqi.app.agent.data.dao.AgentDao
+import com.lianwenqi.app.agent.data.dao.AgentReadDao
+import com.lianwenqi.app.agent.data.dao.AgentTaskDao
+import com.lianwenqi.app.agent.data.entity.AgentClarification
+import com.lianwenqi.app.agent.data.entity.AgentEvent
+import com.lianwenqi.app.agent.data.entity.AgentExecutionNode
+import com.lianwenqi.app.agent.data.entity.AgentMessage
+import com.lianwenqi.app.agent.data.entity.AgentModelRequest
+import com.lianwenqi.app.agent.data.entity.AgentRecoveryLog
+import com.lianwenqi.app.agent.data.entity.AgentSession
+import com.lianwenqi.app.agent.data.entity.AgentSessionReference
+import com.lianwenqi.app.agent.data.entity.AgentTask
+import com.lianwenqi.app.agent.data.entity.AgentTaskReference
+import com.lianwenqi.app.agent.data.entity.AgentToolExecution
+import com.lianwenqi.app.agent.data.entity.AgentWriteOperation
 import com.lianwenqi.app.data.dao.AiModelDao
 import com.lianwenqi.app.data.dao.BookDao
 import com.lianwenqi.app.data.dao.BookGroupDao
@@ -72,9 +87,21 @@ import com.lianwenqi.app.data.entity.VolumeSummary
         VolumeCompressionSession::class,
         VolumeCompressionBatchRecord::class,
         VolumeOutlineUpdate::class,
-        VolumeOutlineSuggestion::class
+        VolumeOutlineSuggestion::class,
+        AgentSession::class,
+        AgentMessage::class,
+        AgentSessionReference::class,
+        AgentTask::class,
+        AgentExecutionNode::class,
+        AgentToolExecution::class,
+        AgentEvent::class,
+        AgentTaskReference::class,
+        AgentWriteOperation::class,
+        AgentModelRequest::class,
+        AgentRecoveryLog::class,
+        AgentClarification::class
     ],
-    version = 26,
+    version = 32,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
@@ -95,6 +122,12 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun volumeSummaryDao(): VolumeSummaryDao
     abstract fun volumeCompressionDao(): VolumeCompressionDao
     abstract fun volumeOutlineDao(): VolumeOutlineDao
+    /** Agent 独立会话 / 消息 / 资料引用；与普通聊天表完全分离 */
+    abstract fun agentDao(): AgentDao
+    /** Agent 任务 / 执行节点 / 工具执行 / 事件 */
+    abstract fun agentTaskDao(): AgentTaskDao
+    /** F4 只读工具专用查询 */
+    abstract fun agentReadDao(): AgentReadDao
 
     companion object {
         @Volatile
@@ -683,6 +716,507 @@ abstract class AppDatabase : RoomDatabase() {
         }
 
         /**
+         * v27：Agent 模式独立会话体系。
+         *
+         * 只新增三张表与索引，不修改任何既有表：
+         * - agent_session：Agent 会话（与 chat_session 完全分离）；
+         * - agent_message：Agent 消息（sequence 在会话内唯一）；
+         * - agent_session_reference：资料引用（同一会话同一来源唯一）。
+         * 不建立外键，删除来源书籍 / 章节 / 会话不会级联删除 Agent 数据。
+         */
+        internal val MIGRATION_26_27 = object : Migration(26, 27) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS agent_session (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "title TEXT NOT NULL, " +
+                        "bookId INTEGER, " +
+                        "modelId INTEGER, " +
+                        "status TEXT NOT NULL, " +
+                        "contextPrefix TEXT NOT NULL, " +
+                        "lastTaskId INTEGER, " +
+                        "createdAt INTEGER NOT NULL, " +
+                        "updatedAt INTEGER NOT NULL, " +
+                        "lastMessageAt INTEGER NOT NULL)"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_agent_session_bookId ON agent_session (bookId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_agent_session_updatedAt ON agent_session (updatedAt)")
+
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS agent_message (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "sessionId INTEGER NOT NULL, " +
+                        "taskId INTEGER, " +
+                        "role TEXT NOT NULL, " +
+                        "kind TEXT NOT NULL, " +
+                        "content TEXT NOT NULL, " +
+                        "thinkingSummary TEXT NOT NULL, " +
+                        "sequence INTEGER NOT NULL, " +
+                        "promptTokens INTEGER NOT NULL, " +
+                        "completionTokens INTEGER NOT NULL, " +
+                        "cachedTokens INTEGER NOT NULL, " +
+                        "promptLog TEXT NOT NULL, " +
+                        "attachments TEXT NOT NULL, " +
+                        "createdAt INTEGER NOT NULL)"
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS index_agent_message_sessionId_sequence " +
+                        "ON agent_message (sessionId, sequence)"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_agent_message_taskId ON agent_message (taskId)")
+
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS agent_session_reference (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "sessionId INTEGER NOT NULL, " +
+                        "sourceType TEXT NOT NULL, " +
+                        "sourceId INTEGER NOT NULL, " +
+                        "bookId INTEGER, " +
+                        "chapterId INTEGER, " +
+                        "volumeId INTEGER, " +
+                        "rangeStart INTEGER, " +
+                        "rangeEnd INTEGER, " +
+                        "titleSnapshot TEXT NOT NULL, " +
+                        "contentHash TEXT NOT NULL, " +
+                        "referenceMode TEXT NOT NULL, " +
+                        "enabled INTEGER NOT NULL, " +
+                        "selectedAt INTEGER NOT NULL)"
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS " +
+                        "index_agent_session_reference_sessionId_sourceType_sourceId " +
+                        "ON agent_session_reference (sessionId, sourceType, sourceId)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_agent_session_reference_sessionId_enabled " +
+                        "ON agent_session_reference (sessionId, enabled)"
+                )
+            }
+        }
+
+        /**
+         * v28：Agent 任务与执行过程持久化。
+         *
+         * 只新增四张表与索引，不改动 v27 的三张 Agent 表：
+         * - agent_task：任务目标、状态、计划与时间；
+         * - agent_execution_node：执行节点与顺序；
+         * - agent_tool_execution：每次工具调用的参数 / 结果 / 幂等键；
+         * - agent_event：任务内严格递增的追加事件流。
+         * 不建立外键，删除会话由 Repository 显式事务清理。
+         */
+        internal val MIGRATION_27_28 = object : Migration(27, 28) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS agent_task (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "sessionId INTEGER NOT NULL, " +
+                        "title TEXT NOT NULL, " +
+                        "userGoal TEXT NOT NULL, " +
+                        "status TEXT NOT NULL, " +
+                        "planJson TEXT NOT NULL, " +
+                        "currentNodeId INTEGER, " +
+                        "modelId INTEGER, " +
+                        "errorMessage TEXT NOT NULL, " +
+                        "createdAt INTEGER NOT NULL, " +
+                        "startedAt INTEGER, " +
+                        "updatedAt INTEGER NOT NULL, " +
+                        "completedAt INTEGER)"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_agent_task_sessionId ON agent_task (sessionId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_agent_task_status ON agent_task (status)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_agent_task_updatedAt ON agent_task (updatedAt)")
+
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS agent_execution_node (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "taskId INTEGER NOT NULL, " +
+                        "nodeKey TEXT NOT NULL, " +
+                        "parentNodeId INTEGER, " +
+                        "nodeType TEXT NOT NULL, " +
+                        "title TEXT NOT NULL, " +
+                        "description TEXT NOT NULL, " +
+                        "status TEXT NOT NULL, " +
+                        "sequence INTEGER NOT NULL, " +
+                        "inputJson TEXT NOT NULL, " +
+                        "outputJson TEXT NOT NULL, " +
+                        "errorMessage TEXT NOT NULL, " +
+                        "startedAt INTEGER, " +
+                        "completedAt INTEGER, " +
+                        "createdAt INTEGER NOT NULL, " +
+                        "updatedAt INTEGER NOT NULL)"
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS index_agent_execution_node_taskId_sequence " +
+                        "ON agent_execution_node (taskId, sequence)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_agent_execution_node_taskId_status " +
+                        "ON agent_execution_node (taskId, status)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_agent_execution_node_taskId_nodeKey " +
+                        "ON agent_execution_node (taskId, nodeKey)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_agent_execution_node_parentNodeId " +
+                        "ON agent_execution_node (parentNodeId)"
+                )
+
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS agent_tool_execution (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "taskId INTEGER NOT NULL, " +
+                        "nodeId INTEGER, " +
+                        "toolName TEXT NOT NULL, " +
+                        "toolDisplayName TEXT NOT NULL, " +
+                        "status TEXT NOT NULL, " +
+                        "argumentsJson TEXT NOT NULL, " +
+                        "resultJson TEXT NOT NULL, " +
+                        "errorMessage TEXT NOT NULL, " +
+                        "idempotencyKey TEXT, " +
+                        "attempt INTEGER NOT NULL, " +
+                        "startedAt INTEGER, " +
+                        "completedAt INTEGER, " +
+                        "durationMs INTEGER, " +
+                        "createdAt INTEGER NOT NULL)"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_agent_tool_execution_taskId ON agent_tool_execution (taskId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_agent_tool_execution_nodeId ON agent_tool_execution (nodeId)")
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_agent_tool_execution_taskId_status " +
+                        "ON agent_tool_execution (taskId, status)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_agent_tool_execution_idempotencyKey " +
+                        "ON agent_tool_execution (idempotencyKey)"
+                )
+
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS agent_event (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "taskId INTEGER NOT NULL, " +
+                        "sequence INTEGER NOT NULL, " +
+                        "eventType TEXT NOT NULL, " +
+                        "nodeId INTEGER, " +
+                        "toolExecutionId INTEGER, " +
+                        "payloadJson TEXT NOT NULL, " +
+                        "createdAt INTEGER NOT NULL)"
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS index_agent_event_taskId_sequence " +
+                        "ON agent_event (taskId, sequence)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_agent_event_taskId_eventType " +
+                        "ON agent_event (taskId, eventType)"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_agent_event_nodeId ON agent_event (nodeId)")
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_agent_event_toolExecutionId " +
+                        "ON agent_event (toolExecutionId)"
+                )
+            }
+        }
+
+        /**
+         * v29：F5 任务级引用快照。
+         *
+         * 只新增一张表与索引，不修改 v27 / v28 的 Agent 表：
+         * - agent_task_reference：任务开始执行时冻结的授权引用；
+         * - 快照保存来源定位、引用模式、标题快照与本次注入结果；
+         * - 不复制来源正文，不建立外键。
+         */
+        internal val MIGRATION_28_29 = object : Migration(28, 29) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS agent_task_reference (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "taskId INTEGER NOT NULL, " +
+                        "sessionId INTEGER NOT NULL, " +
+                        "sourceType TEXT NOT NULL, " +
+                        "sourceId INTEGER NOT NULL, " +
+                        "bookId INTEGER, " +
+                        "chapterId INTEGER, " +
+                        "referenceMode TEXT NOT NULL, " +
+                        "selectedAt INTEGER NOT NULL, " +
+                        "sourceTitleSnapshot TEXT NOT NULL, " +
+                        "sourceUpdatedAt INTEGER, " +
+                        "validated INTEGER NOT NULL, " +
+                        "valid INTEGER NOT NULL, " +
+                        "invalidReason TEXT NOT NULL, " +
+                        "injected INTEGER NOT NULL, " +
+                        "truncated INTEGER NOT NULL, " +
+                        "contentStart INTEGER, " +
+                        "contentChars INTEGER NOT NULL, " +
+                        "contentTotalChars INTEGER NOT NULL, " +
+                        "estimatedTokens INTEGER NOT NULL, " +
+                        "createdAt INTEGER NOT NULL)"
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS " +
+                        "index_agent_task_reference_taskId_sourceType_sourceId " +
+                        "ON agent_task_reference (taskId, sourceType, sourceId)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_agent_task_reference_taskId " +
+                        "ON agent_task_reference (taskId)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_agent_task_reference_sessionId " +
+                        "ON agent_task_reference (sessionId)"
+                )
+            }
+        }
+
+        /**
+         * v30：F6 受控写入操作。
+         *
+         * 只新增一张表与索引，不修改 F1—F5 的 Agent 表、章节表或大纲表：
+         * - agent_write_operation：写入提议、授权状态、执行结果与撤销快照；
+         * - idempotencyKey 唯一索引作为重复写入的数据库级硬保障；
+         * - 不复制业务数据到新表之外，不建立外键。
+         */
+        internal val MIGRATION_29_30 = object : Migration(29, 30) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS agent_write_operation (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "taskId INTEGER NOT NULL, " +
+                        "sessionId INTEGER NOT NULL, " +
+                        "toolExecutionId INTEGER, " +
+                        "nodeId INTEGER, " +
+                        "toolName TEXT NOT NULL, " +
+                        "operationType TEXT NOT NULL, " +
+                        "targetType TEXT NOT NULL, " +
+                        "targetId INTEGER NOT NULL, " +
+                        "bookId INTEGER NOT NULL, " +
+                        "targetTitleSnapshot TEXT NOT NULL, " +
+                        "bookTitleSnapshot TEXT NOT NULL, " +
+                        "riskLevel TEXT NOT NULL, " +
+                        "argumentsJson TEXT NOT NULL, " +
+                        "beforeSnapshot TEXT NOT NULL, " +
+                        "afterSnapshot TEXT NOT NULL, " +
+                        "proposedContent TEXT NOT NULL, " +
+                        "operationSummary TEXT NOT NULL, " +
+                        "permissionStatus TEXT NOT NULL, " +
+                        "executionStatus TEXT NOT NULL, " +
+                        "idempotencyKey TEXT NOT NULL, " +
+                        "reversible INTEGER NOT NULL, " +
+                        "createdTargetId INTEGER, " +
+                        "errorMessage TEXT NOT NULL, " +
+                        "rollbackMessage TEXT NOT NULL, " +
+                        "createdAt INTEGER NOT NULL, " +
+                        "updatedAt INTEGER NOT NULL, " +
+                        "confirmedAt INTEGER, " +
+                        "executedAt INTEGER, " +
+                        "rolledBackAt INTEGER)"
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS " +
+                        "index_agent_write_operation_idempotencyKey " +
+                        "ON agent_write_operation (idempotencyKey)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_agent_write_operation_taskId_executionStatus " +
+                        "ON agent_write_operation (taskId, executionStatus)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_agent_write_operation_taskId " +
+                        "ON agent_write_operation (taskId)"
+                )
+            }
+        }
+
+        /**
+         * v31：F7 后台执行、执行租约与进程级恢复。
+         *
+         * - agent_task 只新增执行控制列，旧任务的租约 / 游标默认值表示“未进入后台执行”；
+         * - 只新增 agent_model_request（模型请求证据）与 agent_recovery_log（恢复诊断）；
+         * - 不修改 F1—F6 的表结构、状态语义或写入权限链路。
+         */
+        internal val MIGRATION_30_31 = object : Migration(30, 31) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE agent_task " +
+                        "ADD COLUMN executionOwner TEXT NOT NULL DEFAULT ''"
+                )
+                db.execSQL(
+                    "ALTER TABLE agent_task ADD COLUMN executionLeaseUntil INTEGER"
+                )
+                db.execSQL(
+                    "ALTER TABLE agent_task " +
+                        "ADD COLUMN executionAttempt INTEGER NOT NULL DEFAULT 0"
+                )
+                db.execSQL(
+                    "ALTER TABLE agent_task ADD COLUMN lastHeartbeatAt INTEGER"
+                )
+                db.execSQL(
+                    "ALTER TABLE agent_task ADD COLUMN lastExecutionAt INTEGER"
+                )
+                db.execSQL(
+                    "ALTER TABLE agent_task " +
+                        "ADD COLUMN executionRunId TEXT NOT NULL DEFAULT ''"
+                )
+                db.execSQL(
+                    "ALTER TABLE agent_task " +
+                        "ADD COLUMN executionCursor INTEGER NOT NULL DEFAULT 0"
+                )
+                db.execSQL(
+                    "ALTER TABLE agent_task " +
+                        "ADD COLUMN pauseRequested INTEGER NOT NULL DEFAULT 0"
+                )
+                db.execSQL(
+                    "ALTER TABLE agent_task " +
+                        "ADD COLUMN cancelRequested INTEGER NOT NULL DEFAULT 0"
+                )
+                db.execSQL(
+                    "ALTER TABLE agent_task " +
+                        "ADD COLUMN recoveryCount INTEGER NOT NULL DEFAULT 0"
+                )
+                db.execSQL(
+                    "ALTER TABLE agent_task ADD COLUMN lastRecoveryAt INTEGER"
+                )
+                db.execSQL(
+                    "ALTER TABLE agent_task " +
+                        "ADD COLUMN lastErrorKind TEXT NOT NULL DEFAULT ''"
+                )
+
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS agent_model_request (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "taskId INTEGER NOT NULL, " +
+                        "nodeId INTEGER, " +
+                        "runId TEXT NOT NULL, " +
+                        "round INTEGER NOT NULL, " +
+                        "attempt INTEGER NOT NULL, " +
+                        "requestKey TEXT NOT NULL, " +
+                        "status TEXT NOT NULL, " +
+                        "modelId INTEGER NOT NULL, " +
+                        "modelName TEXT NOT NULL, " +
+                        "startedAt INTEGER NOT NULL, " +
+                        "completedAt INTEGER, " +
+                        "latencyMs INTEGER, " +
+                        "failureKind TEXT NOT NULL, " +
+                        "errorMessage TEXT NOT NULL, " +
+                        "responseChars INTEGER NOT NULL, " +
+                        "toolCallCount INTEGER NOT NULL, " +
+                        "applied INTEGER NOT NULL DEFAULT 0, " +
+                        "createdAt INTEGER NOT NULL, " +
+                        "updatedAt INTEGER NOT NULL)"
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS index_agent_model_request_requestKey " +
+                        "ON agent_model_request (requestKey)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_agent_model_request_taskId " +
+                        "ON agent_model_request (taskId)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_agent_model_request_taskId_status " +
+                        "ON agent_model_request (taskId, status)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_agent_model_request_nodeId " +
+                        "ON agent_model_request (nodeId)"
+                )
+
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS agent_recovery_log (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "taskId INTEGER NOT NULL, " +
+                        "attempt INTEGER NOT NULL, " +
+                        "reason TEXT NOT NULL, " +
+                        "originalStatus TEXT NOT NULL, " +
+                        "originalNodeId INTEGER, " +
+                        "originalNodeTitle TEXT NOT NULL, " +
+                        "cursorBefore INTEGER NOT NULL, " +
+                        "cursorAfter INTEGER NOT NULL, " +
+                        "succeededNodeCount INTEGER NOT NULL, " +
+                        "failedNodeCount INTEGER NOT NULL, " +
+                        "uncertainToolCount INTEGER NOT NULL, " +
+                        "unresolvedWriteCount INTEGER NOT NULL, " +
+                        "duplicateRequestPossible INTEGER NOT NULL, " +
+                        "inconsistentDataFound INTEGER NOT NULL, " +
+                        "result TEXT NOT NULL, " +
+                        "message TEXT NOT NULL, " +
+                        "startedAt INTEGER NOT NULL, " +
+                        "completedAt INTEGER, " +
+                        "createdAt INTEGER NOT NULL)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_agent_recovery_log_taskId " +
+                        "ON agent_recovery_log (taskId)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_agent_recovery_log_taskId_createdAt " +
+                        "ON agent_recovery_log (taskId, createdAt)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_agent_recovery_log_taskId_result " +
+                        "ON agent_recovery_log (taskId, result)"
+                )
+            }
+        }
+
+        /**
+         * v32：Agent 任务工作模式、父子分支与澄清请求。
+         *
+         * - agent_task 新增 workMode / parentTaskId / rootTaskId / branchSource；
+         *   旧任务统一视为计划模式的根任务；
+         * - agent_message 新增 contextSnapshot，用于分支重规划恢复已冻结的上下文；
+         * - 新增 agent_clarification 保存 Agent 的补充信息请求与用户回答。
+         */
+        internal val MIGRATION_31_32 = object : Migration(31, 32) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE agent_task " +
+                        "ADD COLUMN workMode TEXT NOT NULL DEFAULT 'PLAN'"
+                )
+                db.execSQL("ALTER TABLE agent_task ADD COLUMN parentTaskId INTEGER")
+                db.execSQL("ALTER TABLE agent_task ADD COLUMN rootTaskId INTEGER")
+                db.execSQL(
+                    "ALTER TABLE agent_task " +
+                        "ADD COLUMN branchSource TEXT NOT NULL DEFAULT ''"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_agent_task_parentTaskId " +
+                        "ON agent_task (parentTaskId)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_agent_task_rootTaskId " +
+                        "ON agent_task (rootTaskId)"
+                )
+
+                db.execSQL(
+                    "ALTER TABLE agent_message " +
+                        "ADD COLUMN contextSnapshot TEXT NOT NULL DEFAULT ''"
+                )
+
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS agent_clarification (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "sessionId INTEGER NOT NULL, " +
+                        "taskId INTEGER NOT NULL, " +
+                        "question TEXT NOT NULL, " +
+                        "optionsJson TEXT NOT NULL, " +
+                        "status TEXT NOT NULL, " +
+                        "answer TEXT NOT NULL, " +
+                        "createdAt INTEGER NOT NULL, " +
+                        "answeredAt INTEGER)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_agent_clarification_taskId " +
+                        "ON agent_clarification (taskId)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_agent_clarification_taskId_status " +
+                        "ON agent_clarification (taskId, status)"
+                )
+            }
+        }
+
+        /**
          * 修复历史遗留的超长行：整本正文被冻结进会话前缀、超长提示词日志 / 正文等，
          * 单行超过 SQLite CursorWindow（2MB）上限后读取会抛 SQLiteBlobTooBigException 直接闪退。
          * 首次打开数据库时把超限文本截断到安全长度，之后用标记表跳过，避免每次启动全表扫描。
@@ -709,7 +1243,7 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "lianwenqi.db"
-                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20, MIGRATION_20_21, MIGRATION_21_22, MIGRATION_22_23, MIGRATION_23_24, MIGRATION_24_25, MIGRATION_25_26).addCallback(REPAIR_OVERSIZED_ROWS).build().also { INSTANCE = it }
+                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20, MIGRATION_20_21, MIGRATION_21_22, MIGRATION_22_23, MIGRATION_23_24, MIGRATION_24_25, MIGRATION_25_26, MIGRATION_26_27, MIGRATION_27_28, MIGRATION_28_29, MIGRATION_29_30, MIGRATION_30_31, MIGRATION_31_32).addCallback(REPAIR_OVERSIZED_ROWS).build().also { INSTANCE = it }
             }
     }
 }
