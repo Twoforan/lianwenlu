@@ -135,6 +135,11 @@ class AgentWriteRecoveryService(
                     "新建大纲操作中断，无法定位可能已创建的节点；请人工核对后重新提议"
                 )
 
+            AgentWriteOperationType.DELETE_OUTLINE_NODE ->
+                Inspection.NotApplied(
+                    "删除大纲操作中断，无法确认节点是否已删除；请人工核对后重新提议"
+                )
+
             AgentWriteOperationType.UPDATE_OUTLINE_NODE -> {
                 val before = decodeOutline(operation.beforeSnapshot)
                     ?: return Inspection.NotApplied("执行前快照无法解析；未自动重试")

@@ -3,12 +3,14 @@ package com.lianwenqi.app.agent.tool
 import com.lianwenqi.app.agent.data.dao.AgentChapterMeta
 import com.lianwenqi.app.agent.data.dao.AgentChapterSearchHit
 import com.lianwenqi.app.agent.data.jsonPayload
-import com.lianwenqi.app.data.decodeOutlineFields
+import com.lianwenqi.app.data.outlineFieldsForDisplay
 import com.lianwenqi.app.data.entity.Book
+import com.lianwenqi.app.data.entity.Chapter
 import com.lianwenqi.app.data.entity.OutlineItem
 import com.lianwenqi.app.data.entity.Volume
 import com.lianwenqi.app.data.entity.VolumeSummary
 import com.lianwenqi.app.data.entity.outlineCategoryLabel
+import com.lianwenqi.app.data.entity.normalizeOutlineCategory
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -29,6 +31,8 @@ class AgentReadOnlyTools(
     private val outlineOf: suspend (Long) -> List<OutlineItem>,
     private val volumesOf: suspend (Long) -> List<Volume>,
     private val volumeSummariesOf: suspend (Long) -> List<VolumeSummary>,
+    /** 章节列表（含 id），用于让模型拿到真实 chapterId，避免猜 id */
+    private val chaptersOf: suspend (Long) -> List<Chapter> = { emptyList() },
     private val memoryRetrieve: suspend (Long, String, Int) -> List<String>
 ) {
 
@@ -37,6 +41,7 @@ class AgentReadOnlyTools(
         getOutline(),
         getChapterSynopsis(),
         getChapterContent(),
+        listChapters(),
         searchChapters(),
         retrieveMemory(),
         getVolumeSynopsis()
@@ -90,8 +95,10 @@ class AgentReadOnlyTools(
         val filtered = if (categoryFilter.isBlank()) {
             all
         } else {
+            // 存储值 / 展示名双向归一化，兼容历史数据把「人设」直接落库的情况
+            val normalizedFilter = normalizeOutlineCategory(categoryFilter)
             all.filter {
-                it.category == categoryFilter ||
+                normalizeOutlineCategory(it.category) == normalizedFilter ||
                     outlineCategoryLabel(it.category) == categoryFilter
             }
         }
@@ -100,7 +107,7 @@ class AgentReadOnlyTools(
         var totalChars = 0
         val itemsJson = buildJsonArraySafe {
             limited.forEach { item ->
-                val fields = decodeOutlineFields(item.content)
+                val fields = outlineFieldsForDisplay(item.title, item.content)
                 val head = fields.firstOrNull()?.second?.ifBlank { item.title } ?: item.title
                 var itemChars = head.length
                 add(buildJsonObject {
@@ -247,6 +254,66 @@ class AgentReadOnlyTools(
         )
     }
 
+    private fun listChapters(): AgentTool = AgentTool(
+        toolKey = "list_chapters",
+        name = "list_chapters",
+        description = "列出当前书籍的章节与分卷，包含真实 chapterId、标题、所在分卷及字数；" +
+            "后续读取梗概 / 正文 / 删除章节前应先用它获取 id。",
+        capabilityKey = "READ_CHAPTER_LIST",
+        parameters = listOf(
+            AgentToolParam(
+                name = "volumeId",
+                type = AgentToolParamType.LONG,
+                description = "可选分卷 id；不传则列出全书章节",
+                required = false,
+                minValue = 1
+            )
+        )
+    ) { args, context ->
+        val bookId = context.bookId ?: return@AgentTool AgentToolResult.fail(NO_BOOK)
+        val volumeFilter = args.long("volumeId").takeIf { it > 0 }
+        val volumes = volumesOf(bookId)
+        val all = chaptersOf(bookId)
+        val filtered = if (volumeFilter == null) {
+            all
+        } else {
+            all.filter { it.volumeId == volumeFilter }
+        }
+        val limited = filtered.take(MAX_CHAPTER_LIST_ITEMS)
+        val volumeTitles = volumes.associate { it.id to it.title }
+        AgentToolResult.ok(
+            contentJson = jsonPayload {
+                putJsonArray("volumes") {
+                    volumes.forEach { volume ->
+                        add(buildJsonObject {
+                            put("volumeId", volume.id)
+                            put("title", volume.title)
+                        })
+                    }
+                }
+                put("chapterCount", filtered.size)
+                put("truncated", filtered.size > limited.size)
+                putJsonArray("chapters") {
+                    limited.forEach { chapter ->
+                        add(buildJsonObject {
+                            put("chapterId", chapter.id)
+                            put("title", chapter.title)
+                            put("volumeId", chapter.volumeId)
+                            put(
+                                "volumeTitle",
+                                chapter.volumeId?.let { volumeTitles[it] } ?: "未分卷"
+                            )
+                            put("summaryLength", chapter.summary.length)
+                            put("contentLength", chapter.content.length)
+                        })
+                    }
+                }
+            },
+            summary = "列出 ${filtered.size} 章 / ${volumes.size} 卷",
+            truncated = filtered.size > limited.size
+        )
+    }
+
     private fun searchChapters(): AgentTool = AgentTool(
         toolKey = "search_chapters",
         name = "search_chapters",
@@ -377,6 +444,7 @@ class AgentReadOnlyTools(
         private const val MAX_OUTLINE_FIELD_CHARS = 500
         private const val MAX_OUTLINE_TOTAL_CHARS = 20_000
         private const val MAX_CHAPTERS_PER_CALL = 20
+        private const val MAX_CHAPTER_LIST_ITEMS = 500
         private const val MAX_SYNOPSIS_CHARS = 2_000
         private const val MAX_CONTENT_SLICE_CHARS = 8_000
         private const val DEFAULT_CONTENT_SLICE_CHARS = 6_000

@@ -79,7 +79,7 @@ class AiOutlineImporter(
         return AiOutlineImportResult(blocks = blocks.size, items = items, newCategories = newCategories)
     }
 
-    /** 条目的对外显示名：首项「显示标签」的值，旧数据回落到标题 */
+    /** 条目的对外显示名：旧版纯文本内容只认条目标题，不从正文「-」行推测 */
     private fun displayNameOf(item: OutlineItem): String =
-        decodeOutlineFields(item.content).firstOrNull()?.second?.ifBlank { item.title } ?: item.title
+        outlineDisplayName(item.title, item.content)
 }

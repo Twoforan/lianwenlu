@@ -27,6 +27,7 @@ import com.lianwenqi.app.agent.planning.AgentPlanParser
 import com.lianwenqi.app.agent.planning.AgentPlanValidator
 import com.lianwenqi.app.agent.planning.AgentPlanner
 import com.lianwenqi.app.agent.tool.AgentGenerationTools
+import com.lianwenqi.app.agent.tool.AgentInteractionTools
 import com.lianwenqi.app.agent.tool.AgentReadOnlyTools
 import com.lianwenqi.app.agent.tool.AgentToolExecutor
 import com.lianwenqi.app.agent.tool.AgentToolRegistry
@@ -268,6 +269,7 @@ class AppContainer(val app: Application) {
                 outlineOf = { outlineRepository.getOutline(it) },
                 volumesOf = { bookRepository.getVolumes(it) },
                 volumeSummariesOf = { volumeSummaryRepository.activeListByBook(it) },
+                chaptersOf = { bookRepository.getChapters(it) },
                 memoryRetrieve = { bookId, query, topK ->
                     memoryRepository.retrieveScored(bookId, query, topK = topK)
                 }
@@ -281,7 +283,19 @@ class AppContainer(val app: Application) {
                     agentWriteBusinessWriter.chapterContent(chapterId)
                 },
                 outlineOf = { outlineId -> agentWriteBusinessWriter.outline(outlineId) },
+                volumeOf = { volumeId -> agentWriteBusinessWriter.volume(volumeId) },
                 writeService = agentWriteExecutionService
+            ).create()
+        )
+        registerAll(
+            AgentInteractionTools(
+                createClarification = { taskId, question, options ->
+                    agentTaskRepository.createClarification(
+                        taskId = taskId,
+                        question = question,
+                        options = options
+                    )
+                }
             ).create()
         )
         registerAll(
@@ -388,7 +402,6 @@ class AppContainer(val app: Application) {
         AgentTaskController(
             tasks = agentTaskRepository,
             nodes = agentExecutionNodeRepository,
-            sessions = agentSessionRepository,
             events = agentEventRepository,
             writes = agentWriteOperationRepository,
             writeService = agentWriteExecutionService,

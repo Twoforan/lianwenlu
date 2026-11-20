@@ -105,17 +105,12 @@ class AgentPlannerTest {
 
     @Test
     fun 结构校验失败返回失败() = runBlocking {
-        val duplicated = validPlan.replace(
-            "\"stepId\": \"step_001\"",
-            "\"stepId\": \"step_001\""
-        ).let {
-            // 复制一个相同 stepId 的步骤
-            it.replace(
-                "\"steps\": [",
-                "\"steps\": [{\"stepId\":\"step_001\",\"title\":\"重复\",\"description\":\"\",\"capabilityKey\":\"READ_OUTLINE\",\"expectedOutput\":\"\",\"dependencies\":[],\"riskLevel\":\"LOW\"},"
-            )
-        }
-        val result = plannerReturning(duplicated).plan(1L, "目标", "", null)
+        // 依赖不存在的步骤：归一化不会修复依赖关系，校验应仍然失败
+        val brokenDependency = validPlan.replaceFirst(
+            "\"dependencies\": []",
+            "\"dependencies\": [\"ghost_step\"]"
+        )
+        val result = plannerReturning(brokenDependency).plan(1L, "目标", "", null)
         assertTrue(result is AgentPlanningResult.Failure)
         assertTrue((result as AgentPlanningResult.Failure).message.contains("校验未通过"))
     }

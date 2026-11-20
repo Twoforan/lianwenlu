@@ -31,6 +31,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
@@ -43,9 +44,11 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -54,6 +57,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
 import com.lianwenqi.app.agent.data.entity.AgentBranchSource
 import com.lianwenqi.app.agent.data.entity.AgentTask
 import com.lianwenqi.app.agent.data.entity.AgentTaskStatus
@@ -73,6 +77,8 @@ fun AgentPlanCard(
     executing: Boolean,
     hasPendingWrites: Boolean = false,
     branchesAvailable: Boolean = false,
+    /** 历史任务：只展示计划书，不提供任何操作按钮 */
+    readOnly: Boolean = false,
     planEditing: Boolean = false,
     editingPlan: AgentPlan? = null,
     planEditError: String? = null,
@@ -91,6 +97,9 @@ fun AgentPlanCard(
 ) {
     val plan = planView.plan
     var thinkingExpanded by remember(plan) { mutableStateOf(false) }
+    // 与执行过程卡片一致的折叠样式：默认收起，点击头部展开
+    var expanded by rememberSaveable(task.id) { mutableStateOf(false) }
+    val showContent = expanded || planEditing
     val blockedSteps = plan.steps.filterNot {
         AgentExecutionPolicy.isCapabilityExecutable(it.capabilityKey)
     }
@@ -103,7 +112,12 @@ fun AgentPlanCard(
         tonalElevation = 2.dp
     ) {
         Column(Modifier.padding(14.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clickable { expanded = !expanded },
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 Text(
                     plan.taskTitle.ifBlank { task.title },
                     style = MaterialTheme.typography.titleMedium,
@@ -113,11 +127,31 @@ fun AgentPlanCard(
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
-                    agentTaskStatusLabel(task.status, planning),
+                    agentTaskStatusLabel(
+                        task.status,
+                        planning,
+                        userEnded = agentTaskEndedByUser(task)
+                    ),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.primary
                 )
+                Icon(
+                    if (expanded) Icons.Filled.KeyboardArrowUp
+                    else Icons.Filled.KeyboardArrowDown,
+                    contentDescription = if (expanded) "收起计划书" else "展开计划书",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
+            if (!showContent) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "${plan.steps.size} 个步骤 · 点击展开计划书",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+            // 展开时完整展示整份计划书，由聊天页统一滚动，不做卡片内部滑动
+            Column(Modifier.fillMaxWidth()) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     agentWorkModeLabel(task.workMode),
@@ -242,6 +276,7 @@ fun AgentPlanCard(
             }
 
             Spacer(Modifier.height(4.dp))
+            if (!readOnly) {
             Row(
                 Modifier
                     .fillMaxWidth()
@@ -287,6 +322,16 @@ fun AgentPlanCard(
                         enabled = !executing && !hasPendingWrites
                     ) { Text("删除任务") }
                 }
+            }
+            }
+            }
+            }
+            // 展开后底部保留收起入口，长计划无需回到顶部
+            if (expanded && !planEditing) {
+                TextButton(
+                    onClick = { expanded = false },
+                    modifier = Modifier.align(Alignment.CenterHorizontally)
+                ) { Text("收起计划书") }
             }
         }
     }
@@ -704,7 +749,11 @@ private fun BranchRow(task: AgentTask, onOpen: (Long) -> Unit) {
                 overflow = TextOverflow.Ellipsis
             )
             Text(
-                agentTaskStatusLabel(task.status, false) + " · " +
+                agentTaskStatusLabel(
+                    task.status,
+                    false,
+                    userEnded = agentTaskEndedByUser(task)
+                ) + " · " +
                     agentWorkModeLabel(task.workMode) + " · " +
                     agentBranchSourceLabel(task.branchSource),
                 style = MaterialTheme.typography.labelSmall,
@@ -820,7 +869,8 @@ fun AgentClarificationSheet(
                         )
                         clarification.options.forEach { option ->
                             OutlinedButton(
-                                onClick = { input = option },
+                                // 直接点选即提交，用户也可在下方输入自定义回答
+                                onClick = { onSubmit(option) },
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(top = 6.dp)
@@ -983,15 +1033,301 @@ fun AgentTaskListDialog(
     }
 }
 
+/**
+ * 用户主动点「结束」的任务：按「任务完成」展示。
+ *
+ * 新数据直接写入 [AgentTask.USER_ENDED_REASON]；兼容旧版本：失败后点「结束」会保留
+ * 节点的失败原因作为任务错误信息，而普通取消统一写「用户取消」。
+ */
+fun agentTaskEndedByUser(task: AgentTask?): Boolean {
+    if (task == null || task.status != AgentTaskStatus.CANCELLED) return false
+    val message = task.errorMessage
+    return message == AgentTask.USER_ENDED_REASON ||
+        (task.executionAttempt > 0 &&
+            message.isNotBlank() &&
+            message != "用户取消" &&
+            message != "用户取消任务")
+}
+
 /** 任务状态展示；PLANNING 且不在当前请求中时提示可能已中断 */
-fun agentTaskStatusLabel(status: String, planning: Boolean): String = when (status) {
-    AgentTaskStatus.CREATED -> "待规划"
-    AgentTaskStatus.PLANNING -> if (planning) "规划中…" else "规划可能已中断，可重试"
-    AgentTaskStatus.RUNNING -> "只读执行中"
-    AgentTaskStatus.WAITING_CONFIRMATION -> "等待审核计划"
-    AgentTaskStatus.PAUSED -> "已暂停"
-    AgentTaskStatus.COMPLETED -> "已完成"
-    AgentTaskStatus.FAILED -> "失败"
-    AgentTaskStatus.CANCELLED -> "已取消"
+fun agentTaskStatusLabel(
+    status: String,
+    planning: Boolean,
+    userEnded: Boolean = false
+): String = when {
+    userEnded -> "任务完成"
+    status == AgentTaskStatus.CREATED -> "待规划"
+    status == AgentTaskStatus.PLANNING -> if (planning) "规划中…" else "规划可能已中断，可重试"
+    status == AgentTaskStatus.RUNNING -> "只读执行中"
+    status == AgentTaskStatus.WAITING_CONFIRMATION -> "等待审核计划"
+    status == AgentTaskStatus.PAUSED -> "已暂停"
+    status == AgentTaskStatus.COMPLETED -> "已完成"
+    status == AgentTaskStatus.FAILED -> "失败"
+    status == AgentTaskStatus.CANCELLED -> "已取消"
     else -> status
+}
+
+/** 计划书库：当前书籍下的全部计划书，可查看、修改或加入参考资料 */
+@Composable
+fun AgentPlanLibraryDialog(
+    plans: List<AgentPlanLibraryItem>,
+    notice: String?,
+    onDismiss: () -> Unit,
+    onClearNotice: () -> Unit,
+    onAddReference: (AgentTask) -> Unit,
+    onAddReferences: (List<AgentTask>) -> Unit,
+    onSave: (AgentTask, AgentPlan) -> Unit
+) {
+    var detailTaskId by remember { mutableStateOf<Long?>(null) }
+    // 多选：选中若干计划书后一次性加入参考资料
+    var selectedIds by remember { mutableStateOf(emptySet<Long>()) }
+    val detail = plans.firstOrNull { it.task.id == detailTaskId }
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(shape = RoundedCornerShape(16.dp), tonalElevation = 6.dp) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 560.dp)
+                    .padding(16.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        if (detail == null) "计划书库" else "计划书",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.weight(1f)
+                    )
+                    if (detail != null) {
+                        // 查看某份计划后返回计划书库，而不是直接关闭弹窗
+                        TextButton(onClick = { detailTaskId = null }) { Text("返回") }
+                    }
+                    TextButton(onClick = onDismiss) { Text("关闭") }
+                }
+                if (notice != null) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            notice,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextButton(onClick = onClearNotice) { Text("知道了") }
+                    }
+                }
+                when {
+                    detail != null -> PlanLibraryDetail(
+                        item = detail,
+                        errorText = notice,
+                        onBack = { detailTaskId = null },
+                        onAddReference = { onAddReference(detail.task) },
+                        onSave = onSave
+                    )
+
+                    plans.isEmpty() -> Text(
+                        "当前书籍还没有生成计划书。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(vertical = 24.dp)
+                    )
+
+                    else -> {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                "共 ${plans.size} 份计划书",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f)
+                            )
+                            TextButton(
+                                onClick = {
+                                    selectedIds = if (selectedIds.size == plans.size) {
+                                        emptySet()
+                                    } else {
+                                        plans.map { it.task.id }.toSet()
+                                    }
+                                }
+                            ) {
+                                Text(if (selectedIds.size == plans.size) "取消全选" else "全选")
+                            }
+                        }
+                        LazyColumn(Modifier.fillMaxWidth().weight(1f, fill = false)) {
+                            items(plans, key = { it.task.id }) { item ->
+                                PlanLibraryRow(
+                                    item = item,
+                                    selected = item.task.id in selectedIds,
+                                    onToggle = {
+                                        selectedIds = if (item.task.id in selectedIds) {
+                                            selectedIds - item.task.id
+                                        } else {
+                                            selectedIds + item.task.id
+                                        }
+                                    },
+                                    onOpen = { detailTaskId = item.task.id }
+                                )
+                                HorizontalDivider()
+                            }
+                        }
+                        HorizontalDivider()
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                if (selectedIds.isEmpty()) "勾选后可批量加入参考资料"
+                                else "已选 ${selectedIds.size} 份",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Button(
+                                enabled = selectedIds.isNotEmpty(),
+                                onClick = {
+                                    onAddReferences(
+                                        plans.filter { it.task.id in selectedIds }.map { it.task }
+                                    )
+                                    selectedIds = emptySet()
+                                }
+                            ) {
+                                Text("加入参考资料（${selectedIds.size}）")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PlanLibraryRow(
+    item: AgentPlanLibraryItem,
+    selected: Boolean,
+    onToggle: () -> Unit,
+    onOpen: () -> Unit
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Checkbox(checked = selected, onCheckedChange = { onToggle() })
+        Column(
+            Modifier
+                .weight(1f)
+                .clickable(onClick = onOpen)
+                .padding(vertical = 2.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    item.plan.taskTitle.ifBlank { item.task.title },
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    agentTaskStatusLabel(
+                        item.task.status,
+                        false,
+                        userEnded = agentTaskEndedByUser(item.task)
+                    ),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+            Text(
+                "${item.plan.steps.size} 个步骤 · ${agentWorkModeLabel(item.task.workMode)}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1
+            )
+        }
+        TextButton(onClick = onOpen) { Text("查看") }
+    }
+}
+
+@Composable
+private fun PlanLibraryDetail(
+    item: AgentPlanLibraryItem,
+    errorText: String?,
+    onBack: () -> Unit,
+    onAddReference: () -> Unit,
+    onSave: (AgentTask, AgentPlan) -> Unit
+) {
+    val editable = !AgentTaskStatus.isTerminal(item.task.status)
+    var editing by remember(item.task.id) { mutableStateOf(false) }
+    var draft by remember(item.task.id) { mutableStateOf(item.plan) }
+    // 保存成功后计划会刷新；与草稿一致时退出编辑
+    LaunchedEffect(item.plan) {
+        if (editing && item.plan == draft) editing = false
+    }
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .heightIn(max = 440.dp)
+            .verticalScroll(rememberScrollState())
+    ) {
+        Text(
+            item.plan.taskTitle.ifBlank { item.task.title },
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.Bold
+        )
+        Text(
+            agentTaskStatusLabel(
+                item.task.status,
+                false,
+                userEnded = agentTaskEndedByUser(item.task)
+            ) + " · " + agentWorkModeLabel(item.task.workMode),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.height(6.dp))
+        if (editing) {
+            StructuredPlanEditor(
+                plan = draft,
+                error = errorText,
+                onChange = { draft = it },
+                onSave = { onSave(item.task, draft) },
+                onCancel = {
+                    draft = item.plan
+                    editing = false
+                }
+            )
+        } else {
+            if (item.plan.goalSummary.isNotBlank()) {
+                Text(
+                    item.plan.goalSummary,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(6.dp))
+            }
+            item.plan.steps.forEachIndexed { index, step ->
+                HorizontalDivider(Modifier.padding(vertical = 6.dp))
+                AgentPlanStepRow(index + 1, step)
+            }
+            Spacer(Modifier.height(6.dp))
+            if (!editable) {
+                Text(
+                    "任务已结束，计划仅供查看。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                TextButton(onClick = onBack) { Text("返回") }
+                if (editable) {
+                    TextButton(onClick = {
+                        draft = item.plan
+                        editing = true
+                    }) { Text("修改计划") }
+                }
+                TextButton(onClick = onAddReference) { Text("加入参考资料") }
+            }
+        }
+    }
 }

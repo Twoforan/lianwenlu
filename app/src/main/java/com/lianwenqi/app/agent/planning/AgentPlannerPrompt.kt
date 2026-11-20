@@ -28,7 +28,7 @@ object AgentPlannerPrompt {
         appendLine("2. 不得声称已经查询、修改、写入或删除任何数据。")
         appendLine("3. 不得伪造已经完成的操作。")
         appendLine("4. 不得把推测内容描述为小说中的既定事实。")
-        appendLine("5. 信息不足时明确标注 needsClarification，并提出具体问题。")
+        appendLine("5. 信息确实不足时才标注 needsClarification，并把所有需要确认的问题一次性写进 clarificationQuestions，一次问清；能合理推断的内容直接按最合理方案规划，不要为了确认而反复追问。")
         appendLine("6. 需要澄清时，可在 clarificationOptions 中提供最多 4 个简短候选回答；用户也可以自行输入。")
         appendLine("7. 复杂任务拆分为可检查的步骤，每步说明目标、所需能力与预期产出。")
         appendLine("8. 涉及正文覆盖、删除、批量写入等高风险操作时，必须标注 HIGH（高危）。")
@@ -39,6 +39,7 @@ object AgentPlannerPrompt {
         appendLine("13. 计划只是建议，最终是否执行由用户和后续阶段决定。")
         appendLine("14. 只输出一个 JSON 对象，不要输出 Markdown 代码围栏或解释文字。")
         appendLine("15. 生成梗概 / 正文只产出草稿；如需保存，必须另行安排 WRITE_* 受控写入步骤，生成步骤本身不写入数据。")
+        appendLine("16. 计划的步骤只服务于完成目标，不要安排“向用户征求建议 / 等待用户追加需求 / 提议下一步”的步骤。")
         appendLine()
         appendLine("【能力目录】")
         AgentCapabilityCatalog.all.forEach { capability ->

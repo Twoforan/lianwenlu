@@ -7,21 +7,27 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -32,14 +38,30 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.ui.draw.clip
+import com.lianwenqi.app.agent.data.entity.AgentExecutionNode
+import com.lianwenqi.app.agent.data.entity.AgentClarification
+import com.lianwenqi.app.agent.data.entity.AgentNodeStatus
+import com.lianwenqi.app.agent.data.entity.AgentToolExecution
+import com.lianwenqi.app.agent.data.entity.AgentToolStatus
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Link
@@ -65,7 +87,10 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.key
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -78,12 +103,16 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.withTransform
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.PathParser
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import com.lianwenqi.app.agent.data.entity.AgentMessage
@@ -111,7 +140,9 @@ import com.lianwenqi.app.ui.screens.TEXT_FILE_MIME_TYPES
 import com.lianwenqi.app.ui.screens.attachmentIcon
 import com.lianwenqi.app.ui.screens.attachmentLabel
 import com.lianwenqi.app.ui.screens.displayNameOf
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 /**
  * AI 全权接管模式。
@@ -128,12 +159,12 @@ fun AgentChatScreen(
     val sessions by vm.sessions.collectAsState()
     val currentSession by vm.currentSession.collectAsState()
     val messages by vm.messages.collectAsState()
-    val taskMessages by vm.taskMessages.collectAsState()
     val planPublished by vm.planPublished.collectAsState()
     val tasks by vm.tasks.collectAsState()
     val currentTask by vm.currentTask.collectAsState()
     val currentTaskId by vm.currentTaskId.collectAsState()
     val currentPlan by vm.currentPlan.collectAsState()
+    val historicalArtifacts by vm.historicalArtifacts.collectAsState()
     val planning by vm.planning.collectAsState()
     val sendingTask by vm.sendingTask.collectAsState()
     val planningTaskId by vm.planningTaskId.collectAsState()
@@ -141,6 +172,7 @@ fun AgentChatScreen(
     val planEditError by vm.planEditError.collectAsState()
     val executionNodes by vm.executionNodes.collectAsState()
     val toolExecutions by vm.toolExecutions.collectAsState()
+    val answeredClarifications by vm.answeredClarifications.collectAsState()
     val executingTaskId by vm.executingTaskId.collectAsState()
     val executionError by vm.executionError.collectAsState()
     val writeOperations by vm.writeOperations.collectAsState()
@@ -148,9 +180,6 @@ fun AgentChatScreen(
     val writeNotice by vm.writeNotice.collectAsState()
     val workMode by vm.workMode.collectAsState()
     val pendingClarification by vm.pendingClarification.collectAsState()
-    val branchParent by vm.branchParent.collectAsState()
-    val branchSiblings by vm.branchSiblings.collectAsState()
-    val branchChildren by vm.branchChildren.collectAsState()
     val input by vm.input.collectAsState()
     val books by vm.books.collectAsState()
     val models by vm.models.collectAsState()
@@ -181,9 +210,13 @@ fun AgentChatScreen(
     val contextModes by vm.contextModes.collectAsState()
     val historySelection by vm.historySelection.collectAsState()
     val savedHistoryIds by vm.savedHistoryIds.collectAsState()
+    val planLibrary by vm.planLibrary.collectAsState()
+    val planLibraryNotice by vm.planLibraryNotice.collectAsState()
     val selectedChapterCount =
         (selectedChapterSummaryIds + selectedChapterContentIds).size
     val scope = rememberCoroutineScope()
+    // 聊天区滚动状态提升到页面级：输入框聚焦时也要能滚到最末尾
+    val chatScroll = rememberScrollState()
 
     var showHistory by remember { mutableStateOf(false) }
     var showTaskList by remember { mutableStateOf(false) }
@@ -191,16 +224,26 @@ fun AgentChatScreen(
     var showChapterPicker by remember { mutableStateOf(false) }
     var showOutlinePicker by remember { mutableStateOf(false) }
     var showBookAgentHistory by remember { mutableStateOf(false) }
+    var showPlanLibrary by remember { mutableStateOf(false) }
     var showReferences by remember { mutableStateOf(false) }
     var showWritePolicy by remember { mutableStateOf(false) }
     var showWorkMode by remember { mutableStateOf(false) }
-    var showBranches by remember { mutableStateOf(false) }
     var showBatchConfirm by remember { mutableStateOf(false) }
     var previewWriteOperationId by remember { mutableStateOf<Long?>(null) }
     var renaming by remember { mutableStateOf<AgentSession?>(null) }
     var editingMessageId by remember { mutableStateOf<Long?>(null) }
     var messageDraft by remember { mutableStateOf("") }
+    var editingReplyId by remember { mutableStateOf<Long?>(null) }
+    var replyDraft by remember { mutableStateOf("") }
+    // 待确认删除的消息：点按聊天区域其他位置可取消
+    var pendingDeleteId by remember { mutableStateOf<Long?>(null) }
     var dismissedClarificationId by remember { mutableStateOf<Long?>(null) }
+    // 待确认写入改为弹窗；关闭后保留入口，出现新的写入时重新弹出
+    var writeDialogDismissed by remember { mutableStateOf(false) }
+    val unresolvedWrites = writeOperations.filter { it.unresolved }
+    LaunchedEffect(unresolvedWrites.map { it.id }) {
+        if (unresolvedWrites.isNotEmpty()) writeDialogDismissed = false
+    }
     var planEditing by remember(currentTaskId) { mutableStateOf(false) }
     var planDraft by remember(currentTaskId) { mutableStateOf<AgentPlan?>(null) }
 
@@ -317,6 +360,18 @@ fun AgentChatScreen(
                 )
                 AssistChip(
                     onClick = {
+                        val bookId = selectedBookId
+                        if (bookId != null) {
+                            vm.clearPlanLibraryNotice()
+                            vm.loadPlanLibrary(bookId)
+                            showPlanLibrary = true
+                        }
+                    },
+                    enabled = selectedBookId != null,
+                    label = { Text("计划书库") }
+                )
+                AssistChip(
+                    onClick = {
                         val bookSessionIds = sessions
                             .filter { it.bookId == selectedBookId }
                             .map { it.id }
@@ -326,11 +381,6 @@ fun AgentChatScreen(
                     },
                     enabled = selectedBookId != null,
                     label = { Text("历史 Agent") }
-                )
-                AssistChip(
-                    onClick = { showReferences = true },
-                    enabled = session != null,
-                    label = { Text("已选资料") }
                 )
             }
             HorizontalDivider()
@@ -345,71 +395,270 @@ fun AgentChatScreen(
             } else {
                 AgentSessionHeader(
                     session = session,
-                    messageCount = messages.size,
-                    onRename = { renaming = session }
+                    // 节点级执行状态不再作为对话消息展示，计数同步剔除
+                    messageCount = messages.count { message ->
+                        !(message.kind == AgentMessageKind.NOTICE &&
+                            isExecutionLifecycleNotice(message.content)) &&
+                            !(message.kind == AgentMessageKind.USER_INPUT &&
+                                message.content.startsWith(CLARIFICATION_MESSAGE_PREFIX))
+                    },
+                    onRename = { renaming = session },
+                    onOpenReferences = { showReferences = true }
                 )
                 HorizontalDivider()
 
                 val task = currentTask
-                if (task != null && (
-                    branchParent != null || branchSiblings.isNotEmpty() || branchChildren.isNotEmpty()
-                    )
-                ) {
-                    AgentBranchBar(
-                        current = task,
-                        parent = branchParent,
-                        siblingCount = branchSiblings.size,
-                        childCount = branchChildren.size,
-                        onOpen = { showBranches = true }
-                    )
+                // 同一提问的多个版本：在消息操作栏用 < n/m > 切换，不再单独弹窗展示分支
+                val versionTasks = remember(tasks, task) {
+                    val rootId = task?.let { it.rootTaskId ?: it.id }
+                    if (rootId == null) {
+                        emptyList()
+                    } else {
+                        tasks.filter { it.id == rootId || it.rootTaskId == rootId }
+                            .sortedBy { it.createdAt }
+                    }
                 }
+                val versionIndex = versionTasks.indexOfFirst { it.id == task?.id }
+                val hasVersions = versionTasks.size > 1
 
-                Column(
+                Box(
                     Modifier
                         .weight(1f)
                         .fillMaxWidth()
-                        .verticalScroll(rememberScrollState())
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null
+                        ) {
+                            // 点按聊天区域其他位置：取消待确认的删除
+                            pendingDeleteId = null
+                        }
                 ) {
-                    val visibleMessages = taskMessages.ifEmpty {
-                        if (currentTask == null) messages.filter { it.taskId == null } else emptyList()
-                    }.filterNot { message ->
-                        // 澄清草稿不展示计划消息；兼容早期版本留下的空计划消息
-                        message.kind == AgentMessageKind.PLAN &&
-                            (message.content.isBlank() ||
-                                currentPlan?.plan?.needsClarification == true)
+                Column(
+                    Modifier
+                        .fillMaxSize()
+                        .verticalScroll(chatScroll)
+                ) {
+                    val autoMode = currentTask?.workMode == AgentWorkMode.AUTO
+                    // 用户主动点「结束」：整体显示为任务完成，而不是执行失败
+                    val endedByUser = agentTaskEndedByUser(currentTask)
+                    // Agent 会话是连续的：展示本会话的历史轮次（分支只保留当前分支链）
+                    val visibleMessages = continuousMessages(messages, tasks, currentTask)
+                        .filterNot { message ->
+                            // 计划消息只用于驱动计划卡展示，本身不再作为一条对话气泡出现
+                            message.kind == AgentMessageKind.PLAN
+                        }
+                        .filterNot { message ->
+                            // 计划模式不再生成最终总结；兼容历史数据里遗留的“只读执行结果”消息
+                            message.kind == AgentMessageKind.FINAL_ANSWER &&
+                                message.taskId != null &&
+                                tasks.any {
+                                    it.id == message.taskId && it.workMode != AgentWorkMode.AUTO
+                                }
+                        }
+                        .filterNot { message ->
+                            // 自动模式不展示系统消息（执行完毕、暂停提示等）
+                            autoMode && message.kind == AgentMessageKind.NOTICE
+                        }
+                        .filterNot { message ->
+                            // 节点级执行状态（失败、等待写入、暂停、取消等）统一在执行过程卡片中展示，
+                            // 不再逐条变成对话消息；兼容历史数据里已落库的同类系统消息
+                            message.kind == AgentMessageKind.NOTICE &&
+                                isExecutionLifecycleNotice(message.content)
+                        }
+                        .filterNot { message ->
+                            // 历史数据里由澄清回答自动生成的用户消息，改由思维链展示
+                            message.kind == AgentMessageKind.USER_INPUT &&
+                                message.content.startsWith(CLARIFICATION_MESSAGE_PREFIX)
+                        }
+                    val hasPendingWrites = writeOperations.any { it.unresolved }
+                    val liveThinkingStatus = when {
+                        hasPendingWrites -> "请用户确认中"
+                        planning -> "思考中"
+                        executingCurrent -> {
+                            val runningNode = executionNodes.lastOrNull {
+                                it.status == AgentNodeStatus.RUNNING
+                            }
+                            val runningTools = runningNode?.id
+                                ?.let { nodeId ->
+                                    toolExecutions.filter { it.nodeId == nodeId }
+                                }
+                                .orEmpty()
+                            when {
+                                runningTools.any { it.status == AgentToolStatus.RUNNING } ->
+                                    "规划下一步中"
+                                runningTools.isEmpty() -> "思考中"
+                                else -> "对用户提问中"
+                            }
+                        }
+                        else -> null
                     }
-                    visibleMessages.forEach { message ->
+
+                    // 新消息 / 状态变化后自动滚到最下方（等一帧拿到最新内容高度）
+                    LaunchedEffect(
+                        visibleMessages.size,
+                        liveThinkingStatus,
+                        executionNodes.size,
+                        writeOperations.size,
+                        pendingClarification?.id
+                    ) {
+                        withFrameNanos { }
+                        if (chatScroll.maxValue > 0) {
+                            chatScroll.animateScrollTo(chatScroll.maxValue)
+                        }
+                    }
+
+                    // Agent 回复（最后一条非计划消息）下方提供与普通聊天一致的操作入口
+                    val lastAgentReplyId = (
+                        visibleMessages.lastOrNull {
+                            it.role == AgentMessageRole.ASSISTANT &&
+                                it.kind == AgentMessageKind.FINAL_ANSWER
+                        } ?: visibleMessages.lastOrNull {
+                            it.role == AgentMessageRole.ASSISTANT &&
+                                it.kind != AgentMessageKind.PLAN &&
+                                it.kind != AgentMessageKind.NOTICE
+                        }
+                        )?.id
+                    // 本轮用户消息之后还没有 Agent 回复时，思考条应作为新一轮回复出现在下方，
+                    // 而不是挂在上一条 Agent 回复上
+                    val lastUserIndex = visibleMessages.indexOfLast {
+                        it.role == AgentMessageRole.USER
+                    }
+                    val awaitingAgentReply = lastUserIndex >= 0 &&
+                        visibleMessages.drop(lastUserIndex + 1)
+                            .none { it.role == AgentMessageRole.ASSISTANT }
+                    val thinkingUnderLastReply =
+                        if (awaitingAgentReply) null else lastAgentReplyId
+                    val beginPlanEdit: () -> Unit = {
+                        currentPlan?.let { pv ->
+                            planDraft = pv.plan.copy(
+                                steps = pv.plan.steps.map {
+                                    it.copy(
+                                        riskLevel = AgentRiskLevel.normalize(it.riskLevel)
+                                    )
+                                }
+                            )
+                            vm.clearPlanEditError()
+                            planEditing = true
+                        }
+                    }
+                    // 历史任务的计划书 / 执行过程按轮次插入到各自用户消息之后，默认收起
+                    val historyBlocks = run {
+                        val byTask = historicalArtifacts.associateBy { it.task.id }
+                        val inserted = mutableSetOf<Long>()
+                        val afterMessage = mutableMapOf<Int, AgentTaskArtifacts>()
+                        visibleMessages.forEachIndexed { index, message ->
+                            val taskId = message.taskId ?: return@forEachIndexed
+                            if (taskId in inserted) return@forEachIndexed
+                            val item = byTask[taskId] ?: return@forEachIndexed
+                            val nextTaskId = visibleMessages.getOrNull(index + 1)?.taskId
+                            if (nextTaskId != taskId) {
+                                afterMessage[index] = item
+                                inserted += taskId
+                            }
+                        }
+                        afterMessage to historicalArtifacts.filter { it.task.id !in inserted }
+                    }
+
+                    visibleMessages.forEachIndexed { index, message ->
                         AgentMessageRow(
                             message = message,
                             editable = message.kind == AgentMessageKind.USER_INPUT &&
                                 message.content == currentTask?.userGoal &&
                                 !planning && !executingCurrent && !sendingTask,
-                            editing = editingMessageId == message.id,
-                            draft = messageDraft,
-                            onDraftChange = { messageDraft = it },
-                            onCopy = { copyToClipboard(context, message.content) },
-                            onStartEdit = {
-                                editingMessageId = message.id
-                                messageDraft = message.content
+                            editing = message.role != AgentMessageRole.USER &&
+                                editingReplyId == message.id,
+                            draft = if (message.role == AgentMessageRole.USER) {
+                                messageDraft
+                            } else {
+                                replyDraft
                             },
-                            onCancelEdit = { editingMessageId = null },
+                            onDraftChange = {
+                                if (message.role == AgentMessageRole.USER) {
+                                    messageDraft = it
+                                } else {
+                                    replyDraft = it
+                                }
+                            },
+                            onCopy = { copyToClipboard(context, message.content) },
+                            deletePending = pendingDeleteId == message.id,
+                            onDeleteMessage = {
+                                if (pendingDeleteId == message.id) {
+                                    pendingDeleteId = null
+                                    vm.deleteMessage(message.id)
+                                } else {
+                                    pendingDeleteId = message.id
+                                }
+                            },
+                            onStartEdit = {
+                                if (message.role == AgentMessageRole.USER) {
+                                    // 用户提问回显到输入框编辑，可同时补充图片 / 文件 / 链接
+                                    editingMessageId = message.id
+                                    messageDraft = message.content
+                                    vm.setInput(message.content)
+                                } else {
+                                    // Agent 回复直接在卡片内编辑，以原文为基础
+                                    editingReplyId = message.id
+                                    replyDraft = message.content
+                                }
+                            },
+                            onCancelEdit = {
+                                if (message.role == AgentMessageRole.USER) {
+                                    editingMessageId = null
+                                } else {
+                                    editingReplyId = null
+                                }
+                            },
                             onRegenerate = { vm.regenerateUserMessage(message.id) },
                             onSubmitEdit = {
-                                vm.editUserMessageAndRegenerate(message.id, messageDraft) {
-                                    editingMessageId = null
+                                if (message.role == AgentMessageRole.USER) {
+                                    vm.editUserMessageAndRegenerate(message.id, messageDraft) {
+                                        editingMessageId = null
+                                    }
+                                } else {
+                                    vm.updateMessageContent(message.id, replyDraft)
+                                    editingReplyId = null
                                 }
+                            },
+                            showAssistantActions = message.id == lastAgentReplyId &&
+                                currentTask != null && !planning,
+                            canRegenerateAssistant = currentPlan != null && !executingCurrent,
+                            canEditPlan = currentPlan != null &&
+                                !executingCurrent && !planEditing,
+                            onRegenerateAssistant = vm::regeneratePlan,
+                            onEditPlan = beginPlanEdit,
+                            chatStyle = true,
+                            showThinkingHeader = message.id == thinkingUnderLastReply,
+                            thinkingStatus = if (message.id == thinkingUnderLastReply) {
+                                liveThinkingStatus
+                            } else {
+                                null
+                            },
+                            thinkingNodes = executionNodes,
+                            thinkingTools = toolExecutions,
+                            showVersionSwitcher = hasVersions &&
+                                message.taskId == task?.id &&
+                                message.kind == AgentMessageKind.USER_INPUT,
+                            versionIndex = versionIndex + 1,
+                            versionCount = versionTasks.size,
+                            onPrevVersion = {
+                                versionTasks.getOrNull(versionIndex - 1)?.let { vm.openTask(it.id) }
+                            },
+                            onNextVersion = {
+                                versionTasks.getOrNull(versionIndex + 1)?.let { vm.openTask(it.id) }
                             }
                         )
-                        HorizontalDivider()
+                        historyBlocks.first[index]?.let { item ->
+                            key(item.task.id) { AgentHistoryTaskBlock(item) }
+                        }
+                    }
+
+                    // 没有可见消息的历史任务（例如补充信息已并入思维链）统一补在末尾
+                    historyBlocks.second.forEach { item ->
+                        key(item.task.id) { AgentHistoryTaskBlock(item) }
                     }
 
                     val pending = pendingClarification
-                    if (pending != null) {
-                        AgentClarificationPendingCard(
-                            clarification = pending,
-                            onOpen = { dismissedClarificationId = null }
-                        )
-                    } else if (planning) {
+                    if (pending == null && planning) {
                         AgentPlanningCard(
                             refining = currentPlan?.plan?.needsClarification == false,
                             onStop = vm::cancelPlanning
@@ -436,6 +685,7 @@ fun AgentChatScreen(
                     val planView = currentPlan
                     val planTask = currentTask
                     if (planView != null && planTask != null &&
+                        planTask.workMode != AgentWorkMode.AUTO &&
                         planPublished && pending == null && !planView.plan.needsClarification
                     ) {
                         AgentPlanCard(
@@ -444,23 +694,12 @@ fun AgentChatScreen(
                             planning = planning,
                             executing = executingCurrent,
                             hasPendingWrites = writeOperations.any { it.unresolved },
-                            branchesAvailable = branchParent != null ||
-                                branchSiblings.isNotEmpty() || branchChildren.isNotEmpty(),
+                            branchesAvailable = false,
                             planEditing = planEditing,
                             editingPlan = planDraft,
                             planEditError = planEditError,
                             onPlanChange = { planDraft = it },
-                            onStartPlanEdit = {
-                                planDraft = planView.plan.copy(
-                                    steps = planView.plan.steps.map {
-                                        it.copy(
-                                            riskLevel = AgentRiskLevel.normalize(it.riskLevel)
-                                        )
-                                    }
-                                )
-                                vm.clearPlanEditError()
-                                planEditing = true
-                            },
+                            onStartPlanEdit = beginPlanEdit,
                             onSavePlanEdit = {
                                 planDraft?.let { draft ->
                                     vm.saveEditedPlan(draft) { planEditing = false }
@@ -471,7 +710,7 @@ fun AgentChatScreen(
                                 planDraft = null
                                 vm.clearPlanEditError()
                             },
-                            onOpenBranches = { showBranches = true },
+                            onOpenBranches = {},
                             onRegenerate = vm::regeneratePlan,
                             onConfirm = vm::confirmPlan,
                             onStartExecution = vm::startReadOnlyExecution,
@@ -482,27 +721,49 @@ fun AgentChatScreen(
                         )
                     }
 
-                    AgentWriteOperationsCard(
-                        operations = writeOperations,
-                        notice = writeNotice,
-                        policy = writePolicy,
-                        onApprove = vm::approveWrite,
-                        onReject = vm::rejectWrite,
-                        onApproveAllNormal = { showBatchConfirm = true },
-                        onRollback = vm::rollbackWrite,
-                        onOpen = { previewWriteOperationId = it.id },
-                        onOpenPolicy = { showWritePolicy = true },
-                        onDismissNotice = vm::clearWriteNotice
-                    )
-
-                    AgentExecutionCard(
-                        nodes = executionNodes,
-                        toolExecutions = toolExecutions,
-                        executing = executingCurrent,
-                        error = executionError,
-                        onCancel = vm::cancelExecution,
-                        onDismissError = vm::clearExecutionError
-                    )
+                    // 待确认写入改为弹窗展示，执行记录区不再插入提示卡片
+                    if (autoMode) {
+                        val taskFailed = currentTask?.status == AgentTaskStatus.FAILED
+                        // 自动模式：本轮还没有最终回复时，用一张实时卡片回显思考状态
+                        if (awaitingAgentReply &&
+                            (executingCurrent || planning || hasPendingWrites || taskFailed ||
+                                endedByUser)
+                        ) {
+                            AutoLiveAssistantCard(
+                                status = liveThinkingStatus,
+                                nodes = executionNodes,
+                                tools = toolExecutions,
+                                clarifications = answeredClarifications,
+                                error = executionError.orEmpty().ifBlank {
+                                    if (taskFailed) currentTask?.errorMessage ?: "" else ""
+                                },
+                                canRecover = taskFailed && !executingCurrent,
+                                endedByUser = endedByUser,
+                                onRetry = {
+                                    currentTask?.currentNodeId?.let(vm::retryFailedNode)
+                                },
+                                onEnd = vm::finishFailedTask
+                            )
+                        }
+                    } else {
+                        AgentExecutionCard(
+                            nodes = executionNodes,
+                            toolExecutions = toolExecutions,
+                            clarifications = answeredClarifications,
+                            executing = executingCurrent,
+                            error = executionError,
+                            onCancel = vm::cancelExecution,
+                            onDismissError = vm::clearExecutionError,
+                            onRetryNode = vm::retryFailedNode,
+                            onEndTask = vm::finishFailedTask,
+                            onContinueWaiting = vm::continueWaitingTask,
+                            onEndWaiting = vm::endWaitingTask,
+                            recoveryEnabled = currentTask?.status == AgentTaskStatus.FAILED &&
+                                !executingCurrent,
+                            currentNodeId = currentTask?.currentNodeId,
+                            endedByUser = endedByUser
+                        )
+                    }
 
                     if (visibleMessages.isEmpty() &&
                         currentTask == null &&
@@ -530,6 +791,59 @@ fun AgentChatScreen(
                     }
                     Spacer(Modifier.height(12.dp))
                 }
+                if (chatScroll.maxValue > 0) {
+                    // 右侧滚动条：显示当前阅读位置，可拖动快速翻阅对话
+                    BoxWithConstraints(
+                        Modifier
+                            .align(Alignment.CenterEnd)
+                            .fillMaxHeight()
+                            .width(12.dp)
+                    ) {
+                        val viewport = constraints.maxHeight.toFloat()
+                        val density = LocalDensity.current
+                        // 约束可能是 Infinity（例如父级可滚动），此时不绘制滚动条，避免 NaN 偏移
+                        if (viewport.isFinite() && viewport > 0f) {
+                            val minThumb = with(density) { 40.dp.toPx() }
+                            val contentHeight = viewport + chatScroll.maxValue.toFloat()
+                            val thumbHeight = if (contentHeight > 0f) {
+                                (viewport * viewport / contentHeight)
+                                    .coerceIn(minThumb.coerceAtMost(viewport), viewport)
+                            } else {
+                                viewport
+                            }
+                            val progress = chatScroll.value.toFloat() / chatScroll.maxValue
+                            val offsetY = (viewport - thumbHeight) * progress
+                            if (offsetY.isFinite() && thumbHeight > 0f) {
+                                Box(
+                                    Modifier
+                                        .offset { IntOffset(0, offsetY.roundToInt()) }
+                                        .width(4.dp)
+                                        .height(with(density) { thumbHeight.toDp() })
+                                        .clip(RoundedCornerShape(2.dp))
+                                        .background(
+                                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                                        )
+                                        .pointerInput(viewport, thumbHeight) {
+                                            detectDragGestures { change, drag ->
+                                                change.consume()
+                                                val maxOffset =
+                                                    (viewport - thumbHeight).coerceAtLeast(1f)
+                                                val delta =
+                                                    drag.y / maxOffset * chatScroll.maxValue
+                                                scope.launch {
+                                                    chatScroll.scrollTo(
+                                                        (chatScroll.value + delta).roundToInt()
+                                                            .coerceIn(0, chatScroll.maxValue)
+                                                    )
+                                                }
+                                            }
+                                        }
+                                )
+                            }
+                        }
+                    }
+                }
+                }
             }
 
             if (!modelSelected) {
@@ -554,6 +868,21 @@ fun AgentChatScreen(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(2.dp)
                 ) {
+                    // 弹窗被关闭后，保留重新打开的入口
+                    pendingClarification
+                        ?.takeIf { dismissedClarificationId == it.id }
+                        ?.let {
+                            AssistChip(
+                                onClick = { dismissedClarificationId = null },
+                                label = { Text("回答问题") }
+                            )
+                        }
+                    if (unresolvedWrites.isNotEmpty() && writeDialogDismissed) {
+                        AssistChip(
+                            onClick = { writeDialogDismissed = false },
+                            label = { Text("${unresolvedWrites.size} 项待确认") }
+                        )
+                    }
                     IconButton(
                     onClick = {
                         focusManager.clearFocus()
@@ -695,6 +1024,64 @@ fun AgentChatScreen(
                 }
             }
 
+            if (editingMessageId != null) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "正在编辑消息，发送后将生成新分支",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.weight(1f)
+                    )
+                    TextButton(
+                        onClick = {
+                            editingMessageId = null
+                            messageDraft = ""
+                            vm.setInput("")
+                        }
+                    ) { Text("取消") }
+                }
+            }
+
+            // 生成 / 规划 / 执行中：提供「停止响应」图标
+            if (planning || sendingTask || executingCurrent) {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.errorContainer,
+                        modifier = Modifier.clickable {
+                            if (planning) vm.cancelPlanning() else vm.cancelExecution()
+                        }
+                    ) {
+                        Row(
+                            Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Filled.Stop,
+                                contentDescription = "停止响应",
+                                modifier = Modifier.size(16.dp),
+                                tint = MaterialTheme.colorScheme.onErrorContainer
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                "停止响应",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onErrorContainer
+                            )
+                        }
+                    }
+                }
+            }
+
             ChatComposer(
                 value = input,
                 onValueChange = vm::setInput,
@@ -704,7 +1091,29 @@ fun AgentChatScreen(
                 onSend = {
                     focusManager.clearFocus()
                     keyboard?.hide()
-                    vm.sendTask()
+                    val editingId = editingMessageId
+                    if (editingId != null) {
+                        vm.submitEditedMessage(editingId) {
+                            editingMessageId = null
+                            messageDraft = ""
+                        }
+                    } else {
+                        vm.sendTask()
+                    }
+                },
+                onFocus = {
+                    // 点击输入框时滚到对话最末尾，避免停留在历史轮次
+                    scope.launch {
+                        withFrameNanos { }
+                        if (chatScroll.maxValue > 0) {
+                            chatScroll.animateScrollTo(chatScroll.maxValue)
+                        }
+                        // 软键盘弹出后可视区变矮，再补一次确保停在最末尾
+                        delay(250)
+                        if (chatScroll.maxValue > 0) {
+                            chatScroll.animateScrollTo(chatScroll.maxValue)
+                        }
+                    }
                 },
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
             )
@@ -785,22 +1194,6 @@ fun AgentChatScreen(
         )
     }
 
-    if (showBranches) {
-        currentTask?.let { task ->
-            AgentBranchDialog(
-                current = task,
-                parent = branchParent,
-                siblings = branchSiblings,
-                children = branchChildren,
-                onOpen = {
-                    vm.openTask(it)
-                    showBranches = false
-                },
-                onDismiss = { showBranches = false }
-            )
-        }
-    }
-
     if (showHistory) {
         AgentHistoryScreen(
             sessions = sessions,
@@ -825,7 +1218,8 @@ fun AgentChatScreen(
 
     if (showTaskList) {
         AgentTaskListDialog(
-            tasks = tasks,
+            // 分支版本在消息操作栏用 < n/m > 切换，不再作为独立「新任务」混进任务列表
+            tasks = tasks.filter { it.parentTaskId == null },
             currentTaskId = currentTaskId,
             planningTaskId = planningTaskId,
             onOpen = {
@@ -896,6 +1290,21 @@ fun AgentChatScreen(
             onToggle = vm::toggleOutline,
             onToggleCategory = vm::toggleOutlineCategory,
             onDismiss = { showOutlinePicker = false }
+        )
+    }
+
+    if (showPlanLibrary) {
+        AgentPlanLibraryDialog(
+            plans = planLibrary,
+            notice = planLibraryNotice,
+            onDismiss = {
+                showPlanLibrary = false
+                vm.clearPlanLibraryNotice()
+            },
+            onClearNotice = vm::clearPlanLibraryNotice,
+            onAddReference = { task -> vm.addPlanToReferences(task) },
+            onAddReferences = { tasks -> vm.addPlansToReferences(tasks) },
+            onSave = { task, plan -> vm.saveLibraryPlan(task, plan) }
         )
     }
 
@@ -1075,6 +1484,37 @@ fun AgentChatScreen(
         }
     }
 
+    // 待确认写入：弹窗展示；查看详情时让位给预览弹窗
+    if (unresolvedWrites.isNotEmpty() && !writeDialogDismissed && previewWriteOperationId == null) {
+        Dialog(onDismissRequest = { writeDialogDismissed = true }) {
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(MaterialTheme.colorScheme.surface)
+            ) {
+                Column(
+                    Modifier
+                        .heightIn(max = 520.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    AgentWriteOperationsCard(
+                        operations = unresolvedWrites,
+                        notice = writeNotice,
+                        policy = writePolicy,
+                        onApprove = vm::approveWrite,
+                        onReject = vm::rejectWrite,
+                        onApproveAllNormal = { showBatchConfirm = true },
+                        onRollback = vm::rollbackWrite,
+                        onOpen = { previewWriteOperationId = it.id },
+                        onOpenPolicy = { showWritePolicy = true },
+                        onDismissNotice = vm::clearWriteNotice
+                    )
+                }
+            }
+        }
+    }
+
     renaming?.let { target ->
         var title by remember(target.id) { mutableStateOf(target.title) }
         AlertDialog(
@@ -1139,7 +1579,8 @@ private fun AgentEmptyState(
 private fun AgentSessionHeader(
     session: AgentSession,
     messageCount: Int,
-    onRename: () -> Unit
+    onRename: () -> Unit,
+    onOpenReferences: () -> Unit = {}
 ) {
     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1150,6 +1591,13 @@ private fun AgentSessionHeader(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f)
             )
+            // 已选资料的查看入口放在任务标题右侧
+            TextButton(
+                onClick = onOpenReferences,
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+            ) {
+                Text("已选资料", style = MaterialTheme.typography.labelSmall)
+            }
             Text(
                 "$messageCount 条消息",
                 style = MaterialTheme.typography.labelSmall,
@@ -1173,7 +1621,24 @@ private fun AgentMessageRow(
     onStartEdit: () -> Unit,
     onCancelEdit: () -> Unit,
     onRegenerate: () -> Unit,
-    onSubmitEdit: () -> Unit
+    onSubmitEdit: () -> Unit,
+    showAssistantActions: Boolean = false,
+    canRegenerateAssistant: Boolean = true,
+    canEditPlan: Boolean = false,
+    onRegenerateAssistant: () -> Unit = {},
+    onEditPlan: () -> Unit = {},
+    chatStyle: Boolean = false,
+    showThinkingHeader: Boolean = false,
+    thinkingStatus: String? = null,
+    thinkingNodes: List<AgentExecutionNode> = emptyList(),
+    thinkingTools: List<AgentToolExecution> = emptyList(),
+    deletePending: Boolean = false,
+    showVersionSwitcher: Boolean = false,
+    versionIndex: Int = 0,
+    versionCount: Int = 0,
+    onPrevVersion: () -> Unit = {},
+    onNextVersion: () -> Unit = {},
+    onDeleteMessage: () -> Unit = {}
 ) {
     val isUser = message.role == AgentMessageRole.USER
     val label = when {
@@ -1181,6 +1646,138 @@ private fun AgentMessageRow(
         message.kind == AgentMessageKind.PLAN -> "Agent 计划"
         isUser -> "你"
         else -> "Agent"
+    }
+    // 自动模式：与普通聊天一致的整宽消息卡片，用户与 Agent 都不按轮次折叠
+    if (chatStyle) {
+        var collapsed by remember(message.id) { mutableStateOf(false) }
+        Surface(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 6.dp),
+            shape = RoundedCornerShape(14.dp),
+            color = MaterialTheme.colorScheme.surface,
+            border = BorderStroke(
+                0.5.dp,
+                MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.8f)
+            )
+        ) {
+            Column(Modifier.padding(12.dp)) {
+                if (!isUser && showThinkingHeader) {
+                    AutoThinkingHeader(
+                        status = thinkingStatus,
+                        nodes = thinkingNodes,
+                        tools = thinkingTools
+                    )
+                    Spacer(Modifier.height(8.dp))
+                }
+                if (!isUser && editing) {
+                    OutlinedTextField(
+                        value = draft,
+                        onValueChange = onDraftChange,
+                        modifier = Modifier.fillMaxWidth(),
+                        minLines = 3,
+                        maxLines = 12,
+                        textStyle = MaterialTheme.typography.bodyMedium
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        TextButton(
+                            onClick = onSubmitEdit,
+                            enabled = draft.isNotBlank()
+                        ) { Text("保存") }
+                        TextButton(onClick = onCancelEdit) { Text("取消") }
+                    }
+                } else {
+                    Text(
+                        message.content,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = if (collapsed) 1 else Int.MAX_VALUE,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    // 与普通聊天一致的操作图标：重新生成 / 编辑 / 复制 / 删除 / 收起
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (isUser) {
+                            MessageIcon(
+                                icon = Icons.Filled.Refresh,
+                                description = "重新生成",
+                                enabled = editable,
+                                onClick = onRegenerate
+                            )
+                            MessageIcon(
+                                icon = Icons.Filled.Edit,
+                                description = "编辑",
+                                enabled = editable,
+                                onClick = onStartEdit
+                            )
+                        } else if (showAssistantActions) {
+                            MessageIcon(
+                                icon = Icons.Filled.Refresh,
+                                description = "重新生成",
+                                enabled = canRegenerateAssistant,
+                                onClick = onRegenerateAssistant
+                            )
+                            MessageIcon(
+                                icon = Icons.Filled.Edit,
+                                description = "编辑回复",
+                                enabled = canRegenerateAssistant,
+                                onClick = onStartEdit
+                            )
+                        }
+                        MessageIcon(
+                            icon = Icons.Filled.ContentCopy,
+                            description = "复制",
+                            onClick = onCopy
+                        )
+                        MessageIcon(
+                            icon = if (deletePending) Icons.Filled.Check else Icons.Filled.Delete,
+                            description = if (deletePending) "确认删除" else "删除",
+                            tint = if (deletePending) MaterialTheme.colorScheme.error else null,
+                            onClick = onDeleteMessage
+                        )
+                        Spacer(Modifier.weight(1f))
+                        if (showVersionSwitcher) {
+                            IconButton(
+                                onClick = onPrevVersion,
+                                enabled = versionIndex > 1,
+                                modifier = Modifier.size(28.dp)
+                            ) {
+                                Icon(
+                                    Icons.AutoMirrored.Filled.KeyboardArrowLeft,
+                                    contentDescription = "上一版本",
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                            Text(
+                                "$versionIndex/$versionCount",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            IconButton(
+                                onClick = onNextVersion,
+                                enabled = versionIndex < versionCount,
+                                modifier = Modifier.size(28.dp)
+                            ) {
+                                Icon(
+                                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                    contentDescription = "下一版本",
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+                        MessageIcon(
+                            icon = if (collapsed) {
+                                Icons.Filled.KeyboardArrowDown
+                            } else {
+                                Icons.Filled.KeyboardArrowUp
+                            },
+                            description = if (collapsed) "展开" else "收起",
+                            onClick = { collapsed = !collapsed }
+                        )
+                    }
+                }
+            }
+        }
+        return
     }
     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
         Text(
@@ -1202,11 +1799,15 @@ private fun AgentMessageRow(
                 TextButton(
                     onClick = onSubmitEdit,
                     enabled = draft.isNotBlank()
-                ) { Text("重新生成") }
+                ) { Text(if (isUser) "重新生成" else "保存") }
                 TextButton(onClick = onCancelEdit) { Text("取消") }
             }
             Text(
-                "提交后会创建新分支，原提问与计划保持不变。",
+                if (isUser) {
+                    "提交后会创建新分支，原提问与计划保持不变。"
+                } else {
+                    "保存后直接更新这条回复的内容。"
+                },
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -1228,10 +1829,299 @@ private fun AgentMessageRow(
                         TextButton(onClick = onRegenerate) { Text("重新生成") }
                     }
                 }
+            } else if (showAssistantActions) {
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    MessageIcon(
+                        icon = Icons.Filled.Refresh,
+                        description = "重新生成",
+                        enabled = canRegenerateAssistant,
+                        onClick = onRegenerateAssistant
+                    )
+                    MessageIcon(
+                        icon = Icons.Filled.Edit,
+                        description = "编辑回复",
+                        enabled = canRegenerateAssistant,
+                        onClick = onStartEdit
+                    )
+                    TextButton(onClick = onCopy) { Text("复制") }
+                }
             }
         }
     }
 }
+
+/**
+ * 历史任务的计划书与执行过程。
+ *
+ * 两张卡片都默认收起、可展开查看；不提供重新生成 / 执行 / 删除等操作。
+ */
+@Composable
+private fun AgentHistoryTaskBlock(item: AgentTaskArtifacts) {
+    AgentPlanCard(
+        planView = item.planView,
+        task = item.task,
+        planning = false,
+        executing = false,
+        readOnly = true,
+        onRegenerate = {},
+        onConfirm = {},
+        onStartExecution = {},
+        onPauseTask = {},
+        onResumeTask = {},
+        onCancelTask = {},
+        onDeleteTask = {}
+    )
+    AgentExecutionCard(
+        nodes = item.nodes,
+        toolExecutions = item.tools,
+        clarifications = item.clarifications,
+        executing = false,
+        error = null,
+        readOnly = true,
+        onCancel = {},
+        onDismissError = {},
+        endedByUser = agentTaskEndedByUser(item.task)
+    )
+}
+
+/**
+ * Agent 会话是连续的：按时间顺序展示同一会话内的历史消息。
+ * 顺序产生的根任务全部展示；发生重新生成 / 编辑分支时，只保留当前任务所在的链条，
+ * 避免同一次提问的旧版本重复出现。
+ */
+private fun continuousMessages(
+    messages: List<AgentMessage>,
+    tasks: List<AgentTask>,
+    currentTask: AgentTask?
+): List<AgentMessage> {
+    if (currentTask == null) return messages.filter { it.taskId == null }
+    val parentsWithChildren = tasks.mapNotNull { it.parentTaskId }.toSet()
+    val chain = mutableSetOf<Long>()
+    var cursor: AgentTask? = currentTask
+    while (cursor != null) {
+        chain += cursor.id
+        val parentId = cursor.parentTaskId
+        cursor = if (parentId == null) null else tasks.firstOrNull { it.id == parentId }
+    }
+    val visibleTaskIds = tasks
+        .filter { it.id in chain || (it.parentTaskId == null && it.id !in parentsWithChildren) }
+        .map { it.id }
+        .toSet()
+    return messages.filter { it.taskId == null || it.taskId in visibleTaskIds }
+}
+
+@Composable
+private fun MessageIcon(
+    icon: ImageVector,
+    description: String,
+    enabled: Boolean = true,
+    tint: Color? = null,
+    onClick: () -> Unit
+) {
+    IconButton(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = Modifier.size(34.dp)
+    ) {
+        Icon(
+            icon,
+            contentDescription = description,
+            modifier = Modifier.size(18.dp),
+            tint = tint ?: if (enabled) {
+                MaterialTheme.colorScheme.primary
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f)
+            }
+        )
+    }
+}
+
+@Composable
+private fun AutoThinkingHeader(
+    status: String?,
+    nodes: List<AgentExecutionNode>,
+    tools: List<AgentToolExecution>,
+    clarifications: List<AgentClarification> = emptyList()
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val active = status != null
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
+            .clickable { expanded = !expanded }
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (active) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(13.dp),
+                    strokeWidth = 1.5.dp,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Spacer(Modifier.width(8.dp))
+            }
+            Text(
+                // 运行中回显实时阶段，结束后显示“深度思考”
+                status ?: "深度思考",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                if (expanded) "收起" else "展开",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary
+            )
+        }
+        if (expanded) {
+            Spacer(Modifier.height(6.dp))
+            if (nodes.isEmpty()) {
+                Text(
+                    "正在准备…",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                nodes.takeLast(6).forEach { node ->
+                    Text(
+                        "${nodeStatusMark(node.status)} ${node.title}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            val recentTools = tools.takeLast(6)
+            if (recentTools.isNotEmpty()) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "工具",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                recentTools.forEach { tool ->
+                    Text(
+                        "· ${tool.toolDisplayName.ifBlank { tool.toolName }}  " +
+                            promptToolStatus(tool.status) +
+                            (tool.durationMs?.let { " ${it}ms" } ?: ""),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            // 用户对提问的补充信息归入思维链，不再作为用户对话展示
+            if (clarifications.isNotEmpty()) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "补充信息",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                clarifications.takeLast(6).forEach { clarification ->
+                    Text(
+                        "· ${clarification.answer.take(200)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AutoLiveAssistantCard(
+    status: String?,
+    nodes: List<AgentExecutionNode>,
+    tools: List<AgentToolExecution>,
+    clarifications: List<AgentClarification> = emptyList(),
+    error: String = "",
+    canRecover: Boolean = false,
+    endedByUser: Boolean = false,
+    onRetry: () -> Unit = {},
+    onEnd: () -> Unit = {}
+) {
+    Surface(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(
+            0.5.dp,
+            MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.8f)
+        )
+    ) {
+        Column(Modifier.padding(12.dp)) {
+            AutoThinkingHeader(
+                status = if (endedByUser) "任务完成" else status,
+                nodes = nodes,
+                tools = tools,
+                clarifications = clarifications
+            )
+            Spacer(Modifier.height(8.dp))
+            if (endedByUser) {
+                // 用户主动结束：按任务完成展示，不再提示失败
+                Text(
+                    AgentTask.USER_ENDED_REASON,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else if (error.isNotBlank()) {
+                Text(
+                    error,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error
+                )
+                if (canRecover) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        TextButton(onClick = onRetry) { Text("重试") }
+                        TextButton(onClick = onEnd) { Text("结束") }
+                    }
+                }
+            } else {
+                Text(
+                    "正在为你处理…",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
+private fun nodeStatusMark(status: String): String = when (status) {
+    AgentNodeStatus.COMPLETED -> "✓"
+    AgentNodeStatus.FAILED -> "×"
+    AgentNodeStatus.RUNNING -> "…"
+    else -> "·"
+}
+
+private fun promptToolStatus(status: String): String = when (status) {
+    AgentToolStatus.SUCCEEDED -> "成功"
+    AgentToolStatus.FAILED -> "失败"
+    AgentToolStatus.RUNNING -> "执行中"
+    else -> "等待"
+}
+
+/** 节点级执行状态提示；这些内容统一在执行过程卡片中展示，不再作为对话消息出现 */
+private val EXECUTION_NOTICE_PREFIXES = listOf(
+    "执行失败（",
+    "执行已暂停",
+    "执行已取消",
+    "执行完毕",
+    "任务已取消",
+    "任务已结束",
+    "任务已从后台恢复，但仍有",
+    "等待你确认 "
+)
+
+private fun isExecutionLifecycleNotice(content: String): Boolean =
+    EXECUTION_NOTICE_PREFIXES.any { content.startsWith(it) }
+
+/** 旧版本把澄清回答写成「补充信息：…」的用户消息，现改为思维链展示 */
+private const val CLARIFICATION_MESSAGE_PREFIX = "补充信息："
 
 private fun copyToClipboard(context: Context, text: String) {
     val manager = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
@@ -1742,7 +2632,12 @@ private fun AgentTaskStateCard(
 ) {
     val message = when (task.status) {
         AgentTaskStatus.FAILED -> task.errorMessage.ifBlank { "规划失败，可重试。" }
-        AgentTaskStatus.CANCELLED -> "任务已取消。"
+        AgentTaskStatus.CANCELLED ->
+            if (task.errorMessage == AgentTask.USER_ENDED_REASON) {
+                "任务完成，${AgentTask.USER_ENDED_REASON}"
+            } else {
+                "任务已取消。"
+            }
         AgentTaskStatus.PLANNING -> "规划可能已中断（页面关闭或进程被回收），可手动重试。"
         else -> "暂无计划。"
     }

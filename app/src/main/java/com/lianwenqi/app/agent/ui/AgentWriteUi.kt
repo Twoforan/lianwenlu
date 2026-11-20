@@ -33,6 +33,9 @@ import com.lianwenqi.app.agent.data.entity.AgentWriteOperationStatus
 import com.lianwenqi.app.agent.data.entity.AgentWriteOperationType
 import com.lianwenqi.app.agent.data.entity.AgentWritePermissionPolicy
 import com.lianwenqi.app.agent.data.entity.AgentWriteRiskLevel
+import com.lianwenqi.app.data.decodeOutlineFields
+import com.lianwenqi.app.data.isStructuredOutlineContent
+import com.lianwenqi.app.data.outlineFieldsForDisplay
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -345,11 +348,13 @@ fun AgentWritePreviewDialog(
                 Spacer(Modifier.height(10.dp))
                 if (operation.operationType == AgentWriteOperationType.CREATE_OUTLINE_NODE) {
                     Text("新建内容", style = MaterialTheme.typography.labelMedium)
-                    Text(
-                        operation.proposedContent,
-                        style = MaterialTheme.typography.bodySmall,
-                        fontFamily = FontFamily.Monospace
-                    )
+                    OutlineFieldsPreview(operation.proposedContent)
+                } else if (operation.operationType == AgentWriteOperationType.UPDATE_OUTLINE_NODE) {
+                    Text("修改后内容", style = MaterialTheme.typography.labelMedium)
+                    OutlineFieldsPreview(operation.proposedContent)
+                } else if (operation.operationType == AgentWriteOperationType.DELETE_OUTLINE_NODE) {
+                    Text("将删除的内容", style = MaterialTheme.typography.labelMedium)
+                    OutlineFieldsPreview(beforeContent(operation))
                 } else {
                     Text("修改前后差异", style = MaterialTheme.typography.labelMedium)
                     AgentWriteDiffView(
@@ -400,6 +405,37 @@ fun AgentWritePreviewDialog(
             }
         }
     )
+}
+
+/** 大纲字段预览：显示标签与其它字段分行展示，与普通聊天写入大纲的字段列表一致 */
+@Composable
+private fun OutlineFieldsPreview(content: String) {
+    val fields = if (isStructuredOutlineContent(content)) {
+        decodeOutlineFields(content)
+    } else {
+        outlineFieldsForDisplay("", content)
+    }
+    if (fields.isEmpty()) {
+        Text(
+            content,
+            style = MaterialTheme.typography.bodySmall,
+            fontFamily = FontFamily.Monospace
+        )
+        return
+    }
+    fields.forEach { (name, value) ->
+        Column(Modifier.padding(vertical = 2.dp)) {
+            Text(
+                name.ifBlank { "内容" },
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary
+            )
+            Text(
+                value.ifBlank { "（空）" },
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
+    }
 }
 
 /** 批量确认一般写入：只合并 NORMAL_WRITE，高风险必须逐项确认 */
@@ -683,6 +719,11 @@ private fun confirmLabel(operationType: String): String = when (operationType) {
     AgentWriteOperationType.UPDATE_CHAPTER_CONTENT -> "确认覆盖正文"
     AgentWriteOperationType.CREATE_OUTLINE_NODE -> "确认创建大纲节点"
     AgentWriteOperationType.UPDATE_OUTLINE_NODE -> "确认修改大纲节点"
+    AgentWriteOperationType.DELETE_OUTLINE_NODE -> "确认删除大纲节点"
+    AgentWriteOperationType.CREATE_CHAPTER -> "确认新建章节"
+    AgentWriteOperationType.DELETE_CHAPTER -> "确认删除章节"
+    AgentWriteOperationType.CREATE_VOLUME -> "确认新建分卷"
+    AgentWriteOperationType.DELETE_VOLUME -> "确认删除分卷"
     else -> "确认写入"
 }
 

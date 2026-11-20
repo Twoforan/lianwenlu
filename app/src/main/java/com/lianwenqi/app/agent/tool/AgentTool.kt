@@ -83,7 +83,9 @@ data class AgentToolResult(
     /** F6：本次调用产生的写入操作 id（只读工具为 null） */
     val writeOperationId: Long? = null,
     /** F6：写入操作是否仍在等待用户确认 */
-    val writeRequiresConfirmation: Boolean = false
+    val writeRequiresConfirmation: Boolean = false,
+    /** 工具要求先向用户提问：执行器据此暂停任务，等待回答后继续 */
+    val awaitingUserInput: Boolean = false
 ) {
     companion object {
         fun ok(
@@ -91,14 +93,16 @@ data class AgentToolResult(
             summary: String = "",
             truncated: Boolean = false,
             writeOperationId: Long? = null,
-            writeRequiresConfirmation: Boolean = false
+            writeRequiresConfirmation: Boolean = false,
+            awaitingUserInput: Boolean = false
         ) = AgentToolResult(
             success = true,
             contentJson = contentJson,
             summary = summary,
             truncated = truncated,
             writeOperationId = writeOperationId,
-            writeRequiresConfirmation = writeRequiresConfirmation
+            writeRequiresConfirmation = writeRequiresConfirmation,
+            awaitingUserInput = awaitingUserInput
         )
 
         fun fail(
@@ -129,6 +133,8 @@ data class AgentTool(
     /** 单次参数 JSON 上限；写入正文等大内容工具需要单独放宽 */
     val maxArgumentsChars: Int = 16 * 1024,
     val parameters: List<AgentToolParam> = emptyList(),
+    /** 是否在「Agent 工具」列表中展示给用户；内部交互工具设为 false */
+    val visibleToUser: Boolean = true,
     val execute: suspend (AgentToolArgs, AgentExecutionContext) -> AgentToolResult
 ) {
     fun parametersSchemaJson(): String = buildJsonObject {

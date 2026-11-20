@@ -25,6 +25,7 @@ object AgentCapabilityCatalog {
         AgentCapability("READ_OUTLINE", "读取大纲", "读取作品大纲条目"),
         AgentCapability("READ_CHAPTER_SYNOPSIS", "读取章节梗概", "读取指定章节的梗概"),
         AgentCapability("READ_CHAPTER_CONTENT", "读取章节正文", "读取指定章节正文"),
+        AgentCapability("READ_CHAPTER_LIST", "读取章节列表", "列出当前书籍的章节与分卷，包含章节 id"),
         AgentCapability("READ_VOLUME_SYNOPSIS", "读取卷梗概", "读取整卷梗概"),
         AgentCapability("SEARCH_CHAPTERS", "检索章节", "按关键词检索章节标题、梗概或正文"),
         AgentCapability("SEARCH_OUTLINE", "检索大纲", "在大纲条目中检索"),
@@ -42,6 +43,11 @@ object AgentCapabilityCatalog {
         AgentCapability("WRITE_CHAPTER_CONTENT", "写入章节正文", "覆盖章节正文（高风险，必须确认）"),
         AgentCapability("CREATE_OUTLINE_NODE", "创建大纲节点", "在当前书籍中创建大纲节点"),
         AgentCapability("UPDATE_OUTLINE_NODE", "修改大纲节点", "修改已有大纲节点的字段"),
+        AgentCapability("DELETE_OUTLINE_NODE", "删除大纲节点", "删除指定大纲节点"),
+        AgentCapability("CREATE_CHAPTER", "新建章节", "在当前书籍中新建章节"),
+        AgentCapability("DELETE_CHAPTER", "删除章节", "删除指定章节（不可恢复）"),
+        AgentCapability("CREATE_VOLUME", "新建分卷", "在当前书籍中新建分卷"),
+        AgentCapability("DELETE_VOLUME", "删除分卷", "删除分卷及其中的全部章节（不可恢复）"),
         AgentCapability("VALIDATE_CONTENT", "校验内容", "对生成或修改的内容做校验"),
         AgentCapability("ASK_USER_CLARIFICATION", "请求用户补充", "向用户提出澄清问题")
     ).sortedBy { it.key }

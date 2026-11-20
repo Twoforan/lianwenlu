@@ -2,7 +2,7 @@ package com.lianwenqi.app.agent.tool
 
 import com.lianwenqi.app.agent.data.jsonPayload
 import com.lianwenqi.app.ai.ChapterGenerationService
-import com.lianwenqi.app.data.decodeOutlineFields
+import com.lianwenqi.app.data.outlineFieldsForDisplay
 import com.lianwenqi.app.data.entity.Book
 import com.lianwenqi.app.data.entity.Chapter
 import com.lianwenqi.app.data.entity.OutlineItem
@@ -211,7 +211,7 @@ class AgentGenerationTools(
         val sb = StringBuilder("【作品大纲】\n")
         items.take(MAX_OUTLINE_ITEMS).forEach { item ->
             if (sb.length >= MAX_OUTLINE_CHARS) return@forEach
-            val fields = decodeOutlineFields(item.content)
+            val fields = outlineFieldsForDisplay(item.title, item.content)
             val head = fields.firstOrNull()?.second?.ifBlank { item.title } ?: item.title
             sb.append("【").append(outlineCategoryLabel(item.category)).append("】")
                 .append("｛").append(head.take(MAX_OUTLINE_HEAD_CHARS)).append("｝\n")

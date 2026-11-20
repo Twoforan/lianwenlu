@@ -24,8 +24,10 @@ class AgentPlanParser(
         if (jsonText.length > maxJsonChars) {
             return AgentPlanParseResult.Failure("计划 JSON 过大（${jsonText.length} 字符，上限 $maxJsonChars）")
         }
+        // 先做字段归一化：补齐 stepId / capabilityKey、映射常见别名、重写依赖 id
+        val normalizedJson = AgentPlanNormalizer.normalize(jsonText)
         val plan = runCatching {
-            agentJson.decodeFromString(AgentPlan.serializer(), jsonText)
+            agentJson.decodeFromString(AgentPlan.serializer(), normalizedJson)
         }.getOrNull() ?: return AgentPlanParseResult.Failure("计划 JSON 结构无法解析")
         val normalized = runCatching {
             agentJson.encodeToString(AgentPlan.serializer(), plan)

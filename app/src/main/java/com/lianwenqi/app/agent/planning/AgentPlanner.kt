@@ -3,7 +3,9 @@ package com.lianwenqi.app.agent.planning
 import com.lianwenqi.app.agent.model.AgentPlan
 import com.lianwenqi.app.agent.model.AgentPlanParseResult
 import com.lianwenqi.app.agent.model.AgentPlanValidationResult
+import com.lianwenqi.app.ai.ChatTurn
 import com.lianwenqi.app.data.entity.Book
+import com.lianwenqi.app.data.entity.ChatRole
 
 /** 一次规划调用的可审计信息（不含 sessionId / taskId，由调用方补充） */
 data class AgentPlanningTrace(
@@ -72,25 +74,45 @@ class AgentPlanner(
             previousPlanJson
         )
         val response = modelClient.complete(modelId, request.turns)
-        val trace = AgentPlanningTrace(
-            modelId = response.modelId,
-            modelName = response.modelName,
-            providerName = response.providerName,
-            apiType = response.apiType,
-            temperature = response.temperature,
-            systemPrompt = request.systemPrompt,
-            userPrompt = request.userPrompt,
-            rawResponse = response.content,
-            latencyMs = response.latencyMs,
-            usage = response.usage,
-            errorMessage = response.errorMessage
-        )
         if (!response.success) {
             return AgentPlanningResult.Failure(
                 message = response.errorMessage.ifBlank { "模型规划请求失败" },
-                trace = trace
+                trace = response.traceOf(request)
             )
         }
+        val first = parseAndValidate(response, request)
+        if (first.isValidPlan()) return first
+
+        // 一次自动修复：模型可能返回空计划 / 非 JSON 说明文字，要求它只输出完整 JSON
+        val repairRequest = AgentPlanningRequest(
+            turns = request.turns + listOf(
+                ChatTurn(ChatRole.ASSISTANT, response.content.take(4_000)),
+                ChatTurn(
+                    ChatRole.USER,
+                    "上面的输出不是可用的执行计划 JSON。请只输出一个完整的计划 JSON 对象，" +
+                        "必须包含非空的 taskTitle、goalSummary 和至少一个 steps；" +
+                        "不要输出解释文字或 Markdown 代码围栏。"
+                )
+            ),
+            systemPrompt = request.systemPrompt,
+            userPrompt = request.userPrompt + "\n\n【修复要求】只输出完整计划 JSON。"
+        )
+        val retry = modelClient.complete(modelId, repairRequest.turns)
+        return if (retry.success) {
+            parseAndValidate(retry, repairRequest)
+        } else {
+            AgentPlanningResult.Failure(
+                message = retry.errorMessage.ifBlank { "模型规划请求失败" },
+                trace = retry.traceOf(repairRequest)
+            )
+        }
+    }
+
+    private fun parseAndValidate(
+        response: AgentModelResponse,
+        request: AgentPlanningRequest
+    ): AgentPlanningResult {
+        val trace = response.traceOf(request)
         return when (val parsed = parser.parse(response.content)) {
             is AgentPlanParseResult.Failure -> AgentPlanningResult.Failure(
                 message = "计划解析失败：${parsed.message}",
@@ -114,4 +136,20 @@ class AgentPlanner(
             }
         }
     }
+
+    private fun AgentPlanningResult.isValidPlan(): Boolean = this is AgentPlanningResult.Success
+
+    private fun AgentModelResponse.traceOf(request: AgentPlanningRequest) = AgentPlanningTrace(
+        modelId = modelId,
+        modelName = modelName,
+        providerName = providerName,
+        apiType = apiType,
+        temperature = temperature,
+        systemPrompt = request.systemPrompt,
+        userPrompt = request.userPrompt,
+        rawResponse = content,
+        latencyMs = latencyMs,
+        usage = usage,
+        errorMessage = errorMessage
+    )
 }

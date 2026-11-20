@@ -66,6 +66,10 @@ class AgentModelClient(
     ): AgentModelResponse =
         runRequest(modelId, turns, tools = tools)
 
+    /** 当前模型单次最大输出 token；<= 0 表示不限输出 */
+    suspend fun outputTokenLimit(modelId: Long): Int =
+        runCatching { endpointFor(modelId)?.maxTokens ?: 0 }.getOrDefault(0)
+
     private suspend fun runRequest(
         modelId: Long,
         turns: List<ChatTurn>,

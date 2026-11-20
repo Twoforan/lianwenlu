@@ -228,7 +228,8 @@ data class PromptTokensDetails(@SerialName("cached_tokens") val cachedTokens: In
 @Serializable
 data class ChatMessageDto(
     val role: String,
-    val content: String,
+    /** 部分供应商在只返回 tool_calls 或仅输出思考内容时会返回 null，不能按必填字符串解析 */
+    val content: String? = null,
     @SerialName("reasoning_content") val reasoningContent: String? = null,
     /** 模型发起的工具调用（仅解析响应时出现） */
     @SerialName("tool_calls") val toolCalls: List<ToolCallDto>? = null

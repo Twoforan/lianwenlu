@@ -194,8 +194,8 @@ class ChatRepository(private val db: AppDatabase) : ChatGateway {
             outlineItems.forEach { grouped.getOrPut(it.category) { mutableListOf() }.add(it) }
             grouped.forEach { (category, items) ->
                 items.forEachIndexed { index, item ->
-                    val fields = decodeOutlineFields(item.content)
-                    // 首项即条目的「显示标签」，其值作为对外标题；旧数据回落用 item.title
+                    val fields = outlineFieldsForDisplay(item.title, item.content)
+                    // 首项即条目的「显示标签」，其值作为对外标题；旧版纯文本内容直接用条目标题
                     val head = fields.firstOrNull()?.second?.ifBlank { item.title } ?: item.title
                     if (index == 0) sb.append("【").append(outlineCategoryLabel(category)).append("】")
                     sb.append("｛").append(head).append("｝").append('\n')
@@ -240,7 +240,7 @@ class ChatRepository(private val db: AppDatabase) : ChatGateway {
     /** 单条大纲条目：不含分类标题（拼接时按相邻分类去重输出） */
     suspend fun renderOutlineEntry(outlineId: Long): String? {
         val item = outlineDao.getById(outlineId) ?: return null
-        val fields = decodeOutlineFields(item.content)
+        val fields = outlineFieldsForDisplay(item.title, item.content)
         val head = fields.firstOrNull()?.second?.ifBlank { item.title } ?: item.title
         return buildString {
             append("｛").append(head).append("｝").append('\n')

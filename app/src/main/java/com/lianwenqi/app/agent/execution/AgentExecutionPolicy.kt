@@ -38,6 +38,7 @@ object AgentExecutionPolicy {
         "READ_OUTLINE",
         "READ_CHAPTER_SYNOPSIS",
         "READ_CHAPTER_CONTENT",
+        "READ_CHAPTER_LIST",
         "SEARCH_CHAPTERS",
         "RETRIEVE_MEMORY",
         "READ_VOLUME_SYNOPSIS",
@@ -58,7 +59,12 @@ object AgentExecutionPolicy {
         "WRITE_CHAPTER_CONTENT",
         "WRITE_OUTLINE",
         "CREATE_OUTLINE_NODE",
-        "UPDATE_OUTLINE_NODE"
+        "UPDATE_OUTLINE_NODE",
+        "DELETE_OUTLINE_NODE",
+        "CREATE_CHAPTER",
+        "DELETE_CHAPTER",
+        "CREATE_VOLUME",
+        "DELETE_VOLUME"
     )
 
     /** 生成草稿能力：调用现有生成流程，结果不直接写入章节 */
@@ -102,13 +108,15 @@ object AgentExecutionPolicy {
     fun nodeTypeFor(capabilityKey: String): String = when (capabilityKey) {
         "READ_OUTLINE" -> AgentNodeType.SEARCH_OUTLINE
         "READ_CHAPTER_SYNOPSIS", "READ_CHAPTER_CONTENT", "SEARCH_CHAPTERS",
-        "READ_STORY_CONTEXT" -> AgentNodeType.SEARCH_CHAPTER
+        "READ_STORY_CONTEXT", "READ_CHAPTER_LIST" -> AgentNodeType.SEARCH_CHAPTER
         "RETRIEVE_MEMORY" -> AgentNodeType.SEARCH_MEMORY
         "ANALYZE_CHARACTER_RELATIONSHIPS", "ANALYZE_PLOT_CONSISTENCY",
         "GENERATE_REPORT" -> AgentNodeType.ANALYZE_RESULT
         "VALIDATE_CONTENT" -> AgentNodeType.VALIDATE
         "WRITE_CHAPTER_SYNOPSIS", "WRITE_CHAPTER_CONTENT", "WRITE_OUTLINE",
-        "CREATE_OUTLINE_NODE", "UPDATE_OUTLINE_NODE" -> AgentNodeType.WRITE_DATA
+        "CREATE_OUTLINE_NODE", "UPDATE_OUTLINE_NODE", "DELETE_OUTLINE_NODE",
+        "CREATE_CHAPTER", "DELETE_CHAPTER", "CREATE_VOLUME", "DELETE_VOLUME" ->
+            AgentNodeType.WRITE_DATA
         "GENERATE_SYNOPSIS" -> AgentNodeType.GENERATE_SYNOPSIS
         "GENERATE_CONTENT" -> AgentNodeType.GENERATE_CONTENT
         else -> AgentNodeType.PLAN_STEP

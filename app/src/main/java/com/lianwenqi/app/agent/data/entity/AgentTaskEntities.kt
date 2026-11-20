@@ -257,6 +257,9 @@ data class AgentTask(
 ) {
     companion object {
         const val DEFAULT_TITLE = "新任务"
+
+        /** 用户主动点「结束」时写入的原因；界面据此展示「任务完成」而不是失败 */
+        const val USER_ENDED_REASON = "用户主动选择结束"
     }
 }
 

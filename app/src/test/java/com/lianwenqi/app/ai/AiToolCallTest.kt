@@ -67,6 +67,19 @@ class AiToolCallTest {
     }
 
     @Test
+    fun chatCompletionsNonStream_nullContentWithToolCalls_isParsed() {
+        // 部分供应商在只返回工具调用时把 content 置为 null（标准 OpenAI 行为），不能当成解析失败
+        val raw = """{"choices":[{"message":{"role":"assistant","content":null,
+            "reasoning_content":"调用工具读取书籍信息","tool_calls":[
+            {"id":"call_1","function":{"name":"get_book_info","arguments":"{}"}}
+        ]},"finish_reason":"tool_calls"}]}"""
+        val parsed = json.decodeFromString<ChatCompletionResponse>(raw)
+        val message = parsed.choices.first().message
+        assertNull(message?.content)
+        assertEquals("get_book_info", message?.toolCalls?.first()?.function?.name)
+    }
+
+    @Test
     fun responsesStream_addedAndDeltaAccumulate() {
         val acc = ToolCallAccumulator()
         val added = json.decodeFromString<ResponsesStreamEvent>(

@@ -72,6 +72,50 @@ class AgentPlanParserTest {
     }
 
     @Test
+    fun 归一化补齐缺失的步骤字段并映射别名() {
+        val loose = """
+            {
+              "title": "整理大纲",
+              "summary": "把散乱设定整理进大纲",
+              "steps": [
+                {"id": "s1", "name": "读取现有大纲", "type": "read_outline"},
+                {"name": "写入新大纲", "type": "write_outline", "dependencies": ["s1"], "risk": "high"}
+              ]
+            }
+        """.trimIndent()
+        val result = parser.parse(loose)
+        assertTrue(result is AgentPlanParseResult.Success)
+        val plan = (result as AgentPlanParseResult.Success).plan
+        assertEquals("整理大纲", plan.taskTitle)
+        assertEquals("把散乱设定整理进大纲", plan.goalSummary)
+        assertEquals(listOf("s1", "step_002"), plan.steps.map { it.stepId })
+        assertEquals("READ_OUTLINE", plan.steps[0].capabilityKey)
+        assertEquals("WRITE_OUTLINE", plan.steps[1].capabilityKey)
+        assertEquals(listOf("s1"), plan.steps[1].dependencies)
+        assertEquals("HIGH", plan.steps[1].riskLevel)
+    }
+
+    @Test
+    fun 缺失stepId与能力时自动推断() {
+        val loose = """
+            {
+              "steps": [
+                {"title": "读取大纲"},
+                {"title": "写大纲"}
+              ]
+            }
+        """.trimIndent()
+        val result = parser.parse(loose)
+        assertTrue(result is AgentPlanParseResult.Success)
+        val plan = (result as AgentPlanParseResult.Success).plan
+        assertEquals(listOf("step_001", "step_002"), plan.steps.map { it.stepId })
+        assertEquals("READ_OUTLINE", plan.steps[0].capabilityKey)
+        assertEquals("WRITE_OUTLINE", plan.steps[1].capabilityKey)
+        assertTrue(plan.taskTitle.isNotBlank())
+        assertTrue(plan.goalSummary.isNotBlank())
+    }
+
+    @Test
     fun 解析纯JSON计划() {
         val result = parser.parse(validJson)
         assertTrue(result is AgentPlanParseResult.Success)

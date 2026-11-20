@@ -141,7 +141,7 @@ data class OutlineDiffItem(
     val fields: List<Pair<String, String>> get() = decodeOutlineFields(content)
 
     val displayName: String
-        get() = fields.firstOrNull()?.second?.ifBlank { title } ?: title
+        get() = com.lianwenqi.app.data.outlineDisplayName(title, content)
 }
 
 /** 新增建议可用的目标分类与字段模板 */

@@ -20,9 +20,11 @@ import com.lianwenqi.app.agent.data.entity.AgentNodeStatus
 import com.lianwenqi.app.agent.data.entity.AgentNodeType
 import com.lianwenqi.app.agent.data.entity.AgentTaskStatus
 import com.lianwenqi.app.agent.data.entity.AgentToolStatus
+import com.lianwenqi.app.agent.data.entity.AgentWorkMode
 import com.lianwenqi.app.agent.data.entity.AgentWriteOperation
 import com.lianwenqi.app.agent.data.entity.AgentWriteOperationStatus
 import com.lianwenqi.app.agent.data.entity.AgentWriteOperationType
+import com.lianwenqi.app.agent.data.entity.AgentWritePermissionStatus
 import com.lianwenqi.app.agent.data.jsonPayload
 import com.lianwenqi.app.agent.model.AgentPlan
 import com.lianwenqi.app.agent.model.AgentPlanParseResult
@@ -44,6 +46,9 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.put
+
+/** 注入 Agent 上下文的历史对话字符上限 */
+private const val MAX_HISTORY_CHARS = 12_000
 
 /** F7 执行入口参数；为空时保持 F4/F6 的“单次直接执行”兼容行为 */
 data class AgentExecutionOptions(
@@ -145,6 +150,8 @@ class AgentExecutionEngine(
 
         val task = tasks.getTask(taskId)
             ?: return AgentExecutionResult.Blocked(taskId, "任务不存在")
+        // 自动模式：直接回答为目标，允许不调用工具就完成
+        val autoMode = task.workMode == AgentWorkMode.AUTO
         if (task.planJson.isBlank() || task.planJson == "{}") {
             return AgentExecutionResult.Blocked(taskId, "任务没有可执行计划")
         }
@@ -281,11 +288,22 @@ class AgentExecutionEngine(
 
         var currentNodeId: Long? = null
         var currentIndex = startIndex
-        var totalToolCalls = alreadySucceeded.size
+        // 每次执行轮次重新计预算；否则失败重试会被历史调用次数直接卡死
+        var totalToolCalls = 0
         var totalModelRounds = 0
         val signatureCounts = mutableMapOf<String, Int>()
         val startedAt = System.currentTimeMillis()
         var waitAccumulatedMs = 0L
+        // 用户在任务中途回答的补充信息：恢复执行时注入模型上下文
+        val clarificationBlock = runCatching {
+            tasks.answeredClarifications(taskId).joinToString("\n") {
+                "问：${it.question}\n答：${it.answer}"
+            }
+        }.getOrDefault("")
+        // Agent 会话是连续的：把本会话此前轮次的历史对话注入当前任务（与前缀词设置无关）
+        val historyBlock = runCatching {
+            buildConversationHistory(taskId, task.sessionId)
+        }.getOrDefault("")
 
         try {
             val referenceContext = assembleReferenceContext(taskId, sessionId)
@@ -311,30 +329,57 @@ class AgentExecutionEngine(
                 var finalRequestId: Long? = null
                 var stepRounds = 0
                 var stepToolCalls = 0
+                /** 自动模式“只声称写入却没调用工具”的纠正次数，避免无限纠正 */
+                var writeClaimNudges = 0
                 val turns = mutableListOf<ChatTurn>()
-                turns += ChatTurn(ChatRole.SYSTEM, AgentExecutionPrompt.systemPrompt())
+                val authorizedBlock = buildString {
+                    if (referenceContext.promptBlock.isNotBlank()) {
+                        append(referenceContext.promptBlock)
+                    }
+                    if (recoveryContext.isNotBlank()) {
+                        if (isNotEmpty()) appendLine()
+                        append(recoveryContext)
+                    }
+                    if (historyBlock.isNotBlank()) {
+                        if (isNotEmpty()) appendLine()
+                        append("【历史对话】\n").append(historyBlock)
+                    }
+                    if (clarificationBlock.isNotBlank()) {
+                        if (isNotEmpty()) appendLine()
+                        append("【用户补充信息】\n").append(clarificationBlock)
+                    }
+                }
+                val toolResults = if (toolContext.isBlank()) {
+                    emptyList()
+                } else {
+                    listOf(toolContext.toString())
+                }
+                turns += ChatTurn(
+                    ChatRole.SYSTEM,
+                    if (autoMode) {
+                        AgentExecutionPrompt.systemPromptAuto()
+                    } else {
+                        AgentExecutionPrompt.systemPrompt()
+                    }
+                )
                 turns += ChatTurn(
                     ChatRole.USER,
-                    AgentExecutionPrompt.stepPrompt(
-                        taskGoal = task.userGoal,
-                        plan = plan,
-                        step = step,
-                        priorStepResults = stepResults.map { it.second }.toList(),
-                        toolResults = if (toolContext.isBlank()) {
-                            emptyList()
-                        } else {
-                            listOf(toolContext.toString())
-                        },
-                        authorizedContext = buildString {
-                            if (referenceContext.promptBlock.isNotBlank()) {
-                                append(referenceContext.promptBlock)
-                            }
-                            if (recoveryContext.isNotBlank()) {
-                                if (isNotEmpty()) appendLine()
-                                append(recoveryContext)
-                            }
-                        }
-                    )
+                    if (autoMode) {
+                        AgentExecutionPrompt.autoPrompt(
+                            goal = task.userGoal,
+                            toolResults = toolResults,
+                            authorizedContext = authorizedBlock
+                        )
+                    } else {
+                        AgentExecutionPrompt.stepPrompt(
+                            taskGoal = task.userGoal,
+                            plan = plan,
+                            step = step,
+                            priorStepResults = stepResults.map { it.second }.toList(),
+                            toolResults = toolResults,
+                            authorizedContext = authorizedBlock
+                        )
+                    }
                 )
 
                 while (finalText == null) {
@@ -383,6 +428,24 @@ class AgentExecutionEngine(
                         val successes = toolExecutions.executionsOfTask(taskId)
                             .filter { it.status == AgentToolStatus.SUCCEEDED }
                         val nodeHasSuccess = successes.any { it.nodeId == stepNodeId }
+                        // 自动模式兜底：正文声称已新建 / 已修改，但本任务没有任何写入记录时，
+                        // 说明模型把“文字描述”当成了提交，纠正一轮要求它真正调用写入工具
+                        val hasWriteRecord = writeOperations?.ofTask(taskId)?.isNotEmpty() == true
+                        if (autoMode && writeClaimNudges < 1 && !hasWriteRecord &&
+                            looksLikeWriteClaim(text)
+                        ) {
+                            writeClaimNudges++
+                            call.requestId?.let { modelRequests?.markApplied(it) }
+                            turns += ChatTurn(ChatRole.ASSISTANT, text)
+                            turns += ChatTurn(
+                                ChatRole.USER,
+                                "你还没有调用任何写入工具，上面的描述没有保存到小说数据。" +
+                                    "请立即调用对应的写入工具提交修改（如 create_outline_node、" +
+                                    "update_outline_node）；只有工具返回待确认或写入成功才算完成，" +
+                                    "不要只用文字描述。"
+                            )
+                            continue
+                        }
                         if (policy.isWriteCapability(step.capabilityKey)) {
                             val hasWriteOperation = writeOperations
                                 ?.hasOperationForNode(taskId, stepNodeId) == true
@@ -393,12 +456,16 @@ class AgentExecutionEngine(
                                         "不能标记为完成"
                                 )
                             }
-                        } else if (policy.requiresTool(step.capabilityKey) && !nodeHasSuccess) {
+                        } else if (!autoMode &&
+                            policy.requiresTool(step.capabilityKey) && !nodeHasSuccess
+                        ) {
                             throw ExecutionFailure(
                                 AgentFailureKind.VALIDATION,
                                 "步骤「${step.title}」未产生真实工具结果，不能标记为完成"
                             )
-                        } else if (!policy.requiresTool(step.capabilityKey) && successes.isEmpty()) {
+                        } else if (!autoMode && !policy.requiresTool(step.capabilityKey) &&
+                            successes.isEmpty()
+                        ) {
                             throw ExecutionFailure(
                                 AgentFailureKind.VALIDATION,
                                 "步骤「${step.title}」缺少真实工具结果，不能标记为完成"
@@ -412,7 +479,7 @@ class AgentExecutionEngine(
                             "调用工具：" + calls.joinToString("、") { it.name }
                         )
                         val pendingWriteIds = mutableListOf<Long>()
-                        calls.forEach { call ->
+                        for (call in calls) {
                             checkControl(taskId, options)
                             if (totalToolCalls >= limits.maxToolCallsPerTask) {
                                 throw ExecutionFailure(
@@ -436,6 +503,19 @@ class AgentExecutionEngine(
                                 call,
                                 stepNodeId
                             )
+                            if (outcome.awaitingUserInput) {
+                                // ask_user：问题已落库并展示给用户，暂停任务等待回答
+                                tasks.updateStatus(taskId, AgentTaskStatus.WAITING_CONFIRMATION)
+                                tasks.updateExecutionCursor(taskId, index, stepNodeId)
+                                runCatching {
+                                    nodes.updateStatus(
+                                        stepNodeId,
+                                        AgentNodeStatus.WAITING,
+                                        errorMessage = "等待用户回答"
+                                    )
+                                }
+                                throw AgentExecutionWaitingConfirmationException(pendingCount = 0)
+                            }
                             if (outcome.writeRequiresConfirmation && outcome.writeOperationId != null) {
                                 pendingWriteIds += outcome.writeOperationId
                             }
@@ -464,7 +544,7 @@ class AgentExecutionEngine(
                                     errorMessage = "等待写入确认"
                                 )
                             }
-                            notifyWaitingForWrite(taskId, sessionId, pendingWriteIds)
+                            // 待确认写入通过弹窗展示，不再写对话消息
                             if (!options.waitForWriteConfirmation) {
                                 throw AgentExecutionWaitingConfirmationException(
                                     pendingCount = pendingWriteIds.size
@@ -488,6 +568,29 @@ class AgentExecutionEngine(
                 }
 
                 checkControl(taskId, options)
+                // 自动模式兜底：模型把提问写在正文里时转成提问弹窗，避免用户只能反复打字确认
+                val answerText = finalText.orEmpty()
+                if (autoMode && looksLikeUserQuestion(answerText)) {
+                    val created = runCatching {
+                        tasks.createClarification(
+                            taskId = taskId,
+                            question = answerText.trim().take(2_000),
+                            options = emptyList()
+                        )
+                    }.isSuccess
+                    if (created) {
+                        tasks.updateStatus(taskId, AgentTaskStatus.WAITING_CONFIRMATION)
+                        tasks.updateExecutionCursor(taskId, index, stepNodeId)
+                        runCatching {
+                            nodes.updateStatus(
+                                stepNodeId,
+                                AgentNodeStatus.WAITING,
+                                errorMessage = "等待用户回答"
+                            )
+                        }
+                        return AgentExecutionResult.WaitingConfirmation(taskId, 0)
+                    }
+                }
                 nodes.updateStatus(
                     nodeId = stepNodeId,
                     status = AgentNodeStatus.COMPLETED,
@@ -507,7 +610,9 @@ class AgentExecutionEngine(
             }
 
             checkControl(taskId, options)
-            val summary = buildFinalSummary(plan, stepResults)
+            // 最终消息预算跟随模型的最大输出 token 设置；不限输出（<=0）时不做限制
+            val messageBudget = outputBudgetChars(modelClient.outputTokenLimit(modelId))
+            val summary = buildFinalSummary(plan, stepResults, autoMode, messageBudget)
             val completeSequence = nodes.maxSequence(taskId) + 1
             val completeNode = nodes.createNode(
                 taskId = taskId,
@@ -523,24 +628,27 @@ class AgentExecutionEngine(
             )
             tasks.updateExecutionCursor(taskId, ordered.size, null)
             tasks.updateStatus(taskId, AgentTaskStatus.COMPLETED)
-            runCatching {
-                sessions.addMessage(
-                    sessionId = sessionId,
-                    taskId = taskId,
-                    role = AgentMessageRole.ASSISTANT,
-                    kind = AgentMessageKind.FINAL_ANSWER,
-                    content = summary
-                )
+            // 计划模式：方案与执行结果已由计划卡 / 执行过程卡承载，不再追加总结或“执行完毕”消息
+            if (autoMode) {
+                runCatching {
+                    sessions.addMessage(
+                        sessionId = sessionId,
+                        taskId = taskId,
+                        role = AgentMessageRole.ASSISTANT,
+                        kind = AgentMessageKind.FINAL_ANSWER,
+                        content = summary
+                    )
+                }
             }
             return AgentExecutionResult.Completed(taskId, summary)
         } catch (e: AgentExecutionPausedException) {
             withContext(NonCancellable) {
-                finalizePaused(taskId, sessionId, currentNodeId, currentIndex)
+                finalizePaused(taskId, currentNodeId, currentIndex)
             }
             return AgentExecutionResult.Paused(taskId)
         } catch (e: AgentExecutionCancelledException) {
             withContext(NonCancellable) {
-                finalizeCancelled(taskId, currentNodeId, currentIndex, sessionId)
+                finalizeCancelled(taskId, currentNodeId, currentIndex)
             }
             return AgentExecutionResult.Cancelled(taskId)
         } catch (e: AgentExecutionWaitingConfirmationException) {
@@ -607,16 +715,8 @@ class AgentExecutionEngine(
                 }
                 runCatching { tasks.updateExecutionCursor(taskId, currentIndex, currentNodeId) }
                 runCatching { tasks.setLastErrorKind(taskId, kind) }
+                // 失败原因记录在节点与任务上，由执行过程卡片统一展示，不再写对话消息
                 runCatching { tasks.updateStatus(taskId, AgentTaskStatus.FAILED, message) }
-                runCatching {
-                    sessions.addMessage(
-                        sessionId = sessionId,
-                        taskId = taskId,
-                        role = AgentMessageRole.ASSISTANT,
-                        kind = AgentMessageKind.NOTICE,
-                        content = "执行失败（${AgentFailureKind.label(kind)}）：$message"
-                    )
-                }
             }
             return AgentExecutionResult.Failed(taskId, message)
         }
@@ -655,11 +755,11 @@ class AgentExecutionEngine(
         }
         when {
             task.cancelRequested -> finalizeCancelled(
-                taskId, currentNodeId, currentIndex, sessionId
+                taskId, currentNodeId, currentIndex
             )
 
             task.pauseRequested -> finalizePaused(
-                taskId, sessionId, currentNodeId, currentIndex
+                taskId, currentNodeId, currentIndex
             )
 
             else -> {
@@ -710,7 +810,6 @@ class AgentExecutionEngine(
 
     private suspend fun finalizePaused(
         taskId: Long,
-        sessionId: Long,
         currentNodeId: Long?,
         currentIndex: Int
     ) {
@@ -720,23 +819,14 @@ class AgentExecutionEngine(
             }
         }
         runCatching { tasks.updateExecutionCursor(taskId, currentIndex, currentNodeId) }
+        // 暂停状态由任务与执行过程卡片展示，不再写对话消息
         runCatching { tasks.updateStatus(taskId, AgentTaskStatus.PAUSED) }
-        runCatching {
-            sessions.addMessage(
-                sessionId = sessionId,
-                taskId = taskId,
-                role = AgentMessageRole.ASSISTANT,
-                kind = AgentMessageKind.NOTICE,
-                content = "执行已暂停，已完成的步骤结果保留；恢复后从当前步骤继续。"
-            )
-        }
     }
 
     private suspend fun finalizeCancelled(
         taskId: Long,
         currentNodeId: Long?,
-        currentIndex: Int,
-        sessionId: Long? = null
+        currentIndex: Int
     ) {
         runCatching { writeService?.cancelPending(taskId, "用户取消任务") }
         currentNodeId?.let { id ->
@@ -745,19 +835,8 @@ class AgentExecutionEngine(
             }
         }
         runCatching { tasks.updateExecutionCursor(taskId, currentIndex, currentNodeId) }
+        // 取消状态由任务与执行过程卡片展示，不再写对话消息
         runCatching { tasks.updateStatus(taskId, AgentTaskStatus.CANCELLED, "用户取消") }
-        val task = tasks.getTask(taskId)
-        if (sessionId != null && task != null) {
-            runCatching {
-                sessions.addMessage(
-                    sessionId = sessionId,
-                    taskId = taskId,
-                    role = AgentMessageRole.ASSISTANT,
-                    kind = AgentMessageKind.NOTICE,
-                    content = "执行已取消，已完成的步骤结果保留；已成功的写入不会自动撤销。"
-                )
-            }
-        }
     }
 
     private data class AgentModelCallResult(
@@ -827,30 +906,6 @@ class AgentExecutionEngine(
         }
     }
 
-    private suspend fun notifyWaitingForWrite(
-        taskId: Long,
-        sessionId: Long,
-        pendingOperationIds: List<Long>
-    ) {
-        val operations = writeOperations ?: return
-        val pending = pendingOperationIds.mapNotNull { operations.get(it) }
-        runCatching {
-            sessions.addMessage(
-                sessionId = sessionId,
-                taskId = taskId,
-                role = AgentMessageRole.ASSISTANT,
-                kind = AgentMessageKind.NOTICE,
-                content = buildString {
-                    appendLine("等待你确认 ${pending.size} 个写入操作：")
-                    pending.take(8).forEach { operation ->
-                        appendLine("· ${operation.operationSummary.take(120)}")
-                    }
-                    appendLine("确认前不会修改任何小说数据。")
-                }.trimEnd()
-            )
-        }
-    }
-
     /**
      * 恢复执行时给模型的只读状态块。
      * 只包含操作 id / 类型 / 状态，不包含正文，不授予任何新权限。
@@ -862,9 +917,33 @@ class AgentExecutionEngine(
         if (nodeOperations.isEmpty()) {
             return "【恢复执行】本次从持久化游标继续；已完成步骤不会重跑。"
         }
+        // 用户已在弹窗中处理的写入：把确认结果原样返回给模型，让它据此回复，
+        // 而不是继续把操作当成“待确认”再让用户确认一次。
+        val decided = nodeOperations.filter { operation ->
+            operation.executionStatus == AgentWriteOperationStatus.SUCCEEDED ||
+                operation.executionStatus == AgentWriteOperationStatus.REJECTED ||
+                operation.executionStatus == AgentWriteOperationStatus.FAILED ||
+                operation.executionStatus == AgentWriteOperationStatus.CONFLICT ||
+                operation.executionStatus == AgentWriteOperationStatus.ROLLED_BACK ||
+                operation.executionStatus == AgentWriteOperationStatus.CANCELLED
+        }
         return buildString {
             appendLine("【恢复执行】本次从持久化游标继续；已完成步骤不会重跑。")
-            appendLine("已成功写入的操作不会重复执行；待确认操作仍需用户确认。")
+            if (decided.isNotEmpty()) {
+                appendLine("【写入确认结果】用户在弹窗中已经处理以下写入操作：")
+                decided.takeLast(12).forEach { operation ->
+                    appendLine(
+                        "· ${writeDecisionLine(operation)}" +
+                            "（${AgentWriteOperationType.label(operation.operationType)}）"
+                    )
+                }
+                appendLine(
+                    "请直接根据以上确认结果给用户最终回复：已成功的不再重复提议，" +
+                        "已拒绝或失败的说明情况；不要再让用户确认同一操作。"
+                )
+            } else {
+                appendLine("已成功写入的操作不会重复执行；待确认操作仍需用户确认。")
+            }
             appendLine("本任务写入操作状态：")
             nodeOperations.take(12).forEach { operation ->
                 appendLine(
@@ -1045,24 +1124,149 @@ class AgentExecutionEngine(
         return result.takeIf { it.size == steps.size }
     }
 
+    /**
+     * Agent 会话是连续的：把本会话此前轮次的问答注入当前任务上下文。
+     * 与「前缀词管理」设置无关，只要属于同一 Agent 会话就会进入上下文。
+     */
+    private suspend fun buildConversationHistory(taskId: Long, sessionId: Long): String {
+        if (sessionId <= 0L) return ""
+        val messages = runCatching { sessions.getMessages(sessionId) }.getOrDefault(emptyList())
+        val lines = messages.asSequence()
+            .filter { it.taskId != taskId }
+            .filter {
+                it.kind == AgentMessageKind.USER_INPUT ||
+                    it.kind == AgentMessageKind.FINAL_ANSWER
+            }
+            .mapNotNull { message ->
+                val text = message.content.trim()
+                if (text.isBlank()) {
+                    null
+                } else {
+                    val who = if (message.role == AgentMessageRole.USER) "用户" else "Agent"
+                    "$who：$text"
+                }
+            }
+            .toList()
+        if (lines.isEmpty()) return ""
+        val joined = lines.joinToString("\n")
+        return if (joined.length <= MAX_HISTORY_CHARS) {
+            joined
+        } else {
+            "（更早的对话已省略）\n" + joined.takeLast(MAX_HISTORY_CHARS)
+        }
+    }
+
     private fun buildFinalSummary(
         plan: AgentPlan,
-        results: List<Pair<AgentPlanStep, String>>
-    ): String = buildString {
-        appendLine("【只读执行结果】")
-        appendLine("任务：${plan.taskTitle}")
-        appendLine("步骤完成：${results.size}/${plan.steps.size}")
-        results.forEachIndexed { index, (step, text) ->
-            appendLine()
-            appendLine("${index + 1}. ${step.title}")
-            appendLine(text.take(1_000))
+        results: List<Pair<AgentPlanStep, String>>,
+        autoMode: Boolean = false,
+        maxChars: Int = Int.MAX_VALUE
+    ): String {
+        // 自动模式直接使用回答正文，不拼接计划 / 步骤等内部信息
+        if (autoMode) {
+            val answer = results.joinToString("\n\n") { it.second }.trim()
+            if (answer.isNotBlank()) return truncateForBudget(answer, maxChars)
         }
-        appendLine()
-        append("以上结果来自真实工具与模型分析；写入操作均经过用户确认。")
-    }.take(limits.maxStepOutputChars)
+        val text = buildString {
+            appendLine("【只读执行结果】")
+            appendLine("任务：${plan.taskTitle}")
+            appendLine("步骤完成：${results.size}/${plan.steps.size}")
+            results.forEachIndexed { index, (step, text) ->
+                appendLine()
+                appendLine("${index + 1}. ${step.title}")
+                appendLine(text)
+            }
+            appendLine()
+            append("以上结果来自真实工具与模型分析；写入操作均经过用户确认。")
+        }
+        return truncateForBudget(text, maxChars)
+    }
 
     private class ExecutionFailure(
         val kind: String,
         message: String
     ) : Exception(message)
+}
+
+/**
+ * 自动模式兜底判断：正文是否是在向用户提问 / 等待用户做决定。
+ *
+ * 只用于把「本该用 ask_user 却写进正文」的问题转成提问弹窗；
+ * 限制长度与关键词，避免普通回答中的反问被误判。
+ */
+private fun looksLikeUserQuestion(text: String): Boolean {
+    val content = text.trim()
+    if (content.isEmpty() || content.length > 1_500) return false
+    if (!content.contains('？') && !content.contains('?')) return false
+    val cues = listOf(
+        "要不要", "是否", "还是您", "还是你", "选哪", "哪个",
+        "确认", "您回", "你回", "回复我", "告诉我", "可以吗",
+        "行吗", "想跟您确认", "想和你确认", "麻烦您"
+    )
+    return cues.any { content.contains(it) }
+}
+
+/**
+ * 判断正文是否在声称已经完成写入（新建 / 修改 / 删除等）。
+ *
+ * 用于自动模式兜底：没有真实写入记录时，这类表述属于幻觉，需要纠正模型去调用写入工具。
+ */
+private fun looksLikeWriteClaim(text: String): Boolean {
+    val cues = listOf(
+        "已新建", "已创建", "已添加", "已修改", "已更新", "已删除",
+        "已提交", "已写入", "已保存", "已经新建", "已经创建", "已经修改",
+        "都办好了", "都改好了", "已经拆", "已拆成", "我现在就提交", "马上提交"
+    )
+    return cues.any { text.contains(it) }
+}
+
+/**
+ * 把模型的最大输出 token 折算为整条最终消息的字符预算。
+ *
+ * 中文场景下 1 token 约 1.5-3 字，这里按 3 字/token 取上限，避免过早截断；
+ * maxTokens <= 0（不限输出）时视为不限制。
+ */
+private fun outputBudgetChars(maxTokens: Int): Int {
+    if (maxTokens <= 0) return Int.MAX_VALUE
+    return (maxTokens.toLong() * 3L)
+        .coerceAtMost(Int.MAX_VALUE.toLong() - 1)
+        .toInt()
+}
+
+/** 超出预算时明确标注截断，避免悄悄丢内容 */
+private fun truncateForBudget(text: String, maxChars: Int): String {
+    if (maxChars == Int.MAX_VALUE || maxChars <= 0 || text.length <= maxChars) return text
+    return text.take(maxChars) + "\n\n（内容过长，已按模型最大输出预算截断）"
+}
+
+/**
+ * 把一项已处理的写入操作转成模型可读的确认结果。
+ *
+ * 弹窗确认后需要把结果回传给模型（与 ask_user 一致），
+ * 避免模型以为操作仍在等待确认而重复询问。
+ */
+private fun writeDecisionLine(operation: AgentWriteOperation): String {
+    val target = operation.operationSummary
+        .ifBlank { AgentWriteOperationType.label(operation.operationType) }
+        .take(120)
+    val decision = when (operation.executionStatus) {
+        AgentWriteOperationStatus.SUCCEEDED ->
+            if (operation.permissionStatus == AgentWritePermissionStatus.AUTO_APPROVED) {
+                "已自动执行成功"
+            } else {
+                "用户已批准，执行成功"
+            }
+
+        AgentWriteOperationStatus.REJECTED -> "用户已拒绝，未执行"
+        AgentWriteOperationStatus.FAILED ->
+            "执行失败：" + operation.errorMessage.ifBlank { "未知原因" }
+
+        AgentWriteOperationStatus.CONFLICT ->
+            "执行冲突：" + operation.errorMessage.ifBlank { "目标数据已变化，需重新预览" }
+
+        AgentWriteOperationStatus.ROLLED_BACK -> "用户已撤销，已恢复原内容"
+        AgentWriteOperationStatus.CANCELLED -> "已取消"
+        else -> AgentWriteOperationStatus.label(operation.executionStatus)
+    }
+    return "$target → $decision"
 }

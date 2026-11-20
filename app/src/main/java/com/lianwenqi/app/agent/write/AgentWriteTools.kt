@@ -14,7 +14,15 @@ import com.lianwenqi.app.agent.tool.AgentToolParamType
 import com.lianwenqi.app.agent.tool.AgentToolPermission
 import com.lianwenqi.app.agent.tool.AgentToolResult
 import com.lianwenqi.app.ai.PromptDiagnostics
+import com.lianwenqi.app.data.buildOutlineContentForAgent
+import com.lianwenqi.app.data.decodeOutlineFields
+import com.lianwenqi.app.data.encodeOutlineFields
+import com.lianwenqi.app.data.isStructuredOutlineContent
+import com.lianwenqi.app.data.outlineDisplayName
+import com.lianwenqi.app.data.outlineFieldsForDisplay
+import com.lianwenqi.app.data.parseOutlineFieldText
 import com.lianwenqi.app.data.entity.Book
+import com.lianwenqi.app.data.entity.normalizeOutlineCategory
 import kotlinx.serialization.json.put
 
 /**
@@ -28,6 +36,7 @@ class AgentWriteTools(
     private val chapterMetaOf: suspend (Long) -> AgentChapterSnapshot?,
     private val chapterContentOf: suspend (Long) -> String?,
     private val outlineOf: suspend (Long) -> AgentOutlineSnapshot?,
+    private val volumeOf: suspend (Long) -> AgentVolumeSnapshot?,
     private val writeService: AgentWriteExecutionService
 ) {
 
@@ -35,7 +44,12 @@ class AgentWriteTools(
         updateChapterSynopsis(),
         updateChapterContent(),
         createOutlineNode(),
-        updateOutlineNode()
+        updateOutlineNode(),
+        deleteOutlineNode(),
+        createChapter(),
+        deleteChapter(),
+        createVolume(),
+        deleteVolume()
     )
 
     private fun updateChapterSynopsis(): AgentTool = AgentTool(
@@ -220,11 +234,18 @@ class AgentWriteTools(
                 maxLength = AgentWriteLimits.MAX_OUTLINE_TITLE_CHARS
             ),
             AgentToolParam(
+                name = "fields",
+                type = AgentToolParamType.STRING,
+                description = "结构化字段，每行「字段名：内容」，例如「身份：...」「性格：...」；" +
+                    "会与显示标签分开保存，推荐使用",
+                required = false,
+                maxLength = AgentWriteLimits.MAX_OUTLINE_CONTENT_CHARS
+            ),
+            AgentToolParam(
                 name = "content",
                 type = AgentToolParamType.STRING,
-                description = "节点内容",
-                required = true,
-                minLength = 1,
+                description = "无固定字段时的整段内容；与 fields 至少提供一个",
+                required = false,
                 maxLength = AgentWriteLimits.MAX_OUTLINE_CONTENT_CHARS
             ),
             AgentToolParam(
@@ -239,22 +260,32 @@ class AgentWriteTools(
     ) { args, context ->
         val bookId = context.bookId ?: return@AgentTool AgentToolResult.fail(NO_BOOK)
         val book = bookOf(bookId) ?: return@AgentTool AgentToolResult.fail("当前书籍不存在")
-        val category = args.string("category").trim()
+        val category = normalizeOutlineCategory(args.string("category"))
         val title = args.string("title").trim()
+        val fieldsText = args.string("fields")
         val content = args.string("content")
         val tag = args.string("tag").trim()
         if (category.isEmpty()) return@AgentTool AgentToolResult.fail("category 不能为空")
         if (title.isEmpty()) return@AgentTool AgentToolResult.fail("title 不能为空")
-        if (content.isBlank()) return@AgentTool AgentToolResult.fail("content 不能为空")
-        if (content.length > AgentWriteLimits.MAX_OUTLINE_CONTENT_CHARS) {
+        if (fieldsText.isBlank() && content.isBlank()) {
+            return@AgentTool AgentToolResult.fail("fields 与 content 至少提供一个")
+        }
+        val bodyLength = fieldsText.length + content.length
+        if (bodyLength > AgentWriteLimits.MAX_OUTLINE_CONTENT_CHARS) {
             return@AgentTool AgentToolResult.fail(
                 "大纲内容超过上限（${AgentWriteLimits.MAX_OUTLINE_CONTENT_CHARS} 字）"
             )
         }
+        // 统一转为结构化字段：显示标签一项，其余按「字段名：内容」分开存储
+        val storedContent = buildOutlineContentForAgent(
+            title = title,
+            fieldsText = fieldsText,
+            content = content
+        )
         val reason = args.string("reason").take(AgentWriteLimits.MAX_REASON_CHARS)
         val argsJson = agentJson.encodeToString(
             AgentOutlineCreateArgs.serializer(),
-            AgentOutlineCreateArgs(category, tag, title, content)
+            AgentOutlineCreateArgs(category, tag, title, storedContent)
         )
         val summary = "在《${book.title}》的「$category」中创建大纲节点《$title》" +
             reason.takeIf { it.isNotBlank() }?.let { "；原因：$it" }.orEmpty()
@@ -269,13 +300,13 @@ class AgentWriteTools(
             riskLevel = AgentWriteRiskLevel.NORMAL_WRITE,
             argumentsJson = argsJson,
             beforeSnapshot = "{}",
-            proposedContent = content,
+            proposedContent = storedContent,
             operationSummary = summary,
             reversible = true,
             idempotencyKey = writeKey(
                 context.taskId,
                 "create_outline_node",
-                "$category:$tag:$title:${PromptDiagnostics.hash(content)}"
+                "$category:$tag:$title:${PromptDiagnostics.hash(storedContent)}"
             )
         )
     }
@@ -310,9 +341,16 @@ class AgentWriteTools(
                 maxLength = AgentWriteLimits.MAX_OUTLINE_TITLE_CHARS
             ),
             AgentToolParam(
+                name = "fields",
+                type = AgentToolParamType.STRING,
+                description = "可选新字段，每行「字段名：内容」；按字段名覆盖或新增，与显示标签分开保存",
+                required = false,
+                maxLength = AgentWriteLimits.MAX_OUTLINE_CONTENT_CHARS
+            ),
+            AgentToolParam(
                 name = "content",
                 type = AgentToolParamType.STRING,
-                description = "可选新内容",
+                description = "可选整段新内容；提供时整体替换原有字段",
                 required = false,
                 maxLength = AgentWriteLimits.MAX_OUTLINE_CONTENT_CHARS
             ),
@@ -335,21 +373,58 @@ class AgentWriteTools(
             return@AgentTool AgentToolResult.fail("无权修改其他书籍的大纲节点：$outlineId")
         }
         val category = args.string("category").trim().takeIf { it.isNotEmpty() }
+            ?.let(::normalizeOutlineCategory)
         val title = args.string("title").trim().takeIf { it.isNotEmpty() }
+        val fieldsText = args.string("fields").takeIf { it.isNotBlank() }
         val content = args.string("content").takeIf { it.isNotEmpty() }
         val tag = args.string("tag").trim().takeIf { it.isNotEmpty() }
-        if (category == null && title == null && content == null && tag == null) {
+        if (category == null && title == null && content == null &&
+            fieldsText == null && tag == null
+        ) {
             return@AgentTool AgentToolResult.fail("至少需要提供一个要修改的字段")
         }
-        if (content != null && content.length > AgentWriteLimits.MAX_OUTLINE_CONTENT_CHARS) {
+        if ((content?.length ?: 0) + (fieldsText?.length ?: 0) >
+            AgentWriteLimits.MAX_OUTLINE_CONTENT_CHARS
+        ) {
             return@AgentTool AgentToolResult.fail(
                 "大纲内容超过上限（${AgentWriteLimits.MAX_OUTLINE_CONTENT_CHARS} 字）"
             )
         }
         val mergedCategory = category ?: current.category
         val mergedTitle = title ?: current.title
-        val mergedContent = content ?: current.content
         val mergedTag = tag ?: current.tag
+        // 显示标签与条目 title 保持一致；无 title 修改时沿用原显示标签
+        val mergedHead = title ?: outlineDisplayName(current.title, current.content)
+        val mergedContent = when {
+            content != null -> buildOutlineContentForAgent(
+                title = mergedHead,
+                fieldsText = fieldsText.orEmpty(),
+                content = content
+            )
+
+            fieldsText != null -> {
+                val fields = LinkedHashMap<String, String>()
+                outlineFieldsForDisplay(current.title, current.content)
+                    .filter { it.first != "显示标签" }
+                    .forEach { fields[it.first] = it.second }
+                parseOutlineFieldText(fieldsText).forEach { (name, value) ->
+                    if (name != "显示标签") fields[name] = value
+                }
+                encodeOutlineFields(
+                    listOf("显示标签" to mergedHead) + fields.map { it.key to it.value }
+                )
+            }
+
+            title != null && isStructuredOutlineContent(current.content) -> {
+                val rest = decodeOutlineFields(current.content)
+                    .filter { it.first != "显示标签" }
+                encodeOutlineFields(
+                    listOf("显示标签" to mergedHead) + rest.map { it.first to it.second }
+                )
+            }
+
+            else -> current.content
+        }
         if (mergedCategory == current.category && mergedTitle == current.title &&
             mergedContent == current.content && mergedTag == current.tag
         ) {
@@ -360,13 +435,13 @@ class AgentWriteTools(
             category = category,
             tag = tag,
             title = title,
-            content = content
+            content = mergedContent.takeIf { it != current.content }
         )
         val changed = buildList {
             if (category != null) add("分类")
             if (tag != null) add("标签")
             if (title != null) add("标题")
-            if (content != null) add("内容")
+            if (content != null || fieldsText != null) add("内容")
         }.joinToString("、")
         val summary = "修改大纲节点《${current.title}》的$changed 字段" +
             reason.takeIf { it.isNotBlank() }?.let { "；原因：$it" }.orEmpty()
@@ -395,6 +470,323 @@ class AgentWriteTools(
                 "update_outline_node",
                 "$outlineId:$mergedCategory:$mergedTag:$mergedTitle:" +
                     PromptDiagnostics.hash(mergedContent)
+            )
+        )
+    }
+
+    private fun deleteOutlineNode(): AgentTool = AgentTool(
+        toolKey = "delete_outline_node",
+        name = "delete_outline_node",
+        description = "提出删除指定大纲节点；高风险且不可恢复，必须经用户逐条确认。",
+        capabilityKey = "DELETE_OUTLINE_NODE",
+        permissionLevel = AgentToolPermission.OVERWRITE,
+        maxArgumentsChars = 8_000,
+        parameters = listOf(
+            AgentToolParam(
+                name = "outlineId",
+                type = AgentToolParamType.LONG,
+                description = "要删除的大纲条目 id（可用 get_outline 查询）",
+                required = true,
+                minValue = 1
+            ),
+            reasonParam()
+        )
+    ) { args, context ->
+        val bookId = context.bookId ?: return@AgentTool AgentToolResult.fail(NO_BOOK)
+        val book = bookOf(bookId) ?: return@AgentTool AgentToolResult.fail("当前书籍不存在")
+        val outlineId = args.long("outlineId")
+        val current = outlineOf(outlineId)
+            ?: return@AgentTool AgentToolResult.fail("大纲节点不存在：$outlineId")
+        if (current.bookId != bookId) {
+            return@AgentTool AgentToolResult.fail("无权删除其他书籍的大纲节点：$outlineId")
+        }
+        val displayName = outlineDisplayName(current.title, current.content)
+        val reason = args.string("reason").take(AgentWriteLimits.MAX_REASON_CHARS)
+        val summary = "删除大纲节点《$displayName》（不可恢复）" +
+            reason.takeIf { it.isNotBlank() }?.let { "；原因：$it" }.orEmpty()
+        propose(
+            context = context,
+            toolName = "delete_outline_node",
+            operationType = AgentWriteOperationType.DELETE_OUTLINE_NODE,
+            targetType = AgentWriteTargetType.OUTLINE,
+            targetId = outlineId,
+            book = book,
+            targetTitle = displayName,
+            riskLevel = AgentWriteRiskLevel.HIGH_RISK_WRITE,
+            argumentsJson = jsonPayload {
+                put("outlineId", outlineId)
+                put("title", displayName)
+                if (reason.isNotBlank()) put("reason", reason)
+            },
+            beforeSnapshot = agentJson.encodeToString(
+                AgentOutlineSnapshot.serializer(),
+                current
+            ),
+            proposedContent = "",
+            operationSummary = summary,
+            reversible = false,
+            idempotencyKey = writeKey(
+                context.taskId,
+                "delete_outline_node",
+                "$outlineId:${PromptDiagnostics.hash(displayName)}"
+            )
+        )
+    }
+
+    private fun createChapter(): AgentTool = AgentTool(
+        toolKey = "create_chapter",
+        name = "create_chapter",
+        description = "提出在当前书籍中新建章节，可指定分卷与初始梗概；只生成待确认操作，不会立即写入。",
+        capabilityKey = "CREATE_CHAPTER",
+        permissionLevel = AgentToolPermission.CREATE,
+        maxArgumentsChars = 24_000,
+        parameters = listOf(
+            AgentToolParam(
+                name = "title",
+                type = AgentToolParamType.STRING,
+                description = "章节标题",
+                required = true,
+                minLength = 1,
+                maxLength = MAX_VOLUME_OR_CHAPTER_TITLE_CHARS
+            ),
+            AgentToolParam(
+                name = "volumeId",
+                type = AgentToolParamType.LONG,
+                description = "可选分卷 id；不传时放入最后一卷",
+                required = false,
+                minValue = 1
+            ),
+            AgentToolParam(
+                name = "synopsis",
+                type = AgentToolParamType.STRING,
+                description = "可选章节初始梗概",
+                required = false,
+                minLength = 1,
+                maxLength = AgentWriteLimits.MAX_SYNOPSIS_CHARS
+            ),
+            reasonParam()
+        )
+    ) { args, context ->
+        val bookId = context.bookId ?: return@AgentTool AgentToolResult.fail(NO_BOOK)
+        val book = bookOf(bookId) ?: return@AgentTool AgentToolResult.fail("当前书籍不存在")
+        val title = args.string("title").trim()
+        if (title.isEmpty()) return@AgentTool AgentToolResult.fail("title 不能为空")
+        if (title.length > MAX_VOLUME_OR_CHAPTER_TITLE_CHARS) {
+            return@AgentTool AgentToolResult.fail(
+                "章节标题超过上限（$MAX_VOLUME_OR_CHAPTER_TITLE_CHARS 字）"
+            )
+        }
+        val volumeId = args.long("volumeId").takeIf { it > 0 }
+        val volume = if (volumeId == null) {
+            null
+        } else {
+            volumeOf(volumeId)
+                ?: return@AgentTool AgentToolResult.fail("分卷不存在：$volumeId")
+        }
+        if (volume != null && volume.bookId != bookId) {
+            return@AgentTool AgentToolResult.fail("无权操作其他书籍的分卷：$volumeId")
+        }
+        val synopsis = args.string("synopsis")
+        if (synopsis.length > AgentWriteLimits.MAX_SYNOPSIS_CHARS) {
+            return@AgentTool AgentToolResult.fail(
+                "梗概超过上限（${AgentWriteLimits.MAX_SYNOPSIS_CHARS} 字）"
+            )
+        }
+        val reason = args.string("reason").take(AgentWriteLimits.MAX_REASON_CHARS)
+        val summary = buildString {
+            append("在《").append(book.title).append("》")
+            if (volume != null) append("的《").append(volume.title).append("》")
+            append("新建章节《").append(title).append("》")
+            if (synopsis.isNotBlank()) append("，附 ${synopsis.length} 字梗概")
+            reason.takeIf { it.isNotBlank() }?.let { append("；原因：").append(it) }
+        }
+        propose(
+            context = context,
+            toolName = "create_chapter",
+            operationType = AgentWriteOperationType.CREATE_CHAPTER,
+            targetType = AgentWriteTargetType.CHAPTER,
+            targetId = 0L,
+            book = book,
+            targetTitle = title,
+            riskLevel = AgentWriteRiskLevel.NORMAL_WRITE,
+            argumentsJson = agentJson.encodeToString(
+                AgentChapterCreateArgs.serializer(),
+                AgentChapterCreateArgs(volumeId = volumeId, title = title, summary = synopsis)
+            ),
+            beforeSnapshot = "{}",
+            proposedContent = synopsis.ifBlank { title },
+            operationSummary = summary,
+            reversible = true,
+            idempotencyKey = writeKey(
+                context.taskId,
+                "create_chapter",
+                "${bookId}:${volumeId ?: 0}:$title:${PromptDiagnostics.hash(synopsis)}"
+            )
+        )
+    }
+
+    private fun deleteChapter(): AgentTool = AgentTool(
+        toolKey = "delete_chapter",
+        name = "delete_chapter",
+        description = "提出删除指定章节；高风险且不可恢复，必须经用户逐条确认。",
+        capabilityKey = "DELETE_CHAPTER",
+        permissionLevel = AgentToolPermission.OVERWRITE,
+        maxArgumentsChars = 8_000,
+        parameters = listOf(
+            chapterIdParam(),
+            reasonParam()
+        )
+    ) { args, context ->
+        val bookId = context.bookId ?: return@AgentTool AgentToolResult.fail(NO_BOOK)
+        val book = bookOf(bookId) ?: return@AgentTool AgentToolResult.fail("当前书籍不存在")
+        val chapterId = args.long("chapterId")
+        val chapter = chapterMetaOf(chapterId)
+            ?: return@AgentTool AgentToolResult.fail("章节不存在：$chapterId")
+        if (chapter.bookId != bookId) {
+            return@AgentTool AgentToolResult.fail("无权删除其他书籍的章节：$chapterId")
+        }
+        val reason = args.string("reason").take(AgentWriteLimits.MAX_REASON_CHARS)
+        val summary = "删除《${chapter.title}》（含正文与记忆块，不可恢复）" +
+            reason.takeIf { it.isNotBlank() }?.let { "；原因：$it" }.orEmpty()
+        propose(
+            context = context,
+            toolName = "delete_chapter",
+            operationType = AgentWriteOperationType.DELETE_CHAPTER,
+            targetType = AgentWriteTargetType.CHAPTER,
+            targetId = chapterId,
+            book = book,
+            targetTitle = chapter.title,
+            riskLevel = AgentWriteRiskLevel.HIGH_RISK_WRITE,
+            argumentsJson = jsonPayload {
+                put("chapterId", chapterId)
+                put("title", chapter.title)
+                if (reason.isNotBlank()) put("reason", reason)
+            },
+            beforeSnapshot = agentJson.encodeToString(
+                AgentChapterSnapshot.serializer(),
+                chapter.copy(content = "", contentIncluded = false)
+            ),
+            proposedContent = "",
+            operationSummary = summary,
+            reversible = false,
+            idempotencyKey = writeKey(
+                context.taskId,
+                "delete_chapter",
+                "$chapterId:${PromptDiagnostics.hash(chapter.title)}"
+            )
+        )
+    }
+
+    private fun createVolume(): AgentTool = AgentTool(
+        toolKey = "create_volume",
+        name = "create_volume",
+        description = "提出在当前书籍中新建分卷；只生成待确认操作，不会立即写入。",
+        capabilityKey = "CREATE_VOLUME",
+        permissionLevel = AgentToolPermission.CREATE,
+        maxArgumentsChars = 8_000,
+        parameters = listOf(
+            AgentToolParam(
+                name = "title",
+                type = AgentToolParamType.STRING,
+                description = "分卷标题",
+                required = true,
+                minLength = 1,
+                maxLength = MAX_VOLUME_OR_CHAPTER_TITLE_CHARS
+            ),
+            reasonParam()
+        )
+    ) { args, context ->
+        val bookId = context.bookId ?: return@AgentTool AgentToolResult.fail(NO_BOOK)
+        val book = bookOf(bookId) ?: return@AgentTool AgentToolResult.fail("当前书籍不存在")
+        val title = args.string("title").trim()
+        if (title.isEmpty()) return@AgentTool AgentToolResult.fail("title 不能为空")
+        if (title.length > MAX_VOLUME_OR_CHAPTER_TITLE_CHARS) {
+            return@AgentTool AgentToolResult.fail(
+                "分卷标题超过上限（$MAX_VOLUME_OR_CHAPTER_TITLE_CHARS 字）"
+            )
+        }
+        val reason = args.string("reason").take(AgentWriteLimits.MAX_REASON_CHARS)
+        val summary = "在《${book.title}》新建分卷《$title》" +
+            reason.takeIf { it.isNotBlank() }?.let { "；原因：$it" }.orEmpty()
+        propose(
+            context = context,
+            toolName = "create_volume",
+            operationType = AgentWriteOperationType.CREATE_VOLUME,
+            targetType = AgentWriteTargetType.VOLUME,
+            targetId = 0L,
+            book = book,
+            targetTitle = title,
+            riskLevel = AgentWriteRiskLevel.NORMAL_WRITE,
+            argumentsJson = agentJson.encodeToString(
+                AgentVolumeCreateArgs.serializer(),
+                AgentVolumeCreateArgs(title = title)
+            ),
+            beforeSnapshot = "{}",
+            proposedContent = title,
+            operationSummary = summary,
+            reversible = true,
+            idempotencyKey = writeKey(
+                context.taskId,
+                "create_volume",
+                "$bookId:$title"
+            )
+        )
+    }
+
+    private fun deleteVolume(): AgentTool = AgentTool(
+        toolKey = "delete_volume",
+        name = "delete_volume",
+        description = "提出删除指定分卷及其下全部章节；高风险且不可恢复，必须经用户逐条确认。",
+        capabilityKey = "DELETE_VOLUME",
+        permissionLevel = AgentToolPermission.OVERWRITE,
+        maxArgumentsChars = 8_000,
+        parameters = listOf(
+            AgentToolParam(
+                name = "volumeId",
+                type = AgentToolParamType.LONG,
+                description = "分卷 id",
+                required = true,
+                minValue = 1
+            ),
+            reasonParam()
+        )
+    ) { args, context ->
+        val bookId = context.bookId ?: return@AgentTool AgentToolResult.fail(NO_BOOK)
+        val book = bookOf(bookId) ?: return@AgentTool AgentToolResult.fail("当前书籍不存在")
+        val volumeId = args.long("volumeId")
+        val volume = volumeOf(volumeId)
+            ?: return@AgentTool AgentToolResult.fail("分卷不存在：$volumeId")
+        if (volume.bookId != bookId) {
+            return@AgentTool AgentToolResult.fail("无权删除其他书籍的分卷：$volumeId")
+        }
+        val reason = args.string("reason").take(AgentWriteLimits.MAX_REASON_CHARS)
+        val summary = "删除分卷《${volume.title}》及其下全部章节（不可恢复）" +
+            reason.takeIf { it.isNotBlank() }?.let { "；原因：$it" }.orEmpty()
+        propose(
+            context = context,
+            toolName = "delete_volume",
+            operationType = AgentWriteOperationType.DELETE_VOLUME,
+            targetType = AgentWriteTargetType.VOLUME,
+            targetId = volumeId,
+            book = book,
+            targetTitle = volume.title,
+            riskLevel = AgentWriteRiskLevel.HIGH_RISK_WRITE,
+            argumentsJson = jsonPayload {
+                put("volumeId", volumeId)
+                put("title", volume.title)
+                if (reason.isNotBlank()) put("reason", reason)
+            },
+            beforeSnapshot = agentJson.encodeToString(
+                AgentVolumeSnapshot.serializer(),
+                volume
+            ),
+            proposedContent = "",
+            operationSummary = summary,
+            reversible = false,
+            idempotencyKey = writeKey(
+                context.taskId,
+                "delete_volume",
+                "$volumeId:${PromptDiagnostics.hash(volume.title)}"
             )
         )
     }
@@ -520,5 +912,6 @@ class AgentWriteTools(
 
     companion object {
         private const val NO_BOOK = "当前 Agent 会话未绑定书籍，无法写入小说资料"
+        private const val MAX_VOLUME_OR_CHAPTER_TITLE_CHARS = 200
     }
 }

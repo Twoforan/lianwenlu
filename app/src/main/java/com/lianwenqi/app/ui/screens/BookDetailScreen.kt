@@ -113,6 +113,8 @@ import com.lianwenqi.app.data.entity.OutlineItem
 import com.lianwenqi.app.data.OUTLINE_HEAD_LABEL
 import com.lianwenqi.app.data.decodeOutlineFields
 import com.lianwenqi.app.data.encodeOutlineFields
+import com.lianwenqi.app.data.isStructuredOutlineContent
+import com.lianwenqi.app.data.outlineDisplayName
 import com.lianwenqi.app.data.entity.Volume
 import com.lianwenqi.app.data.entity.VolumeCompressionStatus
 import com.lianwenqi.app.data.entity.outlineCategoryLabel
@@ -883,13 +885,33 @@ private fun OutlineCard(
     onTogglePinned: () -> Unit,
     onToggleUpdatable: () -> Unit
 ) {
-    val pairs = remember(item.content) { parseOutlineFields(item.content) }
-    val head = pairs.firstOrNull()
+    val structured = remember(item.content) { isStructuredOutlineContent(item.content) }
+    val pairs = remember(item.content, structured) {
+        if (structured) parseOutlineFields(item.content) else emptyList()
+    }
     val body = pairs.drop(1)
+    val label = remember(item.id, item.title, item.content) {
+        outlineDisplayName(item.title, item.content)
+    }
+    val legacyText = remember(item.content, structured) {
+        if (structured) "" else item.content.trim()
+    }
+    val bodyText = if (structured) {
+        body.joinToString("\n") { "${it.first}：${it.second}" }
+    } else {
+        ""
+    }
+    val blocks = remember(legacyText) {
+        if (legacyText.isBlank()) emptyList() else buildOutlineBlocks(legacyText)
+    }
 
     var expanded by remember(item.id) { mutableStateOf(false) }
     var overflowed by remember(item.id) { mutableStateOf(false) }
-    val canExpand = body.isNotEmpty() && (expanded || overflowed)
+    val canExpand = if (structured) {
+        body.isNotEmpty() && (expanded || overflowed)
+    } else {
+        blocks.size > OUTLINE_PREVIEW_BLOCKS
+    }
 
     Column(
         Modifier
@@ -908,7 +930,7 @@ private fun OutlineCard(
                 modifier = Modifier.weight(1f, fill = false)
             ) {
                 Text(
-                    head?.let { it.second.ifBlank { it.first } } ?: item.title,
+                    label,
                     modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp),
                     style = MaterialTheme.typography.bodyMedium,
                     maxLines = 1,
@@ -941,9 +963,9 @@ private fun OutlineCard(
                 onClick = onToggleUpdatable
             )
         }
-        if (body.isNotEmpty()) {
+        if (structured && body.isNotEmpty()) {
             Text(
-                body.joinToString("\n") { "${it.first}：${it.second}" },
+                bodyText,
                 style = MaterialTheme.typography.bodySmall,
                 maxLines = if (expanded) Int.MAX_VALUE else 3,
                 overflow = TextOverflow.Ellipsis,
@@ -959,9 +981,124 @@ private fun OutlineCard(
                     modifier = Modifier.padding(top = 4.dp)
                 )
             }
+        } else if (!structured && blocks.isNotEmpty()) {
+            Column(
+                Modifier.padding(top = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                val shown = if (expanded) blocks else blocks.take(OUTLINE_PREVIEW_BLOCKS)
+                shown.forEach { block -> OutlineContentBlockView(block) }
+            }
+            if (canExpand) {
+                Text(
+                    if (expanded) "点击收起" else "点击展开全部",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+            }
         }
     }
     Spacer(Modifier.height(10.dp))
+}
+
+private const val OUTLINE_PREVIEW_BLOCKS = 3
+
+/** 大纲正文的渲染块：普通文本行或 Markdown 表格 */
+private sealed interface OutlineContentBlock {
+    data class TextBlock(val value: String) : OutlineContentBlock
+    data class TableBlock(val rows: List<List<String>>) : OutlineContentBlock
+}
+
+/** 把旧版纯文本大纲拆成文本行与表格块，表格不再以原始竖线文本显示 */
+private fun buildOutlineBlocks(text: String): List<OutlineContentBlock> {
+    val lines = text.lines()
+    val blocks = mutableListOf<OutlineContentBlock>()
+    var index = 0
+    while (index < lines.size) {
+        val line = lines[index]
+        if (isMarkdownTableLine(line)) {
+            val rows = mutableListOf<List<String>>()
+            while (index < lines.size && isMarkdownTableLine(lines[index])) {
+                if (!isMarkdownTableSeparator(lines[index])) {
+                    rows += splitMarkdownRow(lines[index])
+                }
+                index++
+            }
+            if (rows.isNotEmpty()) blocks += OutlineContentBlock.TableBlock(rows)
+        } else {
+            if (line.isNotBlank()) blocks += OutlineContentBlock.TextBlock(line.trim())
+            index++
+        }
+    }
+    return blocks
+}
+
+private fun isMarkdownTableLine(line: String): Boolean {
+    val trimmed = line.trim()
+    return trimmed.startsWith("|") && trimmed.count { it == '|' } >= 2
+}
+
+private fun isMarkdownTableSeparator(line: String): Boolean {
+    val cells = splitMarkdownRow(line)
+    return cells.isNotEmpty() && cells.all { it.matches(Regex("^:?-{2,}:?$")) }
+}
+
+private fun splitMarkdownRow(line: String): List<String> =
+    line.trim().removePrefix("|").removeSuffix("|").split("|").map { it.trim() }
+
+@Composable
+private fun OutlineContentBlockView(block: OutlineContentBlock) {
+    when (block) {
+        is OutlineContentBlock.TextBlock -> Text(
+            block.value,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+
+        is OutlineContentBlock.TableBlock -> {
+            val columns = block.rows.maxOfOrNull { it.size }?.coerceAtLeast(1) ?: 1
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(6.dp))
+                    .border(
+                        0.5.dp,
+                        MaterialTheme.colorScheme.outlineVariant,
+                        RoundedCornerShape(6.dp)
+                    )
+            ) {
+                block.rows.forEachIndexed { rowIndex, row ->
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .background(
+                                if (rowIndex == 0) {
+                                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+                                } else {
+                                    Color.Transparent
+                                }
+                            )
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        repeat(columns) { columnIndex ->
+                            Text(
+                                row.getOrElse(columnIndex) { "" },
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = if (rowIndex == 0) FontWeight.SemiBold else null,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(end = if (columnIndex < columns - 1) 8.dp else 0.dp)
+                            )
+                        }
+                    }
+                    if (rowIndex < block.rows.lastIndex) {
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    }
+                }
+            }
+        }
+    }
 }
 
 /**
@@ -1062,14 +1199,28 @@ internal fun OutlineEditorDialog(
     val scrollState = rememberScrollState()
 
     LaunchedEffect(categoryKey, initial?.id) {
-        val existing = parseOutlineFields(initial?.content.orEmpty())
-        fields = if (existing.isNotEmpty()) {
-            // 第一项标题锁定为「显示标签」，只保留其内容（即条目对外显示的标签文字）
-            existing.mapIndexed { index, pair ->
-                OutlineField(if (index == 0) OUTLINE_HEAD_LABEL else pair.first, pair.second)
+        val content = initial?.content.orEmpty()
+        fields = when {
+            // 结构化内容：首项统一为只读的「显示标签」
+            initial != null && isStructuredOutlineContent(content) -> {
+                val existing = parseOutlineFields(content)
+                if (existing.isEmpty()) {
+                    listOf(OutlineField(OUTLINE_HEAD_LABEL, initial.title))
+                } else {
+                    existing.mapIndexed { index, pair ->
+                        OutlineField(if (index == 0) OUTLINE_HEAD_LABEL else pair.first, pair.second)
+                    }
+                }
             }
-        } else {
-            loadFields(categoryKey).mapIndexed { index, name ->
+
+            // 旧版纯文本内容：标题只认条目自身的 title，正文整体作为一个「内容」字段，
+            // 不再按冒号硬拆、也不从「-」开头的行推测标题
+            initial != null -> buildList {
+                add(OutlineField(OUTLINE_HEAD_LABEL, initial.title))
+                if (content.isNotBlank()) add(OutlineField("内容", content.trim()))
+            }
+
+            else -> loadFields(categoryKey).mapIndexed { index, name ->
                 OutlineField(
                     if (index == 0) OUTLINE_HEAD_LABEL else name,
                     if (index == 0) initial?.title.orEmpty() else ""

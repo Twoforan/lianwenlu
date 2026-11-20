@@ -101,7 +101,7 @@ import com.lianwenqi.app.data.entity.VolumeSummary
         AgentRecoveryLog::class,
         AgentClarification::class
     ],
-    version = 32,
+    version = 33,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
@@ -1217,6 +1217,27 @@ abstract class AppDatabase : RoomDatabase() {
         }
 
         /**
+         * 32 → 33：
+         * 早期 Agent 写入大纲时把分类展示名直接落库（如「人设」），
+         * 与内置分类存储值（CHARACTER）不一致，导致按 CHARACTER 读取查不到。
+         * 这里把内置分类的展示名统一纠正为存储值；自定义标签保持不变。
+         */
+        internal val MIGRATION_32_33 = object : Migration(32, 33) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("UPDATE outline_item SET category = 'CHARACTER' WHERE category = '人设'")
+                db.execSQL("UPDATE outline_item SET category = 'WORLD' WHERE category = '世界观'")
+                db.execSQL(
+                    "UPDATE outline_item SET category = 'STORY' " +
+                        "WHERE category IN ('故事大纲', '故事', '剧情', '大纲')"
+                )
+                db.execSQL(
+                    "UPDATE outline_item SET category = 'INSPIRATION' " +
+                        "WHERE category IN ('灵感库', '灵感')"
+                )
+            }
+        }
+
+        /**
          * 修复历史遗留的超长行：整本正文被冻结进会话前缀、超长提示词日志 / 正文等，
          * 单行超过 SQLite CursorWindow（2MB）上限后读取会抛 SQLiteBlobTooBigException 直接闪退。
          * 首次打开数据库时把超限文本截断到安全长度，之后用标记表跳过，避免每次启动全表扫描。
@@ -1243,7 +1264,7 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "lianwenqi.db"
-                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20, MIGRATION_20_21, MIGRATION_21_22, MIGRATION_22_23, MIGRATION_23_24, MIGRATION_24_25, MIGRATION_25_26, MIGRATION_26_27, MIGRATION_27_28, MIGRATION_28_29, MIGRATION_29_30, MIGRATION_30_31, MIGRATION_31_32).addCallback(REPAIR_OVERSIZED_ROWS).build().also { INSTANCE = it }
+                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20, MIGRATION_20_21, MIGRATION_21_22, MIGRATION_22_23, MIGRATION_23_24, MIGRATION_24_25, MIGRATION_25_26, MIGRATION_26_27, MIGRATION_27_28, MIGRATION_28_29, MIGRATION_29_30, MIGRATION_30_31, MIGRATION_31_32, MIGRATION_32_33).addCallback(REPAIR_OVERSIZED_ROWS).build().also { INSTANCE = it }
             }
     }
 }

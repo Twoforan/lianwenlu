@@ -164,6 +164,10 @@ class AgentTaskRepository(private val db: AppDatabase) {
     fun observeTasksOfSession(sessionId: Long): Flow<List<AgentTask>> =
         taskDao.observeTasksOfSession(sessionId)
 
+    /** 当前书籍下所有生成过计划书的任务（跨会话），用于计划书库 */
+    suspend fun tasksWithPlanOfBook(bookId: Long): List<AgentTask> =
+        taskDao.tasksWithPlanOfBook(bookId)
+
     /** 当前任务的直接子分支 */
     fun observeChildTasks(taskId: Long): Flow<List<AgentTask>> =
         taskDao.observeChildTasks(taskId)
@@ -336,6 +340,9 @@ class AgentTaskRepository(private val db: AppDatabase) {
     suspend fun answeredClarifications(taskId: Long): List<AgentClarification> =
         taskDao.answeredClarifications(taskId)
 
+    fun observeAnsweredClarifications(taskId: Long): Flow<List<AgentClarification>> =
+        taskDao.observeAnsweredClarifications(taskId)
+
     /** 保存用户补充信息；只有 PENDING 的澄清请求可以回答 */
     suspend fun answerClarification(clarificationId: Long, answer: String): AgentClarification? =
         db.withTransaction {
@@ -397,6 +404,68 @@ class AgentTaskRepository(private val db: AppDatabase) {
     suspend fun markAsRecent(taskId: Long): Boolean = db.withTransaction {
         val task = taskDao.getTask(taskId) ?: return@withTransaction false
         sessionDao.setLastTaskId(task.sessionId, taskId, System.currentTimeMillis())
+        true
+    }
+
+    /**
+     * 用户从失败节点重试：仅允许 FAILED → RUNNING。
+     *
+     * 已完成节点与执行游标保持不变，执行器会从重新打开的失败节点继续。
+     */
+    suspend fun reopenFailedForRetry(taskId: Long, nodeId: Long): Boolean = db.withTransaction {
+        val task = taskDao.getTask(taskId) ?: return@withTransaction false
+        if (task.status != AgentTaskStatus.FAILED) return@withTransaction false
+        if (task.currentNodeId != nodeId) return@withTransaction false
+        val now = System.currentTimeMillis()
+        taskDao.updateTask(
+            task.copy(
+                status = AgentTaskStatus.RUNNING,
+                errorMessage = "",
+                completedAt = null,
+                pauseRequested = false,
+                cancelRequested = false,
+                // 用户手动重试视为新一轮执行，重置恢复尝试次数，避免立刻再次命中上限
+                executionAttempt = 0,
+                updatedAt = now
+            )
+        )
+        events.append(
+            taskId = taskId,
+            eventType = AgentEventType.TASK_STARTED,
+            nodeId = nodeId,
+            payloadJson = jsonPayload {
+                put("from", task.status)
+                put("to", AgentTaskStatus.RUNNING)
+                put("retryFromNode", true)
+            }
+        )
+        true
+    }
+
+    /**
+     * 用户结束失败任务：FAILED → CANCELLED，保留节点与消息记录，便于继续新任务。
+     */
+    suspend fun finishFailed(taskId: Long): Boolean = db.withTransaction {
+        val task = taskDao.getTask(taskId) ?: return@withTransaction false
+        if (task.status != AgentTaskStatus.FAILED) return@withTransaction false
+        val now = System.currentTimeMillis()
+        taskDao.updateTask(
+            task.copy(
+                status = AgentTaskStatus.CANCELLED,
+                errorMessage = AgentTask.USER_ENDED_REASON,
+                completedAt = now,
+                updatedAt = now
+            )
+        )
+        events.append(
+            taskId = taskId,
+            eventType = AgentEventType.TASK_CANCELLED,
+            payloadJson = jsonPayload {
+                put("from", task.status)
+                put("to", AgentTaskStatus.CANCELLED)
+                put("reason", "用户结束失败任务")
+            }
+        )
         true
     }
 

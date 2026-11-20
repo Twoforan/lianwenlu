@@ -130,6 +130,14 @@ interface AgentDao {
     @Query("DELETE FROM agent_message WHERE taskId = :taskId AND kind = :kind")
     suspend fun deleteMessagesOfTaskKind(taskId: Long, kind: String)
 
+    /** 删除单条消息（聊天卡片上的删除图标） */
+    @Query("DELETE FROM agent_message WHERE id = :id")
+    suspend fun deleteMessage(id: Long)
+
+    /** 直接编辑 Agent 回复内容 */
+    @Query("UPDATE agent_message SET content = :content WHERE id = :id")
+    suspend fun updateMessageContent(id: Long, content: String)
+
     // ---------------- 资料引用 ----------------
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)

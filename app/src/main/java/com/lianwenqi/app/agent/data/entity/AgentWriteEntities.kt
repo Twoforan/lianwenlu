@@ -58,12 +58,22 @@ object AgentWriteOperationType {
     const val UPDATE_CHAPTER_CONTENT = "UPDATE_CHAPTER_CONTENT"
     const val CREATE_OUTLINE_NODE = "CREATE_OUTLINE_NODE"
     const val UPDATE_OUTLINE_NODE = "UPDATE_OUTLINE_NODE"
+    const val DELETE_OUTLINE_NODE = "DELETE_OUTLINE_NODE"
+    const val CREATE_CHAPTER = "CREATE_CHAPTER"
+    const val DELETE_CHAPTER = "DELETE_CHAPTER"
+    const val CREATE_VOLUME = "CREATE_VOLUME"
+    const val DELETE_VOLUME = "DELETE_VOLUME"
 
     fun label(value: String): String = when (value) {
         UPDATE_CHAPTER_SYNOPSIS -> "修改章节梗概"
         UPDATE_CHAPTER_CONTENT -> "覆盖章节正文"
         CREATE_OUTLINE_NODE -> "创建大纲节点"
         UPDATE_OUTLINE_NODE -> "修改大纲节点"
+        DELETE_OUTLINE_NODE -> "删除大纲节点"
+        CREATE_CHAPTER -> "新建章节"
+        DELETE_CHAPTER -> "删除章节"
+        CREATE_VOLUME -> "新建分卷"
+        DELETE_VOLUME -> "删除分卷"
         else -> value
     }
 }
@@ -72,6 +82,7 @@ object AgentWriteOperationType {
 object AgentWriteTargetType {
     const val CHAPTER = "CHAPTER"
     const val OUTLINE = "OUTLINE"
+    const val VOLUME = "VOLUME"
 }
 
 /** 权限状态（由本地权限系统写入，模型不可声明） */

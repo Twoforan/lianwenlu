@@ -135,6 +135,25 @@ val defaultOutlineKeys: List<String> = OutlineCategory.entries.map { it.name }
 fun outlineCategoryLabel(key: String): String =
     OutlineCategory.entries.firstOrNull { it.name == key }?.label ?: key
 
+/**
+ * 把大纲分类的展示名 / 别名归一化为内置分类存储值；未知分类（自定义标签）原样返回。
+ *
+ * 早期 Agent 写入时直接把「人设」等展示名落库，导致按 CHARACTER 读取时查不到，这里统一兜底。
+ */
+fun normalizeOutlineCategory(raw: String): String {
+    val key = raw.trim()
+    if (key.isEmpty()) return key
+    OutlineCategory.entries.firstOrNull { it.name.equals(key, ignoreCase = true) }
+        ?.let { return it.name }
+    return when (key) {
+        "人设", "人物", "角色" -> OutlineCategory.CHARACTER.name
+        "世界观", "设定" -> OutlineCategory.WORLD.name
+        "故事大纲", "故事", "剧情", "大纲" -> OutlineCategory.STORY.name
+        "灵感库", "灵感" -> OutlineCategory.INSPIRATION.name
+        else -> key
+    }
+}
+
 /** 作品大纲条目 */
 @Entity(tableName = "outline_item", indices = [Index("bookId")])
 data class OutlineItem(

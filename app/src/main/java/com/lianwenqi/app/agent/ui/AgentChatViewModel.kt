@@ -7,6 +7,7 @@ import com.lianwenqi.app.AppContainer
 import com.lianwenqi.app.agent.model.AgentCapabilityCatalog
 import com.lianwenqi.app.agent.data.AgentPlanSaveRequest
 import com.lianwenqi.app.agent.data.entity.AgentBranchSource
+import com.lianwenqi.app.agent.data.entity.AgentClarification
 import com.lianwenqi.app.agent.data.entity.AgentEventType
 import com.lianwenqi.app.agent.data.entity.AgentExecutionNode
 import com.lianwenqi.app.agent.data.entity.AgentMessage
@@ -15,6 +16,7 @@ import com.lianwenqi.app.agent.data.entity.AgentModelRequest
 import com.lianwenqi.app.agent.data.entity.AgentRecoveryLog
 import com.lianwenqi.app.agent.data.entity.AgentSession
 import com.lianwenqi.app.agent.data.entity.AgentTask
+import com.lianwenqi.app.agent.data.entity.AgentMessageRole
 import com.lianwenqi.app.agent.data.entity.AgentTaskStatus
 import com.lianwenqi.app.agent.data.entity.AgentToolExecution
 import com.lianwenqi.app.agent.data.entity.AgentWriteOperation
@@ -24,7 +26,9 @@ import com.lianwenqi.app.agent.data.entity.AgentWriteRiskLevel
 import com.lianwenqi.app.agent.data.entity.AgentWorkMode
 import com.lianwenqi.app.agent.model.AgentPlan
 import com.lianwenqi.app.agent.model.AgentPlanParseResult
+import com.lianwenqi.app.agent.model.AgentPlanStep
 import com.lianwenqi.app.agent.model.AgentPlanValidationResult
+import com.lianwenqi.app.agent.model.AgentRiskLevel
 import com.lianwenqi.app.agent.planning.AgentPlanningResult
 import com.lianwenqi.app.agent.planning.AgentPlanningTrace
 import com.lianwenqi.app.agent.planning.AgentPromptLog
@@ -34,6 +38,7 @@ import com.lianwenqi.app.data.AttachmentStore
 import com.lianwenqi.app.data.ChatAttachment
 import com.lianwenqi.app.data.SortMode
 import com.lianwenqi.app.agent.data.entity.AgentReferenceMode
+import com.lianwenqi.app.agent.data.entity.AgentReferenceSourceType
 import com.lianwenqi.app.data.entity.AiModel
 import com.lianwenqi.app.data.entity.Book
 import com.lianwenqi.app.data.entity.BookGroup
@@ -74,6 +79,25 @@ data class AgentPlanView(
     val plan: AgentPlan,
     val validation: AgentPlanValidationResult,
     val confirmed: Boolean
+)
+
+/** 计划书库条目：任务 + 解析后的计划 */
+data class AgentPlanLibraryItem(
+    val task: AgentTask,
+    val plan: AgentPlan
+)
+
+/**
+ * 历史任务的产出物：计划书 + 执行记录。
+ *
+ * 会话内新任务开始时，旧任务的计划书与执行过程仍要保留在聊天流里（默认收起）。
+ */
+data class AgentTaskArtifacts(
+    val task: AgentTask,
+    val planView: AgentPlanView,
+    val nodes: List<AgentExecutionNode>,
+    val tools: List<AgentToolExecution>,
+    val clarifications: List<AgentClarification>
 )
 
 /**
@@ -145,7 +169,9 @@ class AgentChatViewModel(private val container: AppContainer) : ViewModel() {
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     /** Agent 已注册工具；执行时默认全部启用，因此 UI 一律显示为选中 */
-    val agentTools: List<AgentToolInfo> = container.agentToolRegistry.all().map { tool ->
+    val agentTools: List<AgentToolInfo> = container.agentToolRegistry.all()
+        .filter { it.visibleToUser }
+        .map { tool ->
         val capability = AgentCapabilityCatalog.find(tool.capabilityKey)
         AgentToolInfo(
             key = tool.toolKey,
@@ -208,6 +234,14 @@ class AgentChatViewModel(private val container: AppContainer) : ViewModel() {
         .flatMapLatest { id ->
             if (id == null) flowOf(emptyList())
             else container.agentToolExecutionRepository.observeExecutions(id)
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** 当前任务已回答的补充信息：作为思维链的一部分展示，不再生成用户对话消息 */
+    val answeredClarifications: StateFlow<List<AgentClarification>> = _currentTaskId
+        .flatMapLatest { id ->
+            if (id == null) flowOf(emptyList())
+            else taskRepository.observeAnsweredClarifications(id)
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
@@ -386,6 +420,77 @@ class AgentChatViewModel(private val container: AppContainer) : ViewModel() {
                 )
             }
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    /**
+     * 会话内可见任务：顺序产生的根任务全部可见；
+     * 存在分支时只保留当前任务所在的链条，避免同一提问的旧版本重复出现。
+     */
+    private fun visibleTaskIds(tasks: List<AgentTask>, current: AgentTask?): Set<Long> {
+        if (current == null) return emptySet()
+        val parentsWithChildren = tasks.mapNotNull { it.parentTaskId }.toSet()
+        val chain = mutableSetOf<Long>()
+        var cursor: AgentTask? = current
+        while (cursor != null) {
+            chain += cursor.id
+            val parentId = cursor.parentTaskId
+            cursor = if (parentId == null) null else tasks.firstOrNull { it.id == parentId }
+        }
+        return tasks
+            .filter { it.id in chain || (it.parentTaskId == null && it.id !in parentsWithChildren) }
+            .map { it.id }
+            .toSet()
+    }
+
+    /**
+     * 会话内历史任务（不含当前任务）的计划书与执行记录。
+     *
+     * 可见范围与聊天消息保持一致：顺序产生的根任务全部展示，分支只保留当前任务所在的链条。
+     */
+    val historicalArtifacts: StateFlow<List<AgentTaskArtifacts>> =
+        combine(tasks, currentTask) { all, current -> all to current }
+            .flatMapLatest { (all, current) ->
+                val visible = visibleTaskIds(all, current)
+                val prepared = all
+                    .filter { task ->
+                        task.id in visible && task.id != current?.id &&
+                            task.workMode == AgentWorkMode.PLAN
+                    }
+                    .sortedBy { it.createdAt }
+                    .mapNotNull { task ->
+                        val json = task.planJson
+                        if (json.isNullOrBlank() || json == "{}") return@mapNotNull null
+                        val parsed = planParser.parse(json)
+                        if (parsed !is AgentPlanParseResult.Success) return@mapNotNull null
+                        if (parsed.plan.needsClarification) return@mapNotNull null
+                        task to parsed.plan
+                    }
+                if (prepared.isEmpty()) {
+                    flowOf(emptyList())
+                } else {
+                    combine(
+                        prepared.map { (task, plan) ->
+                            combine(
+                                container.agentExecutionNodeRepository.observeNodes(task.id),
+                                container.agentToolExecutionRepository.observeExecutions(task.id),
+                                taskRepository.observeAnsweredClarifications(task.id)
+                            ) { nodes, tools, clarifications ->
+                                AgentTaskArtifacts(
+                                    task = task,
+                                    planView = AgentPlanView(
+                                        plan = plan,
+                                        validation = planValidator.validate(plan),
+                                        confirmed = task.id in confirmedTaskIds.value
+                                    ),
+                                    nodes = nodes,
+                                    tools = tools,
+                                    clarifications = clarifications
+                                )
+                            }
+                        }
+                    ) { it.toList() }
+                }
+            }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     /** 当前生效模型：会话模型 > 本次手动选择 > 普通聊天当前模型（只读兜底） */
     val currentModelId: StateFlow<Long> =
@@ -678,12 +783,18 @@ class AgentChatViewModel(private val container: AppContainer) : ViewModel() {
     // ---------------- 会话 ----------------
 
     fun newSession(bookId: Long? = filterBookId.value) = viewModelScope.launch {
+        createNewSession(bookId, pendingModelId.value?.takeIf { it > 0 })
+    }
+
+    /** 真正创建并切换到新会话；模型沿用调用方给出的值，避免切换书籍后丢失模型选择 */
+    private suspend fun createNewSession(bookId: Long?, modelId: Long?) {
         cancelPlanJobQuietly()
-        cancelExecution()
+        cancelRunningTask(reportError = false)
+        _executionError.value = null
         clearContextSelection()
         val id = sessionRepository.createSession(
             bookId = bookId,
-            modelId = pendingModelId.value?.takeIf { it > 0 }
+            modelId = modelId
         )
         // 书籍已经写入会话，清空临时筛选项，避免历史列表被它限制
         filterBookId.value = null
@@ -697,7 +808,8 @@ class AgentChatViewModel(private val container: AppContainer) : ViewModel() {
     fun openSession(id: Long) = viewModelScope.launch {
         val session = sessionRepository.getSession(id) ?: return@launch
         cancelPlanJobQuietly()
-        cancelExecution()
+        cancelRunningTask(reportError = false)
+        _executionError.value = null
         clearContextSelection()
         filterBookId.value = null
         _currentSessionId.value = id
@@ -727,7 +839,8 @@ class AgentChatViewModel(private val container: AppContainer) : ViewModel() {
     fun deleteSession(id: Long) = viewModelScope.launch {
         if (_currentSessionId.value == id) {
             cancelPlanJobQuietly()
-            cancelExecution()
+            cancelRunningTask(reportError = false)
+            _executionError.value = null
         }
         sessionRepository.deleteSession(id)
         if (_currentSessionId.value == id) {
@@ -737,9 +850,46 @@ class AgentChatViewModel(private val container: AppContainer) : ViewModel() {
         }
     }
 
+    /** 直接编辑 Agent 回复：以原文为基础保存，不触发重新生成 */
+    fun updateMessageContent(messageId: Long, content: String) = viewModelScope.launch {
+        val text = content.trim()
+        if (text.isBlank()) {
+            _planError.value = "回复内容不能为空"
+            return@launch
+        }
+        if (_executingTaskId.value != null) {
+            _planError.value = "任务执行中不能编辑回复"
+            return@launch
+        }
+        sessionRepository.updateMessageContent(messageId, text)
+    }
+
+    /** 删除单条聊天消息；执行中禁止删除，避免删除当前任务的上下文 */
+    fun deleteMessage(messageId: Long) = viewModelScope.launch {
+        if (_executingTaskId.value != null) {
+            _planError.value = "任务执行中不能删除消息"
+            return@launch
+        }
+        sessionRepository.deleteMessage(messageId)
+    }
+
     fun bindBook(sessionId: Long, bookId: Long?) = viewModelScope.launch {
-        sessionRepository.bindBook(sessionId, bookId)
-        clearContextSelection()
+        val session = sessionRepository.getSession(sessionId) ?: return@launch
+        if (session.bookId == bookId) return@launch
+        // 执行中的任务依赖会话绑定的书籍，换绑会让后续工具访问到错误的数据
+        val lastTask = session.lastTaskId?.let { taskRepository.getTask(it) }
+        if (lastTask != null && lastTask.status in AgentTaskStatus.unfinished) {
+            _planError.value = "任务执行中不能更换书籍，请先结束当前任务"
+            return@launch
+        }
+        if (session.bookId == null) {
+            // 首次绑定：直接绑定当前会话
+            sessionRepository.bindBook(sessionId, bookId)
+            clearContextSelection()
+        } else {
+            // 换绑其他书籍：开始一个新会话，避免同一会话跨书混用
+            createNewSession(bookId, currentModelId.value.takeIf { it > 0 })
+        }
     }
 
     /** 完整表单新建书籍（复用普通 AI 聊天的选书弹窗），返回新书 id；失败返回 0 */
@@ -902,22 +1052,38 @@ class AgentChatViewModel(private val container: AppContainer) : ViewModel() {
             _planError.value = "请先选择可用的模型"
             return
         }
+        // Agent 任务的所有工具都依赖会话绑定书籍，未绑定书籍不允许开始
+        val boundBookId = _currentSessionId.value
+            ?.let { sessionRepository.getSession(it)?.bookId }
+            ?: filterBookId.value
+        if (boundBookId == null) {
+            _planError.value = "请先绑定书籍后再开始 Agent 任务"
+            return
+        }
         var sessionId = _currentSessionId.value
         if (sessionId == null) {
             sessionId = sessionRepository.createSession(
-                bookId = filterBookId.value,
+                bookId = boundBookId,
                 modelId = modelId
             )
             filterBookId.value = null
             _currentSessionId.value = sessionId
             prefs.setAgentLastSessionId(sessionId)
-        } else if (sessionRepository.getSession(sessionId)?.modelId?.takeIf { it > 0 } == null) {
-            sessionRepository.setModel(sessionId, modelId)
+        } else {
+            val session = sessionRepository.getSession(sessionId)
+            if (session?.bookId == null) sessionRepository.bindBook(sessionId, boundBookId)
+            if (session?.modelId?.takeIf { it > 0 } == null) {
+                sessionRepository.setModel(sessionId, modelId)
+            }
         }
         // 附件与已选章节 / 大纲在发起任务时冻结，供规划模型使用
         val attachmentContext = withContext(Dispatchers.IO) { buildAttachmentContext(attachments) }
+        // Agent 会话连续：把此前轮次的历史对话一并注入（与「前缀词管理」设置无关）
+        val historyContext = runCatching {
+            buildAgentHistoryText(sessionId)
+        }.getOrDefault("")
         val mergedContext = attachmentContext.copy(
-            text = listOf(buildSelectedContextText(), attachmentContext.text)
+            text = listOf(buildSelectedContextText(), attachmentContext.text, historyContext)
                 .filter { it.isNotBlank() }
                 .joinToString("\n\n")
                 .take(MAX_ATTACHMENT_CONTEXT_CHARS)
@@ -942,12 +1108,99 @@ class AgentChatViewModel(private val container: AppContainer) : ViewModel() {
         _planError.value = null
         _planEditError.value = null
         confirmedTaskIds.value = confirmedTaskIds.value - taskId
-        startPlanning(
-            taskId = taskId,
-            modelId = modelId,
-            previousSummary = "",
-            attachmentContext = mergedContext
+        if (workMode.value == AgentWorkMode.AUTO) {
+            // 自动模式不生成任务规划：直接用一个隐式步骤开始思考并调用工具
+            startAutoExecution(taskId = taskId, modelId = modelId, goal = goal)
+        } else {
+            startPlanning(
+                taskId = taskId,
+                modelId = modelId,
+                previousSummary = "",
+                attachmentContext = mergedContext
+            )
+        }
+    }
+
+    /**
+     * Agent 会话是连续的：把本会话此前轮次的问答整理为历史上下文。
+     * 与「前缀词管理」设置无关，只要是同一 Agent 会话就会进入上下文。
+     */
+    private suspend fun buildAgentHistoryText(sessionId: Long): String {
+        val messages = sessionRepository.getMessages(sessionId)
+        val lines = messages.asSequence()
+            .filter {
+                it.kind == AgentMessageKind.USER_INPUT ||
+                    it.kind == AgentMessageKind.FINAL_ANSWER
+            }
+            .mapNotNull { message ->
+                val text = message.content.trim()
+                if (text.isBlank()) {
+                    null
+                } else {
+                    val who = if (message.role == AgentMessageRole.USER) "用户" else "Agent"
+                    "$who：$text"
+                }
+            }
+            .toList()
+        if (lines.isEmpty()) return ""
+        val joined = lines.joinToString("\n")
+        return if (joined.length <= AGENT_HISTORY_CHARS) {
+            joined
+        } else {
+            "（更早的对话已省略）\n" + joined.takeLast(AGENT_HISTORY_CHARS)
+        }
+    }
+
+    /**
+     * 自动模式：跳过规划模型，构造一个不可见的单步骤计划并立即开始执行。
+     *
+     * 该步骤允许模型自由决定是否调用工具；回答本身即最终结果，不展示计划卡。
+     */
+    private suspend fun startAutoExecution(taskId: Long, modelId: Long, goal: String) {
+        val plan = AgentPlan(
+            taskTitle = goal.lineSequence().firstOrNull()?.take(40).orEmpty().ifBlank { "自动执行" },
+            goalSummary = goal.take(200),
+            thinkingSummary = "自动模式：直接分析目标，按需调用工具后回答",
+            steps = listOf(
+                AgentPlanStep(
+                    stepId = "step_001",
+                    title = "处理你的请求",
+                    description = goal,
+                    capabilityKey = "GENERATE_REPORT",
+                    expectedOutput = "直接解决或回答用户的问题",
+                    riskLevel = AgentRiskLevel.LOW
+                )
+            )
         )
+        val saved = runCatching {
+            // 自动模式跳过规划模型，但仍需经过 PLANNING 状态写入内置单步骤计划
+            taskRepository.updateStatus(taskId, AgentTaskStatus.PLANNING)
+            taskRepository.savePlanAndWaitConfirmation(
+                taskId = taskId,
+                request = AgentPlanSaveRequest(
+                    planJson = planParser.encode(plan),
+                    taskTitle = plan.taskTitle,
+                    goalSummary = plan.goalSummary,
+                    stepCount = 1,
+                    thinkingSummary = plan.thinkingSummary,
+                    assistantContent = ""
+                ),
+                // 自动模式不展示计划消息
+                emitPlanMessage = false
+            )
+        }
+        if (saved.isFailure) {
+            _planError.value = "自动模式启动失败：${saved.exceptionOrNull()?.message ?: "未知错误"}"
+            return
+        }
+        val confirmed = runCatching { taskRepository.markPlanConfirmed(taskId) }
+            .getOrDefault(false)
+        if (!confirmed) {
+            _planError.value = "自动模式启动失败：无法确认执行"
+            return
+        }
+        confirmedTaskIds.value = confirmedTaskIds.value + taskId
+        taskController.requestExecution(taskId, "AUTO_MODE")
     }
 
     /** 已选章节 / 卷梗概 / 大纲 → 规划 Prompt 的上下文文本 */
@@ -1129,7 +1382,63 @@ class AgentChatViewModel(private val container: AppContainer) : ViewModel() {
         if (childId != null) onCreated()
     }
 
-    /** 用户手动修改计划：校验后创建计划分支；保存不等于确认执行 */
+    /**
+     * 从输入框提交编辑：文本与当前待发送附件一起进入新分支。
+     *
+     * 编辑入口把原消息回显到输入框，因此这里需要同时收集附件（图片 / 文件 / 链接）。
+     */
+    fun submitEditedMessage(messageId: Long, onDone: () -> Unit = {}) = viewModelScope.launch {
+        if (_planning.value) return@launch
+        val task = currentTask.value ?: return@launch
+        if (task.status == AgentTaskStatus.RUNNING) {
+            _planError.value = "任务执行中，不能编辑提问"
+            return@launch
+        }
+        val goal = input.value.trim()
+        when {
+            goal.isBlank() -> {
+                _planError.value = "任务目标不能为空"
+                return@launch
+            }
+            goal.length > MAX_AGENT_TASK_GOAL_CHARS -> {
+                _planError.value = "任务目标过长（上限 $MAX_AGENT_TASK_GOAL_CHARS 字）"
+                return@launch
+            }
+        }
+        val message = currentTaskUserMessage(messageId) ?: return@launch
+        val modelId = requireUsableModel() ?: return@launch
+        val attachments = _pendingAttachments.value
+        val attachmentContext = withContext(Dispatchers.IO) { buildAttachmentContext(attachments) }
+        val attachmentsJson = if (attachments.isEmpty()) {
+            message.attachments
+        } else {
+            attachmentStore.encode(attachments)
+        }
+        val baseContext = contextFromMessage(message)
+        val context = baseContext.copy(
+            text = listOf(baseContext.text, attachmentContext.text)
+                .filter { it.isNotBlank() }
+                .joinToString("\n\n")
+                .take(MAX_ATTACHMENT_CONTEXT_CHARS)
+        )
+        val childId = createBranchAndPlan(
+            parent = task,
+            userGoal = goal,
+            branchSource = AgentBranchSource.USER_EDIT,
+            modelId = modelId,
+            previousSummary = "",
+            contextOverride = context,
+            attachmentsJsonOverride = attachmentsJson
+        )
+        if (childId != null) {
+            input.value = ""
+            _pendingAttachments.value = emptyList()
+            _planError.value = null
+            onDone()
+        }
+    }
+
+    /** 用户手动修改计划：直接覆盖当前任务的计划，不新建分支；保存不等于确认执行 */
     fun saveEditedPlan(plan: AgentPlan, onSuccess: () -> Unit = {}) = viewModelScope.launch {
         val task = currentTask.value ?: return@launch
         val validation = planValidator.validate(plan)
@@ -1141,26 +1450,100 @@ class AgentChatViewModel(private val container: AppContainer) : ViewModel() {
             _planEditError.value = "计划仍要求补充信息，请先回答 Agent 的问题"
             return@launch
         }
-        val context = branchContext(task)
-        val attachmentsJson = taskRepository.lastUserMessage(task.id)?.attachments.orEmpty()
         try {
-            val childId = taskRepository.createBranchTask(
-                parentTaskId = task.id,
-                userGoal = task.userGoal,
-                branchSource = AgentBranchSource.PLAN_EDIT,
-                title = plan.taskTitle,
-                planJson = planParser.encode(plan),
-                assistantPlanContent = "已保存修改后的计划：${plan.taskTitle}",
-                contextSnapshot = context.text,
-                attachmentsJson = attachmentsJson
-            ).first
-            taskAttachmentContexts[childId] = context
-            _currentTaskId.value = childId
-            confirmedTaskIds.value = confirmedTaskIds.value - childId
+            taskRepository.updatePlan(task.id, planParser.encode(plan))
+            // 计划已变化，需要用户重新确认后才能执行
+            confirmedTaskIds.value = confirmedTaskIds.value - task.id
             _planEditError.value = null
             onSuccess()
         } catch (e: Throwable) {
             _planEditError.value = e.message ?: "保存计划失败"
+        }
+    }
+
+    // ---------------- 计划书库 ----------------
+
+    private val _planLibrary = MutableStateFlow<List<AgentPlanLibraryItem>>(emptyList())
+    val planLibrary: StateFlow<List<AgentPlanLibraryItem>> = _planLibrary.asStateFlow()
+
+    private val _planLibraryNotice = MutableStateFlow<String?>(null)
+    val planLibraryNotice: StateFlow<String?> = _planLibraryNotice.asStateFlow()
+
+    private var planLibraryBookId: Long? = null
+
+    /** 加载当前书籍下所有已生成的计划书 */
+    fun loadPlanLibrary(bookId: Long) = viewModelScope.launch {
+        planLibraryBookId = bookId
+        _planLibrary.value = runCatching {
+            taskRepository.tasksWithPlanOfBook(bookId).mapNotNull { task ->
+                val parsed = planParser.parse(task.planJson)
+                if (parsed is AgentPlanParseResult.Success) {
+                    AgentPlanLibraryItem(task, parsed.plan)
+                } else {
+                    null
+                }
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    fun clearPlanLibraryNotice() {
+        _planLibraryNotice.value = null
+    }
+
+    /** 在计划书库中修改某个任务的计划：直接更新该任务，不新建分支 */
+    fun saveLibraryPlan(task: AgentTask, plan: AgentPlan) = viewModelScope.launch {
+        if (AgentTaskStatus.isTerminal(task.status)) {
+            _planLibraryNotice.value = "任务已结束，计划仅供查看"
+            return@launch
+        }
+        val validation = planValidator.validate(plan)
+        if (!validation.isValid) {
+            _planLibraryNotice.value = validation.errors.take(3).joinToString("；")
+            return@launch
+        }
+        if (plan.needsClarification) {
+            _planLibraryNotice.value = "计划仍要求补充信息，请先完善计划"
+            return@launch
+        }
+        runCatching {
+            taskRepository.updatePlan(task.id, planParser.encode(plan))
+            taskRepository.renameTask(task.id, plan.taskTitle)
+        }.onSuccess {
+            _planLibraryNotice.value = "计划已保存"
+            planLibraryBookId?.let { loadPlanLibrary(it) }
+        }.onFailure {
+            _planLibraryNotice.value = it.message ?: "保存计划失败"
+        }
+    }
+
+    /** 把计划书加入当前会话的参考资料 */
+    fun addPlanToReferences(task: AgentTask) {
+        addPlansToReferences(listOf(task))
+    }
+
+    /** 批量把计划书加入当前会话的参考资料 */
+    fun addPlansToReferences(tasks: List<AgentTask>) {
+        if (tasks.isEmpty()) return
+        viewModelScope.launch {
+            val session = currentSession.value ?: return@launch
+            var added = 0
+            tasks.forEach { task ->
+                runCatching {
+                    container.agentReferenceRepository.addReference(
+                        sessionId = session.id,
+                        sourceType = AgentReferenceSourceType.AGENT_TASK_PLAN,
+                        sourceId = task.id,
+                        bookId = session.bookId,
+                        titleSnapshot = "任务计划：${task.title}",
+                        referenceMode = AgentReferenceMode.CONTEXT
+                    )
+                }.onSuccess { added++ }
+            }
+            _planLibraryNotice.value = if (added > 0) {
+                "已添加 $added 份计划到参考资料"
+            } else {
+                "添加到参考资料失败"
+            }
         }
     }
 
@@ -1199,19 +1582,20 @@ class AgentChatViewModel(private val container: AppContainer) : ViewModel() {
             return@launch
         }
         val modelId = requireUsableModel() ?: return@launch
-        val previousContext = taskRepository.lastUserMessage(task.id)
         val attachmentContext = branchContext(task)
         try {
-            val answered = taskRepository.answerClarification(pending.id, text) ?: return@launch
-            sessionRepository.addMessage(
-                sessionId = task.sessionId,
-                taskId = task.id,
-                role = com.lianwenqi.app.agent.data.entity.AgentMessageRole.USER,
-                kind = AgentMessageKind.USER_INPUT,
-                content = "补充信息：${answered.answer}",
-                attachments = previousContext?.attachments.orEmpty(),
-                contextSnapshot = previousContext?.contextSnapshot.orEmpty()
-            )
+            taskRepository.answerClarification(pending.id, text) ?: return@launch
+            // 补充信息不生成用户对话消息，改由思维链展示；执行时会从澄清记录注入上下文
+            // 执行过程中由 ask_user 发起的提问：回答后继续同一任务，不重新规划
+            if (task.status == AgentTaskStatus.WAITING_CONFIRMATION) {
+                val resumed = taskController.continueAfterWriteDecision(task.id)
+                if (resumed) {
+                    _executingTaskId.value = task.id
+                } else {
+                    _planError.value = "回答已保存，但任务当前不能继续执行"
+                }
+                return@launch
+            }
             taskRepository.restartPlanning(task.id)
         } catch (e: Throwable) {
             _planError.value = e.message ?: "提交补充信息失败"
@@ -1405,17 +1789,79 @@ class AgentChatViewModel(private val container: AppContainer) : ViewModel() {
 
     /** 取消当前执行；未执行的写入提议同步失效 */
     fun cancelExecution() = viewModelScope.launch {
-        val taskId = _currentTaskId.value ?: return@launch
+        cancelRunningTask(reportError = true)
+    }
+
+    /**
+     * 切换会话 / 新建会话时的“尽力取消”：当前任务不在可取消状态时不提示错误。
+     */
+    private suspend fun cancelRunningTask(reportError: Boolean) {
+        val taskId = _currentTaskId.value ?: return
         writeOperationsRepository.unresolvedOfTask(taskId).forEach {
             writeConfirmationGate.signal(it.id, false)
         }
-        if (!taskController.cancel(taskId)) {
+        if (!taskController.cancel(taskId) && reportError) {
             _executionError.value = "任务当前状态不能取消"
         }
     }
 
     fun clearExecutionError() {
         _executionError.value = null
+    }
+
+    /** 从失败节点重试：重开该节点并重新入队，同参数工具调用计数随新一轮执行重置 */
+    fun retryFailedNode(nodeId: Long) = viewModelScope.launch {
+        val taskId = _currentTaskId.value ?: return@launch
+        _executionError.value = null
+        if (!taskController.retryFromNode(taskId, nodeId)) {
+            _executionError.value = "当前节点无法重试"
+            return@launch
+        }
+        _executingTaskId.value = taskId
+    }
+
+    /** 结束失败任务：保留已完成步骤与记录，任务落为已取消 */
+    fun finishFailedTask() = viewModelScope.launch {
+        val taskId = _currentTaskId.value ?: return@launch
+        _executionError.value = null
+        if (!taskController.finishFailedTask(taskId)) {
+            _executionError.value = "任务当前状态不能结束"
+        }
+    }
+
+    /**
+     * 等待中的节点继续执行。
+     *
+     * 仍有待确认写入或待回答提问时必须先处理，否则任务会立刻回到等待状态。
+     */
+    fun continueWaitingTask() = viewModelScope.launch {
+        val taskId = _currentTaskId.value ?: return@launch
+        _executionError.value = null
+        if (writeOperationsRepository.unresolvedOfTask(taskId).isNotEmpty()) {
+            _executionError.value = "请先处理完待确认的写入"
+            return@launch
+        }
+        if (taskRepository.pendingClarification(taskId) != null) {
+            _executionError.value = "请先回答 Agent 的问题"
+            return@launch
+        }
+        if (!taskController.resume(taskId) &&
+            !taskController.requestExecution(taskId, "USER_CONTINUE")
+        ) {
+            _executionError.value = "任务当前状态不能继续"
+            return@launch
+        }
+        _executingTaskId.value = taskId
+    }
+
+    /** 结束等待中的任务：保留已完成步骤，任务落为已取消 */
+    fun endWaitingTask() = viewModelScope.launch {
+        val taskId = _currentTaskId.value ?: return@launch
+        _executionError.value = null
+        // 用户主动结束：任务落为 CANCELLED，并记录「任务完成」的结束原因
+        if (!taskController.cancel(taskId, AgentTask.USER_ENDED_REASON)) {
+            _executionError.value = "任务当前状态不能结束"
+        }
     }
 
     fun setWritePolicy(policy: String) = viewModelScope.launch {
@@ -1777,6 +2223,8 @@ class AgentChatViewModel(private val container: AppContainer) : ViewModel() {
 
         /** 附件正文注入规划 Prompt 的上限，避免把任务目标挤出上下文 */
         private const val MAX_ATTACHMENT_CONTEXT_CHARS = 6_000
+        /** 规划阶段注入的历史对话字符上限（执行阶段另有独立上限） */
+        private const val AGENT_HISTORY_CHARS = 4_000
     }
 }
 

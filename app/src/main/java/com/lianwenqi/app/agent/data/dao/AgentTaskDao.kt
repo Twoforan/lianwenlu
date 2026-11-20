@@ -56,6 +56,15 @@ interface AgentTaskDao {
     @Query("SELECT * FROM agent_task WHERE sessionId = :sessionId ORDER BY createdAt DESC, id DESC")
     fun observeTasksOfSession(sessionId: Long): Flow<List<AgentTask>>
 
+    /** 当前书籍下所有生成过计划书的计划模式任务（跨会话），用于计划书库 */
+    @Query(
+        "SELECT t.* FROM agent_task t INNER JOIN agent_session s ON t.sessionId = s.id " +
+            "WHERE s.bookId = :bookId AND t.workMode = 'PLAN' " +
+            "AND t.planJson != '' AND t.planJson != '{}' " +
+            "ORDER BY t.createdAt DESC, t.id DESC"
+    )
+    suspend fun tasksWithPlanOfBook(bookId: Long): List<AgentTask>
+
     /** 当前任务的所有直接子分支 */
     @Query("SELECT * FROM agent_task WHERE parentTaskId = :parentId ORDER BY createdAt ASC, id ASC")
     suspend fun childTasks(parentId: Long): List<AgentTask>
@@ -225,6 +234,14 @@ interface AgentTaskDao {
             "WHERE id = :id AND status IN ('RUNNING', 'WAITING')"
     )
     suspend fun reopenNodeForRecovery(id: Long, message: String, now: Long): Int
+
+    /** 用户手动重试：把失败节点重新打开为 PENDING，从该节点继续执行 */
+    @Query(
+        "UPDATE agent_execution_node SET status = 'PENDING', errorMessage = '', " +
+            "startedAt = NULL, completedAt = NULL, updatedAt = :now " +
+            "WHERE id = :id AND status = 'FAILED'"
+    )
+    suspend fun reopenFailedNodeForRetry(id: Long, now: Long): Int
 
     @Query(
         "SELECT * FROM agent_execution_node WHERE taskId = :taskId " +
@@ -562,6 +579,12 @@ interface AgentTaskDao {
             "ORDER BY id ASC"
     )
     suspend fun answeredClarifications(taskId: Long): List<AgentClarification>
+
+    @Query(
+        "SELECT * FROM agent_clarification WHERE taskId = :taskId AND status = 'ANSWERED' " +
+            "ORDER BY id ASC"
+    )
+    fun observeAnsweredClarifications(taskId: Long): Flow<List<AgentClarification>>
 
     @Query(
         "UPDATE agent_clarification SET status = 'CANCELLED', answeredAt = :now " +

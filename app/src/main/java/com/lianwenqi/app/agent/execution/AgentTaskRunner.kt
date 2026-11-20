@@ -144,11 +144,11 @@ class AgentTaskRunner(
                 )
             }
             if (tasks.isCancelRequested(taskId)) {
-                finalizeCancel(taskId, snapshot.sessionId, "执行前已收到取消请求")
+                finalizeCancel(taskId, "执行前已收到取消请求")
                 return AgentRunOutcome(taskId, AgentRunOutcome.CANCELLED)
             }
             if (tasks.isPauseRequested(taskId)) {
-                finalizePause(taskId, snapshot.sessionId)
+                finalizePause(taskId)
                 return AgentRunOutcome(taskId, AgentRunOutcome.PAUSED)
             }
 
@@ -165,7 +165,7 @@ class AgentTaskRunner(
             val task = tasks.getTask(taskId)
                 ?: return AgentRunOutcome(taskId, AgentRunOutcome.NO_OP, "任务不存在")
             if (task.cancelRequested) {
-                finalizeCancel(taskId, task.sessionId, "执行前已收到取消请求")
+                finalizeCancel(taskId, "执行前已收到取消请求")
                 return AgentRunOutcome(taskId, AgentRunOutcome.CANCELLED)
             }
 
@@ -223,14 +223,7 @@ class AgentTaskRunner(
             if (unresolved.isNotEmpty()) {
                 parkInterruptedNodes(taskId)
                 tasks.updateStatus(taskId, AgentTaskStatus.WAITING_CONFIRMATION)
-                sessions.addMessage(
-                    sessionId = task.sessionId,
-                    taskId = taskId,
-                    role = AgentMessageRole.ASSISTANT,
-                    kind = AgentMessageKind.NOTICE,
-                    content = "任务已从后台恢复，但仍有 ${unresolved.size} 个写入操作等待你确认；" +
-                        "确认前不会修改数据，也不会自动继续。"
-                )
+                // 待确认写入通过弹窗展示，不再写对话消息
                 logId?.let {
                     recoveryLogs.finish(
                         id = it,
@@ -246,14 +239,14 @@ class AgentTaskRunner(
                 )
             }
             if (tasks.isCancelRequested(taskId)) {
-                finalizeCancel(taskId, task.sessionId, "恢复核对后收到取消请求")
+                finalizeCancel(taskId, "恢复核对后收到取消请求")
                 logId?.let {
                     recoveryLogs.finish(it, AgentRecoveryResult.SKIPPED, task.executionCursor, "用户取消")
                 }
                 return AgentRunOutcome(taskId, AgentRunOutcome.CANCELLED)
             }
             if (tasks.isPauseRequested(taskId)) {
-                finalizePause(taskId, task.sessionId)
+                finalizePause(taskId)
                 logId?.let {
                     recoveryLogs.finish(it, AgentRecoveryResult.SKIPPED, task.executionCursor, "用户暂停")
                 }
@@ -522,7 +515,7 @@ class AgentTaskRunner(
         }
     }
 
-    private suspend fun finalizePause(taskId: Long, sessionId: Long) {
+    private suspend fun finalizePause(taskId: Long) {
         val task = tasks.getTask(taskId) ?: return
         parkInterruptedNodes(taskId)
         tasks.updateExecutionCursor(
@@ -531,18 +524,10 @@ class AgentTaskRunner(
             task.currentNodeId
         )
         runCatching { tasks.updateStatus(taskId, AgentTaskStatus.PAUSED) }
-        runCatching {
-            sessions.addMessage(
-                sessionId = sessionId,
-                taskId = taskId,
-                role = AgentMessageRole.ASSISTANT,
-                kind = AgentMessageKind.NOTICE,
-                content = "执行已暂停，已完成的步骤结果保留；恢复后从当前步骤继续。"
-            )
-        }
+        // 暂停状态由任务与执行过程卡片展示，不再写对话消息
     }
 
-    private suspend fun finalizeCancel(taskId: Long, sessionId: Long, reason: String) {
+    private suspend fun finalizeCancel(taskId: Long, reason: String) {
         val task = tasks.getTask(taskId) ?: return
         writeService.cancelPending(taskId, reason)
         task.currentNodeId?.let { nodeId ->
@@ -551,16 +536,8 @@ class AgentTaskRunner(
             }
         }
         tasks.updateExecutionCursor(taskId, task.executionCursor, task.currentNodeId)
+        // 取消状态由任务与执行过程卡片展示，不再写对话消息
         runCatching { tasks.updateStatus(taskId, AgentTaskStatus.CANCELLED, reason) }
-        runCatching {
-            sessions.addMessage(
-                sessionId = sessionId,
-                taskId = taskId,
-                role = AgentMessageRole.ASSISTANT,
-                kind = AgentMessageKind.NOTICE,
-                content = "任务已取消，已完成的步骤结果保留；已成功的写入不会自动撤销。"
-            )
-        }
     }
 
     private fun buildRecoveryMessage(

@@ -51,7 +51,8 @@ fun agentTaskRuntimeStatusLabel(
     task.status == AgentTaskStatus.FAILED ->
         if (task.recoveryCount > 0) "恢复失败" else "执行失败"
 
-    task.status == AgentTaskStatus.CANCELLED -> "已取消"
+    task.status == AgentTaskStatus.CANCELLED ->
+        if (agentTaskEndedByUser(task)) "任务完成" else "已取消"
     task.status == AgentTaskStatus.PLANNING -> "规划中"
     else -> "待规划"
 }
@@ -132,7 +133,10 @@ fun AgentTaskDetailDialog(
                     )
                 }
                 if (task.errorMessage.isNotBlank()) {
-                    DetailLine("最近错误", task.errorMessage.take(500))
+                    DetailLine(
+                        if (agentTaskEndedByUser(task)) "结束说明" else "最近错误",
+                        task.errorMessage.take(500)
+                    )
                 }
                 DetailLine("待确认写入", "${pendingWrites.size} 个")
 

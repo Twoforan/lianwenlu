@@ -176,6 +176,32 @@ class AgentExecutionNodeRepository(private val db: AppDatabase) {
         true
     }
 
+    /**
+     * 用户手动重试失败节点：仅允许 FAILED → PENDING。
+     *
+     * 重新执行时引擎会创建新的同参数调用计数，因此重复调用上限也随之重置。
+     */
+    suspend fun reopenFailedForRetry(nodeId: Long, reason: String): Boolean = db.withTransaction {
+        val node = dao.getNode(nodeId) ?: return@withTransaction false
+        // 未开始的当前节点无需重开，直接从它继续
+        if (node.status == AgentNodeStatus.PENDING) return@withTransaction true
+        if (node.status != AgentNodeStatus.FAILED) return@withTransaction false
+        val now = System.currentTimeMillis()
+        val affected = dao.reopenFailedNodeForRetry(nodeId, now)
+        if (affected != 1) return@withTransaction false
+        events.append(
+            taskId = node.taskId,
+            eventType = AgentEventType.NODE_RECOVERED,
+            nodeId = nodeId,
+            payloadJson = jsonPayload {
+                put("from", node.status)
+                put("to", AgentNodeStatus.PENDING)
+                put("reason", reason.take(500))
+            }
+        )
+        true
+    }
+
     suspend fun maxSequence(taskId: Long): Long = dao.maxNodeSequence(taskId)
 
     /** 更新节点展示信息与结构化输入 / 输出；不改变状态，不追加事件 */
@@ -233,7 +259,9 @@ class AgentExecutionNodeRepository(private val db: AppDatabase) {
         val next = node.copy(
             status = status,
             outputJson = outputJson ?: node.outputJson,
-            errorMessage = errorMessage ?: node.errorMessage,
+            // 完成后清除历史错误，避免重试成功的节点仍显示红色失败信息
+            errorMessage = errorMessage
+                ?: if (status == AgentNodeStatus.COMPLETED) "" else node.errorMessage,
             startedAt = if (status == AgentNodeStatus.RUNNING) node.startedAt ?: now else node.startedAt,
             completedAt = if (AgentNodeStatus.isTerminal(status)) node.completedAt ?: now else node.completedAt,
             updatedAt = now

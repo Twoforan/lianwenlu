@@ -27,7 +27,9 @@ data class AgentToolExecutionOutcome(
     /** F6：本次调用产生的写入操作 id */
     val writeOperationId: Long? = null,
     /** F6：写入操作是否仍在等待用户确认 */
-    val writeRequiresConfirmation: Boolean = false
+    val writeRequiresConfirmation: Boolean = false,
+    /** 工具要求先向用户提问：引擎据此暂停任务，等待回答后继续 */
+    val awaitingUserInput: Boolean = false
 ) {
     val success: Boolean get() = status == AgentToolStatus.SUCCEEDED
 
@@ -197,7 +199,8 @@ class AgentToolExecutor(
                     errorMessage = "",
                     truncated = result.truncated || capped.truncated,
                     writeOperationId = result.writeOperationId,
-                    writeRequiresConfirmation = result.writeRequiresConfirmation
+                    writeRequiresConfirmation = result.writeRequiresConfirmation,
+                    awaitingUserInput = result.awaitingUserInput
                 )
             }
         } catch (e: CancellationException) {

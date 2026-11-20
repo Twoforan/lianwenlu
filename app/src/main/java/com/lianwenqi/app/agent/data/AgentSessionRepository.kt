@@ -33,6 +33,13 @@ class AgentSessionRepository(private val db: AppDatabase) {
 
     suspend fun getSession(id: Long): AgentSession? = dao.getSession(id)
 
+    /** 删除单条聊天消息；正在执行的任务由 ViewModel 先行拦截 */
+    suspend fun deleteMessage(id: Long) = dao.deleteMessage(id)
+
+    /** 直接修改 Agent 回复内容 */
+    suspend fun updateMessageContent(id: Long, content: String) =
+        dao.updateMessageContent(id, content)
+
     /** 新建会话；[bookId] 为空表示未绑定书籍 */
     suspend fun createSession(
         bookId: Long? = null,

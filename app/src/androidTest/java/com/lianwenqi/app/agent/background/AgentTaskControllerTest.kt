@@ -81,7 +81,6 @@ class AgentTaskControllerTest {
         controller = AgentTaskController(
             tasks = tasks,
             nodes = AgentExecutionNodeRepository(db),
-            sessions = sessions,
             events = AgentEventRepository(db),
             writes = writes,
             writeService = writeService,

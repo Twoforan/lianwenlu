@@ -135,6 +135,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
@@ -180,6 +181,7 @@ import com.lianwenqi.app.data.entity.ContextSnapshot
 import com.lianwenqi.app.data.entity.decodeContextSnapshot
 import com.lianwenqi.app.data.CompressionSourceMode
 import com.lianwenqi.app.data.decodeOutlineFields
+import com.lianwenqi.app.data.isStructuredOutlineContent
 import com.lianwenqi.app.data.entity.OutlineItem
 import com.lianwenqi.app.data.entity.outlineCategoryLabel
 import com.lianwenqi.app.data.entity.Provider
@@ -4188,7 +4190,9 @@ internal fun ChatComposer(
     showSend: Boolean = true,
     sendEnabled: Boolean,
     onSend: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /** 输入框获得焦点时回调，例如让聊天列表跳到最末尾 */
+    onFocus: () -> Unit = {}
 ) {
     Surface(
         modifier = modifier.fillMaxWidth(),
@@ -4203,7 +4207,9 @@ internal fun ChatComposer(
             TextField(
                 value = value,
                 onValueChange = onValueChange,
-                modifier = Modifier.weight(1f),
+                modifier = Modifier
+                    .weight(1f)
+                    .onFocusChanged { if (it.isFocused) onFocus() },
                 placeholder = {
                     Text(placeholder, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 },
@@ -5470,9 +5476,14 @@ private fun MemoryScopePickerDialog(
  * 首项即条目的「显示标签」，已由标题展示，这里只列其余字段。
  */
 private fun outlinePreviewOf(item: OutlineItem): String =
-    decodeOutlineFields(item.content)
-        .drop(1)
-        .joinToString("\n") { (key, value) -> "$key：$value" }
+    if (isStructuredOutlineContent(item.content)) {
+        decodeOutlineFields(item.content)
+            .drop(1)
+            .joinToString("\n") { (key, value) -> "$key：$value" }
+    } else {
+        // 旧版纯文本内容整体作为正文预览，不再按冒号硬拆
+        item.content.trim()
+    }
 
 /** AI 工具多选弹窗（目前仅「写入大纲工具」，以后新增工具自动出现在列表里） */
 @Composable

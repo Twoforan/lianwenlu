@@ -288,7 +288,9 @@ class AiClient(
                 last.reasoningContent == null && last.toolCalls == null &&
                 msg.reasoningContent == null && msg.toolCalls == null
             ) {
-                merged[merged.lastIndex] = last.copy(content = last.content + "\n\n" + msg.content)
+                merged[merged.lastIndex] = last.copy(
+                    content = last.content.orEmpty() + "\n\n" + msg.content.orEmpty()
+                )
             } else {
                 merged += msg
             }

@@ -224,6 +224,53 @@ class AgentWriteExecutionService(
             }
 
             AgentWriteOperationType.CREATE_OUTLINE_NODE -> null
+
+            AgentWriteOperationType.DELETE_OUTLINE_NODE -> {
+                val before = decodeOutline(operation.beforeSnapshot)
+                    ?: return "执行前快照无法解析"
+                val current = writer.outline(operation.targetId)
+                    ?: return "目标大纲节点已删除"
+                if (current.bookId != operation.bookId) return "目标大纲节点已不属于当前书籍"
+                if (current.category != before.category ||
+                    current.tag != before.tag ||
+                    current.title != before.title ||
+                    current.content != before.content
+                ) {
+                    "大纲节点已在预览后发生变化，请重新预览并确认"
+                } else {
+                    null
+                }
+            }
+
+            AgentWriteOperationType.CREATE_CHAPTER,
+            AgentWriteOperationType.CREATE_VOLUME -> null
+
+            AgentWriteOperationType.DELETE_CHAPTER -> {
+                val before = decodeChapter(operation.beforeSnapshot)
+                    ?: return "执行前快照无法解析"
+                val current = writer.chapterMeta(operation.targetId)
+                    ?: return "目标章节已删除"
+                if (current.bookId != operation.bookId) return "目标章节已不属于当前书籍"
+                if (current.title != before.title) {
+                    "章节已在预览后发生变化，请重新预览并确认"
+                } else {
+                    null
+                }
+            }
+
+            AgentWriteOperationType.DELETE_VOLUME -> {
+                val before = decodeVolume(operation.beforeSnapshot)
+                    ?: return "执行前快照无法解析"
+                val current = writer.volume(operation.targetId)
+                    ?: return "目标分卷已删除"
+                if (current.bookId != operation.bookId) return "目标分卷已不属于当前书籍"
+                if (current.title != before.title) {
+                    "分卷已在预览后发生变化，请重新预览并确认"
+                } else {
+                    null
+                }
+            }
+
             else -> "不支持的写入操作类型：${operation.operationType}"
         }
     }
@@ -287,6 +334,41 @@ class AgentWriteExecutionService(
                     null
                 }
             }
+
+            AgentWriteOperationType.CREATE_CHAPTER -> {
+                val createdId = operation.createdTargetId
+                    ?: return "未记录新建章节 id，无法撤销"
+                val after = decodeChapter(operation.afterSnapshot)
+                    ?: return "执行后快照无法解析"
+                val current = writer.chapterMeta(createdId)
+                    ?: return "新建章节已不存在，无法确认撤销"
+                val content = writer.chapterContent(createdId).orEmpty()
+                if (current.title != after.title ||
+                    current.summary != after.summary ||
+                    content.isNotEmpty()
+                ) {
+                    "新建章节已被编辑，拒绝自动撤销"
+                } else {
+                    null
+                }
+            }
+
+            AgentWriteOperationType.CREATE_VOLUME -> {
+                val createdId = operation.createdTargetId
+                    ?: return "未记录新建分卷 id，无法撤销"
+                val after = decodeVolume(operation.afterSnapshot)
+                    ?: return "执行后快照无法解析"
+                val current = writer.volume(createdId)
+                    ?: return "新建分卷已不存在，无法确认撤销"
+                if (current.title != after.title || writer.volumeChapterCount(createdId) > 0) {
+                    "新建分卷已被修改或已有章节，拒绝自动撤销"
+                } else {
+                    null
+                }
+            }
+
+            AgentWriteOperationType.DELETE_CHAPTER,
+            AgentWriteOperationType.DELETE_VOLUME -> "删除操作不可撤销"
 
             else -> "不支持的撤销类型：${operation.operationType}"
         }
@@ -367,6 +449,71 @@ class AgentWriteExecutionService(
                 operations.markSucceeded(operation.id, encodeOutline(after))
             }
 
+            AgentWriteOperationType.CREATE_CHAPTER -> {
+                val args = decodeChapterCreateArgs(operation.argumentsJson)
+                    ?: error("新建章节参数无法解析")
+                val createdId = writer.createChapter(
+                    bookId = operation.bookId,
+                    volumeId = args.volumeId,
+                    title = args.title,
+                    summary = args.summary
+                )
+                val meta = writer.chapterMeta(createdId)
+                    ?: error("新建章节后无法读取章节")
+                val after = AgentChapterSnapshot(
+                    id = meta.id,
+                    bookId = meta.bookId,
+                    title = meta.title,
+                    summary = meta.summary,
+                    content = "",
+                    contentIncluded = false,
+                    contentLength = 0,
+                    updatedAt = meta.updatedAt
+                )
+                operations.markSucceeded(
+                    operation.id,
+                    encodeChapter(after),
+                    createdTargetId = createdId
+                )
+            }
+
+            AgentWriteOperationType.DELETE_CHAPTER -> {
+                val meta = writer.chapterMeta(operation.targetId)
+                    ?: error("目标章节不存在")
+                if (meta.bookId != operation.bookId) error("目标章节已不属于当前书籍")
+                writer.deleteChapter(operation.bookId, operation.targetId)
+                operations.markSucceeded(operation.id, "{}")
+            }
+
+            AgentWriteOperationType.DELETE_OUTLINE_NODE -> {
+                val current = writer.outline(operation.targetId)
+                    ?: error("目标大纲节点不存在")
+                if (current.bookId != operation.bookId) error("目标大纲节点已不属于当前书籍")
+                writer.deleteOutline(operation.targetId)
+                operations.markSucceeded(operation.id, "{}")
+            }
+
+            AgentWriteOperationType.CREATE_VOLUME -> {
+                val args = decodeVolumeCreateArgs(operation.argumentsJson)
+                    ?: error("新建分卷参数无法解析")
+                val createdId = writer.createVolume(operation.bookId, args.title)
+                val after = writer.volume(createdId)
+                    ?: error("新建分卷后无法读取分卷")
+                operations.markSucceeded(
+                    operation.id,
+                    encodeVolume(after),
+                    createdTargetId = createdId
+                )
+            }
+
+            AgentWriteOperationType.DELETE_VOLUME -> {
+                val volume = writer.volume(operation.targetId)
+                    ?: error("目标分卷不存在")
+                if (volume.bookId != operation.bookId) error("目标分卷已不属于当前书籍")
+                writer.deleteVolume(operation.targetId)
+                operations.markSucceeded(operation.id, "{}")
+            }
+
             else -> error("不支持的写入操作类型：${operation.operationType}")
         }
     }
@@ -401,6 +548,18 @@ class AgentWriteExecutionService(
                 val createdId = operation.createdTargetId
                     ?: error("未记录新建节点 id")
                 writer.deleteOutline(createdId)
+            }
+
+            AgentWriteOperationType.CREATE_CHAPTER -> {
+                val createdId = operation.createdTargetId
+                    ?: error("未记录新建章节 id")
+                writer.deleteChapter(operation.bookId, createdId)
+            }
+
+            AgentWriteOperationType.CREATE_VOLUME -> {
+                val createdId = operation.createdTargetId
+                    ?: error("未记录新建分卷 id")
+                writer.deleteVolume(createdId)
             }
 
             else -> error("不支持的撤销类型：${operation.operationType}")
@@ -441,4 +600,19 @@ class AgentWriteExecutionService(
     private fun decodeUpdateArgs(raw: String): AgentOutlineUpdateArgs? = runCatching {
         agentJson.decodeFromString(AgentOutlineUpdateArgs.serializer(), raw)
     }.getOrNull()
+
+    private fun decodeChapterCreateArgs(raw: String): AgentChapterCreateArgs? = runCatching {
+        agentJson.decodeFromString(AgentChapterCreateArgs.serializer(), raw)
+    }.getOrNull()
+
+    private fun decodeVolumeCreateArgs(raw: String): AgentVolumeCreateArgs? = runCatching {
+        agentJson.decodeFromString(AgentVolumeCreateArgs.serializer(), raw)
+    }.getOrNull()
+
+    private fun decodeVolume(raw: String): AgentVolumeSnapshot? = runCatching {
+        agentJson.decodeFromString(AgentVolumeSnapshot.serializer(), raw)
+    }.getOrNull()
+
+    private fun encodeVolume(snapshot: AgentVolumeSnapshot): String =
+        agentJson.encodeToString(AgentVolumeSnapshot.serializer(), snapshot)
 }

@@ -52,7 +52,7 @@ import com.lianwenqi.app.data.PromptLogRound
 import com.lianwenqi.app.data.SendChatMessageUseCase
 import com.lianwenqi.app.data.SendChatRequest
 import com.lianwenqi.app.data.VectorizeProgress
-import com.lianwenqi.app.data.decodeOutlineFields
+import com.lianwenqi.app.data.outlineDisplayName
 import com.lianwenqi.app.data.entity.AiModel
 import com.lianwenqi.app.data.entity.Book
 import com.lianwenqi.app.data.entity.BookGroup
@@ -2099,7 +2099,7 @@ class AiChatViewModel(
         if (outline) {
             val categories = prefs.outlineCategories(bookId) ?: defaultOutlineKeys
             outlineRepository.getOutline(bookId).forEach { item ->
-                val name = decodeOutlineFields(item.content).firstOrNull()?.second?.ifBlank { item.title } ?: item.title
+                val name = outlineDisplayName(item.title, item.content)
                 add("${item.category}\u0000$name")
                 categories.firstOrNull { it == item.category }?.let { add("${outlineCategoryLabel(it)}\u0000$name") }
             }
@@ -3922,11 +3922,9 @@ class AiChatViewModel(
         )
     }
 
-    /** 大纲条目的「显示标签」值：内容首项的值，为空时回落条目标题 */
-    private fun outlineHeadOf(item: OutlineItem): String {
-        val fields = decodeOutlineFields(item.content)
-        return fields.firstOrNull()?.second?.ifBlank { item.title } ?: item.title
-    }
+    /** 大纲条目的「显示标签」值：旧版纯文本内容直接用条目标题，不再从正文「-」行推测 */
+    private fun outlineHeadOf(item: OutlineItem): String =
+        outlineDisplayName(item.title, item.content)
 
     /**
      * 「适配性筛选」命中判定（聊天发送与生成正文共用同一套规则）：
