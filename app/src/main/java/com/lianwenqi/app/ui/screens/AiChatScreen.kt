@@ -363,7 +363,7 @@ private fun NormalAiChatScreen(
                     // 机器人图标与开关固定在最右侧
                     Icon(
                         Icons.Filled.SmartToy,
-                        contentDescription = "Agent 模式",
+                        contentDescription = "自动化",
                         modifier = Modifier.size(20.dp),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant
                     )

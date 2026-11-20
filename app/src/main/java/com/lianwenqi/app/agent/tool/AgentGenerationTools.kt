@@ -27,6 +27,8 @@ class AgentGenerationTools(
     private val styleBlockOf: suspend (Long?) -> String,
     private val memoryRetrieve: suspend (Long, String, Int) -> List<String>,
     private val modelIdOfTask: suspend (Long) -> Long?,
+    /** 正文生成专用模型；返回 null 时回退到任务模型 */
+    private val modelIdOfContent: (suspend (Long) -> Long?)? = null,
     private val summaryWordRange: suspend () -> IntRange,
     private val contentWordRange: suspend () -> IntRange,
     private val generationService: ChapterGenerationService
@@ -118,7 +120,8 @@ class AgentGenerationTools(
                     "或在 summary 参数中提供梗概"
             )
         }
-        val modelId = modelIdOfTask(context.taskId)
+        val modelId = modelIdOfContent?.invoke(context.taskId)
+            ?: modelIdOfTask(context.taskId)
             ?: return@AgentTool AgentToolResult.fail("当前任务未关联可用模型")
         val result = generationService.generateContent(
             modelId = modelId,

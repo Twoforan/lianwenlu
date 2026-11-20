@@ -26,9 +26,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
@@ -72,6 +74,8 @@ import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -127,7 +131,9 @@ import com.lianwenqi.app.agent.data.entity.AgentReferenceMode
 import com.lianwenqi.app.agent.model.AgentPlan
 import com.lianwenqi.app.agent.model.AgentRiskLevel
 import com.lianwenqi.app.data.ChatAttachment
+import com.lianwenqi.app.data.entity.AiModel
 import com.lianwenqi.app.data.entity.BookGroup
+import com.lianwenqi.app.data.entity.Provider
 import com.lianwenqi.app.data.entity.outlineCategoryLabel
 import com.lianwenqi.app.ui.appViewModel
 import com.lianwenqi.app.ui.screens.AttachmentPreviewDialog
@@ -135,7 +141,6 @@ import com.lianwenqi.app.ui.screens.BookPickerDialog
 import com.lianwenqi.app.ui.screens.ChatComposer
 import com.lianwenqi.app.ui.screens.ContextPicker
 import com.lianwenqi.app.ui.screens.OutlinePicker
-import com.lianwenqi.app.ui.screens.ModelSelectorChip
 import com.lianwenqi.app.ui.screens.TEXT_FILE_MIME_TYPES
 import com.lianwenqi.app.ui.screens.attachmentIcon
 import com.lianwenqi.app.ui.screens.attachmentLabel
@@ -165,6 +170,8 @@ fun AgentChatScreen(
     val currentTaskId by vm.currentTaskId.collectAsState()
     val currentPlan by vm.currentPlan.collectAsState()
     val historicalArtifacts by vm.historicalArtifacts.collectAsState()
+    val agentTaskModelId by vm.agentTaskModelId.collectAsState()
+    val agentContentModelId by vm.agentContentModelId.collectAsState()
     val planning by vm.planning.collectAsState()
     val sendingTask by vm.sendingTask.collectAsState()
     val planningTaskId by vm.planningTaskId.collectAsState()
@@ -219,7 +226,7 @@ fun AgentChatScreen(
     val chatScroll = rememberScrollState()
 
     var showHistory by remember { mutableStateOf(false) }
-    var showTaskList by remember { mutableStateOf(false) }
+    var showAgentSettings by remember { mutableStateOf(false) }
     var showBookPicker by remember { mutableStateOf(false) }
     var showChapterPicker by remember { mutableStateOf(false) }
     var showOutlinePicker by remember { mutableStateOf(false) }
@@ -286,29 +293,19 @@ fun AgentChatScreen(
                     actionIconContentColor = Color(0xFF1D1B20)
                 ),
                 title = {
-                    // 与普通 AI 聊天一致：标题右侧直接选择模型
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("Agent 模式")
-                        Spacer(Modifier.width(8.dp))
-                        ModelSelectorChip(
-                            models = models,
-                            providers = providers,
-                            activeId = modelId,
-                            maxLabelWidth = 110.dp,
-                            onSelect = vm::setModel
-                        )
-                    }
+                    // 模型统一在右上角「设置」里配置，标题栏不再放模型选择
+                    Text("自动化")
                 },
                 actions = {
                     IconButton(onClick = { vm.newSession() }) {
                         Icon(Icons.Filled.Add, contentDescription = "新建 Agent 会话")
                     }
-                    TextButton(onClick = { showTaskList = true }) { Text("任务") }
+                    TextButton(onClick = { showAgentSettings = true }) { Text("设置") }
                     TextButton(onClick = { showHistory = true }) { Text("历史") }
                     // 机器人图标与开关固定在最右侧
                     Icon(
                         Icons.Filled.SmartToy,
-                        contentDescription = "Agent 模式",
+                        contentDescription = "自动化",
                         modifier = Modifier.size(20.dp),
                         tint = Color(0xFF5B4B8A)
                     )
@@ -327,7 +324,7 @@ fun AgentChatScreen(
             Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .windowInsetsPadding(WindowInsets.navigationBars)
+                .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime))
         ) {
             // 绑定书籍：与普通 AI 聊天的书籍选择同位置（顶部标签行）
             Row(
@@ -848,7 +845,7 @@ fun AgentChatScreen(
 
             if (!modelSelected) {
                 Text(
-                    "请先选择可用模型，再发送任务。",
+                    "请先在右上角「设置」中选择任务模型，再发送任务。",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.error,
                     modifier = Modifier.padding(horizontal = 16.dp)
@@ -1216,22 +1213,15 @@ fun AgentChatScreen(
         )
     }
 
-    if (showTaskList) {
-        AgentTaskListDialog(
-            // 分支版本在消息操作栏用 < n/m > 切换，不再作为独立「新任务」混进任务列表
-            tasks = tasks.filter { it.parentTaskId == null },
-            currentTaskId = currentTaskId,
-            planningTaskId = planningTaskId,
-            onOpen = {
-                vm.openTask(it)
-                showTaskList = false
-            },
-            onOpenDetails = {
-                vm.openTaskDetails(it)
-                showTaskList = false
-            },
-            onDelete = vm::deleteTask,
-            onDismiss = { showTaskList = false }
+    if (showAgentSettings) {
+        AgentModelSettingsDialog(
+            models = models,
+            providers = providers,
+            taskModelId = agentTaskModelId,
+            contentModelId = agentContentModelId,
+            onSelectTaskModel = vm::setAgentTaskModel,
+            onSelectContentModel = vm::setAgentContentModel,
+            onDismiss = { showAgentSettings = false }
         )
     }
 
@@ -1557,7 +1547,7 @@ private fun AgentEmptyState(
             Modifier.padding(horizontal = 24.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Text("Agent 模式", style = MaterialTheme.typography.titleLarge)
+            Text("自动化", style = MaterialTheme.typography.titleLarge)
             Spacer(Modifier.height(10.dp))
             Text(
                 "你可以在这里向 Agent 下达任务。\n" +
@@ -1845,6 +1835,138 @@ private fun AgentMessageRow(
                     )
                     TextButton(onClick = onCopy) { Text("复制") }
                 }
+            }
+        }
+    }
+}
+
+/**
+ * 自动化设置：分别配置任务模型与正文生成模型。
+ *
+ * 任务模型用于计划与执行步骤；正文生成模型只用于生成正文草稿，
+ * 未选择时跟随任务模型。
+ */
+@Composable
+private fun AgentModelSettingsDialog(
+    models: List<AiModel>,
+    providers: List<Provider>,
+    taskModelId: Long,
+    contentModelId: Long,
+    onSelectTaskModel: (Long) -> Unit,
+    onSelectContentModel: (Long) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val providerNames = remember(providers) {
+        providers.associate { it.id to it.name }
+    }
+    val labelOf: (Long) -> String? = { id ->
+        models.firstOrNull { it.id == id }?.let { model ->
+            val display = model.alias.ifBlank { model.name }
+            providerNames[model.providerId]?.let { "$display · $it" } ?: display
+        }
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("自动化设置") },
+        text = {
+            Column(Modifier.fillMaxWidth()) {
+                Text("任务模型", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    "用于生成计划与执行步骤（Agent 的思考与工具调用）。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(6.dp))
+                AgentModelPickerRow(
+                    currentLabel = labelOf(taskModelId) ?: "跟随当前会话模型",
+                    models = models,
+                    providerNames = providerNames,
+                    followLabel = null,
+                    onSelect = onSelectTaskModel
+                )
+                Spacer(Modifier.height(16.dp))
+                Text("正文生成模型", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    "执行正文生成步骤时使用；未选择时跟随任务模型。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(6.dp))
+                AgentModelPickerRow(
+                    currentLabel = labelOf(contentModelId) ?: "跟随任务模型",
+                    models = models,
+                    providerNames = providerNames,
+                    followLabel = "跟随任务模型",
+                    onSelect = onSelectContentModel,
+                    onFollow = { onSelectContentModel(0L) }
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("关闭") }
+        }
+    )
+}
+
+/** 设置弹窗里的模型下拉选择 */
+@Composable
+private fun AgentModelPickerRow(
+    currentLabel: String,
+    models: List<AiModel>,
+    providerNames: Map<Long, String>,
+    followLabel: String?,
+    onSelect: (Long) -> Unit,
+    onFollow: () -> Unit = {}
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        OutlinedButton(
+            onClick = { expanded = true },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(
+                currentLabel,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "选择模型")
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            modifier = Modifier.heightIn(max = 320.dp)
+        ) {
+            if (followLabel != null) {
+                DropdownMenuItem(
+                    text = { Text(followLabel) },
+                    onClick = {
+                        onFollow()
+                        expanded = false
+                    }
+                )
+            }
+            models.forEach { model ->
+                val display = model.alias.ifBlank { model.name }
+                val provider = providerNames[model.providerId]
+                DropdownMenuItem(
+                    text = {
+                        Column {
+                            Text(display)
+                            if (provider != null) {
+                                Text(
+                                    provider,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    },
+                    onClick = {
+                        onSelect(model.id)
+                        expanded = false
+                    }
+                )
             }
         }
     }

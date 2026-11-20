@@ -127,6 +127,12 @@ class Prefs(private val context: Context) {
         // Agent 模式上次打开的会话 id（0 表示无）；退出重进后恢复该会话
         val agentLastSessionId = longPreferencesKey("agent_last_session_id")
 
+        // Agent 任务模型（规划 / 执行使用）；0 表示跟随会话或全局模型
+        val agentTaskModelId = longPreferencesKey("agent_task_model_id")
+
+        // Agent 正文生成模型；0 表示跟随任务模型
+        val agentContentModelId = longPreferencesKey("agent_content_model_id")
+
         // 前缀词管理：上下文前缀化 / 大纲前缀化（均默认开启）
         val prefixContextEnabled = booleanPreferencesKey("prefix_context_enabled")
         val prefixOutlineEnabled = booleanPreferencesKey("prefix_outline_enabled")
@@ -276,6 +282,16 @@ class Prefs(private val context: Context) {
 
     /** Agent 模式上次打开的会话 id（0 表示无） */
     val agentLastSessionId: Flow<Long> = context.dataStore.data.map { it[K.agentLastSessionId] ?: 0L }
+
+    /** Agent 任务模型；0 表示跟随会话或全局模型 */
+    val agentTaskModelId: Flow<Long> = context.dataStore.data.map {
+        it[K.agentTaskModelId] ?: 0L
+    }
+
+    /** Agent 正文生成模型；0 表示跟随任务模型 */
+    val agentContentModelId: Flow<Long> = context.dataStore.data.map {
+        it[K.agentContentModelId] ?: 0L
+    }
 
     /** Agent 新任务工作模式；默认计划模式，保持原有流程 */
     val agentWorkMode: Flow<String> = context.dataStore.data.map {
@@ -520,6 +536,12 @@ class Prefs(private val context: Context) {
     /** F6：修改 Agent 写入权限策略；只影响后续写入提议，不回溯已确认操作 */
     suspend fun setAgentWritePolicy(v: String) = writePrefs { it[K.agentWritePolicy] = v }
     suspend fun setAgentLastSessionId(v: Long) = writePrefs { it[K.agentLastSessionId] = v }
+
+    /** 设置 Agent 任务模型；0 表示跟随会话或全局模型 */
+    suspend fun setAgentTaskModelId(v: Long) = writePrefs { it[K.agentTaskModelId] = v }
+
+    /** 设置 Agent 正文生成模型；0 表示跟随任务模型 */
+    suspend fun setAgentContentModelId(v: Long) = writePrefs { it[K.agentContentModelId] = v }
 
     /** 修改 Agent 新任务工作模式；不改变已创建任务固化的模式 */
     suspend fun setAgentWorkMode(v: String) = writePrefs { it[K.agentWorkMode] = v }

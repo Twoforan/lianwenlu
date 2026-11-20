@@ -316,6 +316,17 @@ class AppContainer(val app: Application) {
                         agentSessionRepository.getSession(sessionId)?.modelId
                     }
                 },
+                // 正文生成可单独配置模型；未配置或模型已删除时回退到任务模型
+                modelIdOfContent = { taskId ->
+                    val configured = prefs.agentContentModelId.first()
+                        .takeIf { it > 0 && configRepository.getModel(it) != null }
+                    configured ?: run {
+                        val task = agentTaskRepository.getTask(taskId)
+                        task?.modelId ?: task?.sessionId?.let { sessionId ->
+                            agentSessionRepository.getSession(sessionId)?.modelId
+                        }
+                    }
+                },
                 summaryWordRange = { prefs.genSummaryWordRange.first() },
                 contentWordRange = { prefs.genContentWordRange.first() },
                 generationService = chapterGenerationService

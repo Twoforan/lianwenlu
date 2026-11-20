@@ -492,11 +492,25 @@ class AgentChatViewModel(private val container: AppContainer) : ViewModel() {
             }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    /** 当前生效模型：会话模型 > 本次手动选择 > 普通聊天当前模型（只读兜底） */
+    /** 设置里配置的 Agent 任务模型；0 表示跟随会话 / 全局模型 */
+    val agentTaskModelId: StateFlow<Long> = prefs.agentTaskModelId
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0L)
+
+    /** 设置里配置的正文生成模型；0 表示跟随任务模型 */
+    val agentContentModelId: StateFlow<Long> = prefs.agentContentModelId
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0L)
+
+    /** 当前生效模型：会话模型 > 本次手动选择 > 设置中的任务模型 > 普通聊天当前模型 */
     val currentModelId: StateFlow<Long> =
-        combine(currentSession, pendingModelId, globalModelId) { session, pending, global ->
+        combine(
+            currentSession,
+            pendingModelId,
+            agentTaskModelId,
+            globalModelId
+        ) { session, pending, taskModel, global ->
             session?.modelId?.takeIf { it > 0 }
                 ?: pending?.takeIf { it > 0 }
+                ?: taskModel.takeIf { it > 0 }
                 ?: global
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0L)
 
@@ -941,6 +955,19 @@ class AgentChatViewModel(private val container: AppContainer) : ViewModel() {
         pendingModelId.value = modelId
         _currentSessionId.value?.let { sessionRepository.setModel(it, modelId) }
         _planError.value = null
+    }
+
+    /** 保存设置里的任务模型，并让当前会话立即生效 */
+    fun setAgentTaskModel(modelId: Long) = viewModelScope.launch {
+        prefs.setAgentTaskModelId(modelId)
+        pendingModelId.value = modelId
+        _currentSessionId.value?.let { sessionRepository.setModel(it, modelId) }
+        _planError.value = null
+    }
+
+    /** 保存设置里的正文生成模型；0 表示跟随任务模型 */
+    fun setAgentContentModel(modelId: Long) = viewModelScope.launch {
+        prefs.setAgentContentModelId(modelId)
     }
 
     // ---------------- 任务与规划 ----------------
