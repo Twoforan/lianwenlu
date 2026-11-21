@@ -319,11 +319,11 @@ class AgentExecutionEngine(
         }.getOrDefault("")
         // Agent 会话是连续的：把本会话此前轮次的历史对话注入当前任务（与前缀词设置无关）
         val historyBlock = runCatching {
-            buildConversationHistory(taskId, task.sessionId)
+            buildConversationHistory(taskId, task.sessionId, truncate = !autoMode)
         }.getOrDefault("")
 
         try {
-            val referenceContext = assembleReferenceContext(taskId, sessionId)
+            val referenceContext = assembleReferenceContext(taskId, sessionId, unlimited = autoMode)
             if (!options.recovery) {
                 notifyReferenceStatus(sessionId, taskId, referenceContext)
             }
@@ -958,9 +958,19 @@ class AgentExecutionEngine(
         }
         toolExecutions.start(executionId)
         val startedAt = System.currentTimeMillis()
-        return when (val result = compressor.compress(modelId, turns, contextWindow)) {
+        return when (val result = compressor.compress(
+            modelId = modelId,
+            turns = turns,
+            configuredWindow = contextWindow,
+            preserveFirstUser = !autoMode
+        )) {
             is AgentContextCompressor.Result.Success -> {
-                val rebuilt = compressor.rebuildTurns(turns, result.summary, contextWindow)
+                val rebuilt = compressor.rebuildTurns(
+                    turns = turns,
+                    summary = result.summary,
+                    configuredWindow = contextWindow,
+                    preserveFirstUser = !autoMode
+                )
                 turns.clear()
                 turns.addAll(rebuilt)
                 toolExecutions.succeed(
@@ -1102,11 +1112,12 @@ class AgentExecutionEngine(
 
     private suspend fun assembleReferenceContext(
         taskId: Long,
-        sessionId: Long
+        sessionId: Long,
+        unlimited: Boolean = false
     ): AgentContextResult {
         val assembler = contextAssembler ?: return AgentContextResult.empty(taskId)
         return try {
-            assembler.assemble(taskId, sessionId)
+            assembler.assemble(taskId, sessionId, unlimited = unlimited)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Throwable) {
@@ -1273,7 +1284,11 @@ class AgentExecutionEngine(
      * Agent 会话是连续的：把本会话此前轮次的问答注入当前任务上下文。
      * 与「前缀词管理」设置无关，只要属于同一 Agent 会话就会进入上下文。
      */
-    private suspend fun buildConversationHistory(taskId: Long, sessionId: Long): String {
+    private suspend fun buildConversationHistory(
+        taskId: Long,
+        sessionId: Long,
+        truncate: Boolean = true
+    ): String {
         if (sessionId <= 0L) return ""
         val messages = runCatching { sessions.getMessages(sessionId) }.getOrDefault(emptyList())
         val lines = messages.asSequence()
@@ -1294,7 +1309,8 @@ class AgentExecutionEngine(
             .toList()
         if (lines.isEmpty()) return ""
         val joined = lines.joinToString("\n")
-        return if (joined.length <= MAX_HISTORY_CHARS) {
+        // 仅计划模式按字符截断；自动模式保留全部历史，交给上下文压缩在超限时处理
+        return if (!truncate || joined.length <= MAX_HISTORY_CHARS) {
             joined
         } else {
             "（更早的对话已省略）\n" + joined.takeLast(MAX_HISTORY_CHARS)

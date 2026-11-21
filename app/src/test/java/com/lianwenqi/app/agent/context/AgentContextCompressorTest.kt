@@ -82,6 +82,24 @@ class AgentContextCompressorTest {
     }
 
     @Test
+    fun 自动模式压缩时不原样保留超长首条指令() = runBlocking {
+        val compressor = compressor()
+        val hugeFirst = ChatTurn(ChatRole.USER, "资料：".repeat(6_000))
+        val turns = listOf(ChatTurn(ChatRole.SYSTEM, "系统提示"), hugeFirst) + longTurns()
+        val result = compressor.compress(1L, turns, 8_000, preserveFirstUser = false)
+        assertTrue(result is AgentContextCompressor.Result.Success)
+        val rebuilt = compressor.rebuildTurns(
+            turns,
+            (result as AgentContextCompressor.Result.Success).summary,
+            8_000,
+            preserveFirstUser = false
+        )
+        assertTrue(rebuilt.none { it === hugeFirst || it.content == hugeFirst.content })
+        assertTrue(rebuilt.any { it.content.startsWith("【上下文摘要") })
+        assertTrue(compressor.shouldCompress(turns, 8_000))
+    }
+
+    @Test
     fun 模型未配置窗口时使用默认窗口() {
         val compressor = compressor()
         assertEquals(512_000, compressor.windowTokens(0))

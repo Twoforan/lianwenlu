@@ -65,7 +65,7 @@ object AgentExecutionPrompt {
         authorizedContext: String = ""
     ): String = buildString {
         appendLine("【用户消息】")
-        appendLine(goal.take(4_000))
+        appendLine(goal)
         if (authorizedContext.isNotBlank()) {
             appendLine()
             appendLine(authorizedContext)
@@ -74,7 +74,7 @@ object AgentExecutionPrompt {
             appendLine()
             appendLine("【已经拿到的资料】")
             toolResults.forEach {
-                appendLine(it.take(6_000))
+                appendLine(it)
             }
         }
         appendLine()

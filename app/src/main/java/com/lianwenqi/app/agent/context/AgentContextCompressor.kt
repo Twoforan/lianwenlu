@@ -49,7 +49,9 @@ class AgentContextCompressor(
     suspend fun compress(
         modelId: Long,
         turns: List<ChatTurn>,
-        configuredWindow: Int
+        configuredWindow: Int,
+        /** 是否原样保留首条任务指令；自动模式不截断资料时，首条指令可能远超窗口，需随对话一起压缩 */
+        preserveFirstUser: Boolean = true
     ): Result {
         val window = windowTokens(configuredWindow)
         if (window < MIN_COMPRESSIBLE_WINDOW) {
@@ -92,7 +94,7 @@ class AgentContextCompressor(
         if (summary.isBlank()) {
             return Result.Failure("上下文压缩返回为空")
         }
-        val rebuilt = rebuildTurns(turns, summary, window)
+        val rebuilt = rebuildTurns(turns, summary, window, preserveFirstUser)
         return Result.Success(
             summary = summary,
             beforeTokens = beforeTokens,
@@ -102,22 +104,25 @@ class AgentContextCompressor(
 
     /**
      * 压缩后的消息结构：保留系统提示与首条任务指令，插入摘要，再保留最近的消息。
-     * 首条任务指令是当前步骤的执行依据，任何情况下都不能被摘要替代。
+     * 首条任务指令是当前步骤的执行依据，计划模式下不能被摘要替代；
+     * 自动模式因保留完整资料，首条指令可能本身就超出窗口，此时由摘要承载目标与资料要点。
      */
     fun rebuildTurns(
         turns: List<ChatTurn>,
         summary: String,
-        configuredWindow: Int
+        configuredWindow: Int,
+        preserveFirstUser: Boolean = true
     ): List<ChatTurn> {
         val window = windowTokens(configuredWindow)
         val systemTurns = turns.filter { it.role == ChatRole.SYSTEM }
-        val firstUser = turns.firstOrNull { it.role == ChatRole.USER }
+        val originalFirstUser = turns.firstOrNull { it.role == ChatRole.USER }
+        val firstUser = if (preserveFirstUser) originalFirstUser else null
 
         val tailBudget = (window * TAIL_RATIO).toInt()
         val tail = mutableListOf<ChatTurn>()
         var used = 0
         turns.asReversed().forEach { turn ->
-            if (turn.role == ChatRole.SYSTEM || turn === firstUser) return@forEach
+            if (turn.role == ChatRole.SYSTEM || turn === originalFirstUser) return@forEach
             val cost = ContextEstimator.estimateTokens(listOf(turn))
             if (used + cost > tailBudget) return@forEach
             used += cost

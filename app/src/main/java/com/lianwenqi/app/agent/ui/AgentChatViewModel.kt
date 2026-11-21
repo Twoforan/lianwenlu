@@ -1703,13 +1703,19 @@ class AgentChatViewModel(private val container: AppContainer) : ViewModel() {
         _planError.value = null
         _planEditError.value = null
         confirmedTaskIds.value = confirmedTaskIds.value - childId
-        startPlanning(
-            taskId = childId,
-            modelId = modelId,
-            previousSummary = previousSummary,
-            attachmentContext = context,
-            clarificationAnswers = clarificationAnswers
-        )
+        // 自动模式本就不生成计划：编辑 / 重新生成提问时也应直接重新执行并生成回复，
+        // 不能走规划流程，否则会自动模式里凭空多出一份计划。
+        if (parent.workMode == AgentWorkMode.AUTO) {
+            startAutoExecution(taskId = childId, modelId = modelId, goal = userGoal)
+        } else {
+            startPlanning(
+                taskId = childId,
+                modelId = modelId,
+                previousSummary = previousSummary,
+                attachmentContext = context,
+                clarificationAnswers = clarificationAnswers
+            )
+        }
         return childId
     }
 

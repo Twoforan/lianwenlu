@@ -28,7 +28,15 @@ class AgentContextAssembler(
     private val budget: AgentContextBudget = AgentContextBudget.DEFAULT
 ) {
 
-    suspend fun assemble(taskId: Long, sessionId: Long): AgentContextResult {
+    /**
+     * @param unlimited 为 true 时不按预算截断，完整注入所有授权资料（自动模式使用）；
+     *   上下文超限由执行引擎的自动压缩处理，而不是在这里静默截断。
+     */
+    suspend fun assemble(
+        taskId: Long,
+        sessionId: Long,
+        unlimited: Boolean = false
+    ): AgentContextResult {
         val references = freezeSnapshot(taskId, sessionId)
         if (references.isEmpty()) {
             return AgentContextResult.empty(taskId)
@@ -38,7 +46,7 @@ class AgentContextAssembler(
         references.forEach { reference ->
             val target = reference.toTarget()
             val mode = reference.referenceMode
-            val remaining = budget.maxReferenceChars - usedChars
+            val remaining = if (unlimited) UNLIMITED_CHARS else budget.maxReferenceChars - usedChars
             val item = when {
                 mode == AgentReferenceMode.REFERENCE_ONLY ->
                     resolveStatusOnly(target, taskId, AgentContextItemStatus.SKIPPED_REFERENCE_ONLY)
@@ -49,7 +57,11 @@ class AgentContextAssembler(
                 else -> resolveWithContent(
                     target = target,
                     taskId = taskId,
-                    maxChars = minOf(budget.maxCharsFor(reference.sourceType), remaining)
+                    maxChars = if (unlimited) {
+                        UNLIMITED_CHARS
+                    } else {
+                        minOf(budget.maxCharsFor(reference.sourceType), remaining)
+                    }
                 )
             }
             if (item.injected) usedChars += item.contentChars
@@ -80,7 +92,7 @@ class AgentContextAssembler(
             promptBlock = promptBlock,
             estimatedTokens = budget.estimateTokens(promptBlock),
             usedChars = usedChars,
-            budgetChars = budget.maxReferenceChars
+            budgetChars = if (unlimited) usedChars else budget.maxReferenceChars
         )
     }
 
@@ -299,4 +311,9 @@ class AgentContextAssembler(
         titleSnapshot = sourceTitleSnapshot,
         referenceMode = referenceMode
     )
+
+    private companion object {
+        /** 不限制注入长度时的上限，仅用于避免把 Int.MAX_VALUE 传进字符串截断逻辑 */
+        const val UNLIMITED_CHARS = Int.MAX_VALUE / 4
+    }
 }
