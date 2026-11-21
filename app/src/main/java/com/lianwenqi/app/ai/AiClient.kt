@@ -139,6 +139,7 @@ class AiClient(
      * 为空时一次性返回整段结果。
      * [tools] 非空时随请求携带工具定义；供应商拒绝该字段（400）时自动重试一次不带 tools 的请求，
      * 并在结果上标记 [AiResult.toolsUnsupported]，由上层提示改用手动导入。
+     * 流式请求失败且判定为供应商不支持 SSE 时，自动回退一次非流式请求。
      */
     suspend fun chat(
         endpoint: ModelEndpoint,
@@ -153,18 +154,21 @@ class AiClient(
             if (endpoint.provider.baseUrl.isBlank()) return@withContext AiResult.fail("未配置 baseUrl")
             if (apiKey.isBlank()) return@withContext AiResult.fail("未配置 apiKey")
 
-            suspend fun runOnce(withTools: Boolean): AiResult = runCatching {
+            val wantsStream = onDelta != null
+            var sseDisabled = false
+
+            suspend fun runOnce(withTools: Boolean, stream: Boolean): AiResult = runCatching {
                 val activeTools = if (withTools) tools else emptyList()
                 val search = webSearch && withTools && endpoint.apiType == ApiType.CHAT_COMPLETIONS
                 when (endpoint.apiType) {
                     ApiType.CHAT_COMPLETIONS ->
-                        if (onDelta != null) streamCompletions(endpoint, turns, activeTools, search, onDelta)
+                        if (stream) streamCompletions(endpoint, turns, activeTools, search, onDelta!!)
                         else chatCompletions(endpoint, turns, activeTools, search)
                     ApiType.RESPONSES ->
-                        if (onDelta != null) streamResponses(endpoint, stripImages(turns), activeTools, onDelta)
+                        if (stream) streamResponses(endpoint, stripImages(turns), activeTools, onDelta!!)
                         else responses(endpoint, stripImages(turns), activeTools)
                     ApiType.ANTHROPIC_MESSAGES ->
-                        if (onDelta != null) streamAnthropic(endpoint, stripImages(turns), activeTools, onDelta)
+                        if (stream) streamAnthropic(endpoint, stripImages(turns), activeTools, onDelta!!)
                         else anthropicMessages(endpoint, stripImages(turns), activeTools)
                 }
             }.getOrElse {
@@ -174,13 +178,45 @@ class AiClient(
                 AiResult.fail(AiError.fromThrowable(it))
             }
 
-            val first = runOnce(tools.isNotEmpty() || webSearch)
-            val rejectedTools = (tools.isNotEmpty() || webSearch) && (first.error as? AiError.Server)?.code == 400
+            // 不支持 SSE 的供应商：本会话内自动回退一次非流式请求，避免用户反复失败
+            suspend fun attempt(withTools: Boolean): AiResult {
+                if (wantsStream && !sseDisabled) {
+                    val streamed = runOnce(withTools, stream = true)
+                    if (!sseUnsupported(streamed)) return streamed
+                    sseDisabled = true
+                }
+                return runOnce(withTools, stream = false)
+            }
+
+            val hasTools = tools.isNotEmpty() || webSearch
+            val first = attempt(hasTools)
+            val rejectedTools = hasTools && (first.error as? AiError.Server)?.code == 400
             if (rejectedTools) {
-                val retry = runOnce(false)
+                val retry = attempt(false)
                 if (retry.success) retry.copy(toolsUnsupported = true) else retry
             } else first
         }
+
+    /**
+     * 判断流式请求失败是否因为供应商不支持 SSE。
+     *
+     * 常见表现：服务端 400 提示 stream 参数未知 / 不支持，或忽略 stream 直接返回普通 JSON，
+     * 使 SSE 解析读到 EOF 报「响应中断」。命中后 [chat] 会回退一次非流式请求。
+     */
+    private fun sseUnsupported(result: AiResult): Boolean {
+        if (result.success) return false
+        return when (val error = result.error) {
+            is AiError.Server -> {
+                val body = error.body.orEmpty().lowercase()
+                body.contains("stream") && listOf(
+                    "not support", "unsupported", "unknown", "unrecognized", "invalid"
+                ).any { body.contains(it) }
+            }
+
+            is AiError.Network -> error.cause.message.orEmpty().contains("响应中断")
+            else -> false
+        }
+    }
 
     /** 把阻塞式的 OkHttp 调用包装成可取消的挂起函数：协程取消时同步取消在途请求 */
     private suspend fun execute(request: Request): Response =

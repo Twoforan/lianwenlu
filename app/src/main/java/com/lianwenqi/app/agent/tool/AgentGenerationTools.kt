@@ -34,6 +34,12 @@ class AgentGenerationTools(
     private val generationService: ChapterGenerationService
 ) {
 
+    /**
+     * 仅用于开启流式请求：Agent 工具不展示增量文本，
+     * 但长生成时保持连接持续有数据，避免被网关判为空闲超时（524）。
+     */
+    private val streamingKeepAlive: (String, String) -> Unit = { _, _ -> }
+
     fun create(): List<AgentTool> = listOf(
         generateChapterSynopsis(),
         generateChapterContent()
@@ -68,7 +74,8 @@ class AgentGenerationTools(
             instruction = args.string("instruction").trim().take(MAX_INSTRUCTION_CHARS),
             range = summaryWordRange(),
             styleBlock = styleBlockOf(bookId),
-            referenceBlock = buildSynopsisReference(book, chapter)
+            referenceBlock = buildSynopsisReference(book, chapter),
+            onDelta = streamingKeepAlive
         )
         if (!result.success) {
             return@AgentTool AgentToolResult.fail(result.errorMessage.ifBlank { "梗概生成失败" })
@@ -131,7 +138,8 @@ class AgentGenerationTools(
             outlineBlock = buildContentReference(book, chapter),
             memoryBlock = buildMemoryBlock(bookId, summary),
             range = contentWordRange(),
-            styleBlock = styleBlockOf(bookId)
+            styleBlock = styleBlockOf(bookId),
+            onDelta = streamingKeepAlive
         )
         if (!result.success) {
             return@AgentTool AgentToolResult.fail(result.errorMessage.ifBlank { "正文生成失败" })

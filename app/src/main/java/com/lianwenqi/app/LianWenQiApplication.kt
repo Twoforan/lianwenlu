@@ -114,11 +114,17 @@ class AppContainer(val app: Application) {
         AgentModelRequestRepository(database)
     val agentRecoveryLogRepository: AgentRecoveryLogRepository =
         AgentRecoveryLogRepository(database)
+    /** Agent 请求不展示增量内容，仅用流式保持长连接，避免长任务被网关判超时（524） */
+    private val agentStreamSink: (String, String) -> Unit = { _, _ -> }
     /** F3：Agent 独立模型请求与规划；不进入普通聊天请求链路 */
     val agentModelClient: AgentModelClient = AgentModelClient(
         endpointFor = { modelId -> configRepository.endpointFor(modelId) },
-        invoke = { endpoint, turns -> aiClient.chat(endpoint, turns) },
-        invokeWithTools = { endpoint, turns, tools -> aiClient.chat(endpoint, turns, tools) }
+        invoke = { endpoint, turns ->
+            aiClient.chat(endpoint, turns, onDelta = agentStreamSink)
+        },
+        invokeWithTools = { endpoint, turns, tools ->
+            aiClient.chat(endpoint, turns, tools, onDelta = agentStreamSink)
+        }
     )
     val agentPlanParser: AgentPlanParser = AgentPlanParser()
     val agentPlanValidator: AgentPlanValidator = AgentPlanValidator()

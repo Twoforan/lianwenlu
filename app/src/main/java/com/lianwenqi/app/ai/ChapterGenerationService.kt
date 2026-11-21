@@ -82,7 +82,9 @@ class ChapterGenerationService(
         instruction: String,
         range: IntRange?,
         styleBlock: String = "",
-        referenceBlock: String = ""
+        referenceBlock: String = "",
+        /** 非空时走流式请求，可用于实时显示或保持长连接 */
+        onDelta: ((String, String) -> Unit)? = null
     ): ChapterGenerationResult {
         val turns = buildGenerationPrefixTurns(
             customPrefix = "",
@@ -94,7 +96,7 @@ class ChapterGenerationService(
             referenceBlock = referenceBlock,
             chapterTitle = chapterTitle
         )
-        val completion = complete(modelId, turns)
+        val completion = complete(modelId, turns, onDelta)
         if (!completion.success) {
             return ChapterGenerationResult(errorMessage = completion.errorMessage)
         }
@@ -118,7 +120,9 @@ class ChapterGenerationService(
         outlineBlock: String,
         memoryBlock: String,
         range: IntRange?,
-        styleBlock: String = ""
+        styleBlock: String = "",
+        /** 非空时走流式请求，可用于实时显示或保持长连接 */
+        onDelta: ((String, String) -> Unit)? = null
     ): ChapterGenerationResult {
         val turns = buildGenerationPrefixTurns(
             customPrefix = "",
@@ -132,7 +136,7 @@ class ChapterGenerationService(
             range = range,
             chapterTitle = chapterTitle
         )
-        val completion = complete(modelId, turns)
+        val completion = complete(modelId, turns, onDelta)
         if (!completion.success) {
             return ChapterGenerationResult(errorMessage = completion.errorMessage)
         }

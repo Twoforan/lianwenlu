@@ -86,4 +86,27 @@ class ChapterGenerationServiceTest {
         assertEquals("请先在设置中配置并选择一个模型", result.errorMessage)
         assertTrue(capturedTurns.isEmpty())
     }
+
+    @Test
+    fun 传入流式回调时透传给模型请求() = runBlocking {
+        var received: ((String, String) -> Unit)? = null
+        val streaming = ChapterGenerationService { _, _, onDelta ->
+            received = onDelta
+            onDelta?.invoke("增量", "")
+            AiResult.ok("增量文本")
+        }
+        val result = streaming.generateContent(
+            modelId = 1L,
+            chapterTitle = "第一章",
+            instruction = "",
+            summary = "主角入门",
+            outlineBlock = "",
+            memoryBlock = "",
+            range = null,
+            onDelta = { _, _ -> }
+        )
+
+        assertTrue(result.success)
+        assertTrue("onDelta 应透传到模型请求", received != null)
+    }
 }
