@@ -105,4 +105,36 @@ class AgentExecutionResumePlannerTest {
         assertEquals(0, plan.startIndex)
         assertEquals("a", plan.missingNodeStepId)
     }
+
+    @Test
+    fun `skipped node is passed over from next step`() {
+        val plan = AgentExecutionResumePlanner.plan(
+            orderedSteps = listOf(step("a"), step("b"), step("c")),
+            runNodes = listOf(
+                node(1, "a", AgentNodeStatus.COMPLETED, "A"),
+                node(2, "b", AgentNodeStatus.SKIPPED),
+                node(3, "c", AgentNodeStatus.PENDING)
+            )
+        )
+        assertEquals(2, plan.startIndex)
+        assertNull(plan.blockedNodeTitle)
+        assertNull(plan.reopenNodeId)
+        assertEquals(
+            listOf("A", AgentExecutionResumePlanner.SKIPPED_STEP_RESULT),
+            plan.stepResults
+        )
+    }
+
+    @Test
+    fun `skipped last node means all steps are processed`() {
+        val plan = AgentExecutionResumePlanner.plan(
+            orderedSteps = listOf(step("a"), step("b")),
+            runNodes = listOf(
+                node(1, "a", AgentNodeStatus.COMPLETED, "A"),
+                node(2, "b", AgentNodeStatus.SKIPPED)
+            )
+        )
+        assertEquals(2, plan.startIndex)
+        assertNull(plan.blockedNodeTitle)
+    }
 }

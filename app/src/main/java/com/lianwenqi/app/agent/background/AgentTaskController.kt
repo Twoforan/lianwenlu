@@ -125,6 +125,25 @@ class AgentTaskController(
         }.getOrDefault(false)
     }
 
+    /**
+     * 跳过失败节点并继续：把当前失败节点标记为 SKIPPED，任务恢复为 RUNNING，
+     * 执行器恢复时会跨过该节点从后续步骤继续。
+     *
+     * 不伪造该步骤的成功结果；任务最终摘要会如实标注跳过。
+     */
+    suspend fun skipAndContinue(taskId: Long, nodeId: Long): Boolean {
+        val task = tasks.getTask(taskId) ?: return false
+        if (task.status != AgentTaskStatus.FAILED) return false
+        if (task.currentNodeId != nodeId) return false
+        if (writes.hasUnresolved(taskId)) return false
+        if (!nodes.skipFailedNode(nodeId, "用户跳过失败节点")) return false
+        if (!tasks.reopenFailedForSkip(taskId, nodeId)) return false
+        return runCatching {
+            scheduler.enqueue(taskId, "SKIP_NODE")
+            true
+        }.getOrDefault(false)
+    }
+
     /** 用户结束失败任务：落为 CANCELLED，保留已完成节点与消息记录 */
     suspend fun finishFailedTask(taskId: Long): Boolean {
         val task = tasks.getTask(taskId) ?: return false

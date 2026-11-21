@@ -1847,6 +1847,17 @@ class AgentChatViewModel(private val container: AppContainer) : ViewModel() {
         _executingTaskId.value = taskId
     }
 
+    /** 跳过失败节点并继续：该节点标记为已跳过，后续步骤照常执行 */
+    fun skipFailedNode(nodeId: Long) = viewModelScope.launch {
+        val taskId = _currentTaskId.value ?: return@launch
+        _executionError.value = null
+        if (!taskController.skipAndContinue(taskId, nodeId)) {
+            _executionError.value = "当前节点无法跳过"
+            return@launch
+        }
+        _executingTaskId.value = taskId
+    }
+
     /** 结束失败任务：保留已完成步骤与记录，任务落为已取消 */
     fun finishFailedTask() = viewModelScope.launch {
         val taskId = _currentTaskId.value ?: return@launch

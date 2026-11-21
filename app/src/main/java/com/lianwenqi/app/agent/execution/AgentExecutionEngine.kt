@@ -1170,7 +1170,14 @@ class AgentExecutionEngine(
         val text = buildString {
             appendLine("【只读执行结果】")
             appendLine("任务：${plan.taskTitle}")
-            appendLine("步骤完成：${results.size}/${plan.steps.size}")
+            val skipped = results.count {
+                it.second == AgentExecutionResumePlanner.SKIPPED_STEP_RESULT
+            }
+            val completed = results.size - skipped
+            appendLine(
+                "步骤完成：$completed/${plan.steps.size}" +
+                    if (skipped > 0) "（用户跳过 $skipped 步）" else ""
+            )
             results.forEachIndexed { index, (step, text) ->
                 appendLine()
                 appendLine("${index + 1}. ${step.title}")

@@ -243,6 +243,14 @@ interface AgentTaskDao {
     )
     suspend fun reopenFailedNodeForRetry(id: Long, now: Long): Int
 
+    /** 用户跳过失败节点：FAILED → SKIPPED，保留失败原因供追溯 */
+    @Query(
+        "UPDATE agent_execution_node SET status = 'SKIPPED', " +
+            "completedAt = :now, updatedAt = :now " +
+            "WHERE id = :id AND status = 'FAILED'"
+    )
+    suspend fun skipFailedNode(id: Long, now: Long): Int
+
     @Query(
         "SELECT * FROM agent_execution_node WHERE taskId = :taskId " +
             "AND status IN ('RUNNING', 'WAITING') ORDER BY sequence ASC, id ASC"

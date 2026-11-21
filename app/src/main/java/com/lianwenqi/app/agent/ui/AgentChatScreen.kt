@@ -752,6 +752,7 @@ fun AgentChatScreen(
                             onCancel = vm::cancelExecution,
                             onDismissError = vm::clearExecutionError,
                             onRetryNode = vm::retryFailedNode,
+                            onSkipNode = vm::skipFailedNode,
                             onEndTask = vm::finishFailedTask,
                             onContinueWaiting = vm::continueWaitingTask,
                             onEndWaiting = vm::endWaitingTask,

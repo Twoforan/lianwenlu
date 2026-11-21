@@ -5,6 +5,7 @@ import com.lianwenqi.app.agent.data.dao.AgentChapterMeta
 import com.lianwenqi.app.agent.data.dao.AgentChapterSearchHit
 import com.lianwenqi.app.data.encodeOutlineFields
 import com.lianwenqi.app.data.entity.Book
+import com.lianwenqi.app.data.entity.Chapter
 import com.lianwenqi.app.data.entity.OutlineCategory
 import com.lianwenqi.app.data.entity.OutlineItem
 import com.lianwenqi.app.data.entity.Volume
@@ -36,6 +37,15 @@ class AgentReadOnlyToolsTest {
         summary = "不应被读取",
         contentLength = 10
     )
+    /** 新建书籍的空白章节：0 字仍应作为有效结构展示 */
+    private val emptyChapter = AgentChapterMeta(
+        id = 30,
+        bookId = 1,
+        volumeId = 100,
+        title = "第一章",
+        summary = "",
+        contentLength = 0
+    )
     private val outline = OutlineItem(
         id = 1,
         bookId = 1,
@@ -65,13 +75,17 @@ class AgentReadOnlyToolsTest {
             when (id) {
                 10L -> chapter
                 20L -> otherChapter
+                30L -> emptyChapter
                 else -> null
             }
         },
         contentSliceOf = { id, offset, length ->
-            if (id != 10L) null
-            else content.substring(offset.coerceIn(0, content.length))
-                .take(length)
+            when (id) {
+                10L -> content.substring(offset.coerceIn(0, content.length))
+                    .take(length)
+                30L -> ""
+                else -> null
+            }
         },
         searchHitsOf = { _, keyword, _, _ ->
             listOf(
@@ -88,6 +102,18 @@ class AgentReadOnlyToolsTest {
         outlineOf = { listOf(outline) },
         volumesOf = { listOf(volume) },
         volumeSummariesOf = { listOf(volumeSummary) },
+        chaptersOf = {
+            listOf(
+                Chapter(
+                    id = 30,
+                    bookId = 1,
+                    volumeId = 100,
+                    title = "第一章",
+                    summary = "",
+                    content = ""
+                )
+            )
+        },
         memoryRetrieve = { _, _, _ -> listOf("记忆片段 A", "记忆片段 B") }
     ).create().associateBy { it.name }
 
@@ -184,5 +210,25 @@ class AgentReadOnlyToolsTest {
         assertTrue(result.success)
         assertTrue(result.contentJson.contains("第一卷梗概"))
         assertTrue(result.contentJson.contains("第一卷"))
+    }
+
+    @Test
+    fun 零字章节仍出现在结构列表中() = runBlocking {
+        val result = tools.getValue("list_chapters")
+            .execute(args("""{"volumeId":100}"""), context())
+        assertTrue(result.success)
+        assertTrue(result.contentJson.contains("\"chapterId\":30") ||
+            result.contentJson.contains("\"chapterId\": 30"))
+        assertTrue(result.contentJson.contains("\"contentLength\": 0") ||
+            result.contentJson.contains("\"contentLength\":0"))
+    }
+
+    @Test
+    fun 读取零字章节正文成功返回空内容() = runBlocking {
+        val result = tools.getValue("get_chapter_content")
+            .execute(args("""{"chapterId":30}"""), context())
+        assertTrue(result.success)
+        assertTrue(result.contentJson.contains("\"totalLength\": 0") ||
+            result.contentJson.contains("\"totalLength\":0"))
     }
 }

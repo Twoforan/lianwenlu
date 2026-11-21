@@ -17,7 +17,7 @@ data class AgentResumePlan(
     val nodeIdByStepId: Map<String, Long>,
     /** 需要从 RUNNING / WAITING 重新打开的节点 */
     val reopenNodeId: Long? = null,
-    /** 处于 FAILED / SKIPPED / CANCELLED，不能自动恢复的节点标题 */
+    /** 处于 FAILED / CANCELLED，不能自动恢复的节点标题 */
     val blockedNodeTitle: String? = null,
     /** 当前执行批次中缺失的 stepId */
     val missingNodeStepId: String? = null,
@@ -68,11 +68,15 @@ object AgentExecutionResumePlanner {
                 results += result
                 continue
             }
+            // 用户主动跳过的步骤按已处理跨过，但不产生虚假的成功结果
+            if (node.status == AgentNodeStatus.SKIPPED) {
+                results += SKIPPED_STEP_RESULT
+                continue
+            }
             startIndex = index
             when (node.status) {
                 AgentNodeStatus.RUNNING, AgentNodeStatus.WAITING -> reopenNodeId = node.id
                 AgentNodeStatus.FAILED,
-                AgentNodeStatus.SKIPPED,
                 AgentNodeStatus.CANCELLED -> blockedTitle = node.title
                 else -> Unit
             }
@@ -98,4 +102,7 @@ object AgentExecutionResumePlanner {
         agentJson.parseToJsonElement(node.outputJson).jsonObject["result"]
             ?.jsonPrimitive?.contentOrNull
     }.getOrNull()
+
+    /** 跳过步骤在恢复结果中的占位文本；执行摘要据此区分“完成”与“跳过” */
+    const val SKIPPED_STEP_RESULT = "（用户跳过该步骤，未执行）"
 }

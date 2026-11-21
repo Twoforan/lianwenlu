@@ -412,7 +412,22 @@ class AgentTaskRepository(private val db: AppDatabase) {
      *
      * 已完成节点与执行游标保持不变，执行器会从重新打开的失败节点继续。
      */
-    suspend fun reopenFailedForRetry(taskId: Long, nodeId: Long): Boolean = db.withTransaction {
+    suspend fun reopenFailedForRetry(taskId: Long, nodeId: Long): Boolean =
+        reopenFailedTask(taskId, nodeId, skipped = false)
+
+    /**
+     * 用户跳过失败节点并继续：仅允许 FAILED → RUNNING。
+     *
+     * 失败节点已由仓库标记为 SKIPPED；执行器恢复时会跨过它从后续步骤继续。
+     */
+    suspend fun reopenFailedForSkip(taskId: Long, nodeId: Long): Boolean =
+        reopenFailedTask(taskId, nodeId, skipped = true)
+
+    private suspend fun reopenFailedTask(
+        taskId: Long,
+        nodeId: Long,
+        skipped: Boolean
+    ): Boolean = db.withTransaction {
         val task = taskDao.getTask(taskId) ?: return@withTransaction false
         if (task.status != AgentTaskStatus.FAILED) return@withTransaction false
         if (task.currentNodeId != nodeId) return@withTransaction false
@@ -424,7 +439,7 @@ class AgentTaskRepository(private val db: AppDatabase) {
                 completedAt = null,
                 pauseRequested = false,
                 cancelRequested = false,
-                // 用户手动重试视为新一轮执行，重置恢复尝试次数，避免立刻再次命中上限
+                // 用户手动重试 / 跳过视为新一轮执行，重置恢复尝试次数，避免立刻再次命中上限
                 executionAttempt = 0,
                 updatedAt = now
             )
@@ -436,7 +451,11 @@ class AgentTaskRepository(private val db: AppDatabase) {
             payloadJson = jsonPayload {
                 put("from", task.status)
                 put("to", AgentTaskStatus.RUNNING)
-                put("retryFromNode", true)
+                if (skipped) {
+                    put("skipNode", true)
+                } else {
+                    put("retryFromNode", true)
+                }
             }
         )
         true

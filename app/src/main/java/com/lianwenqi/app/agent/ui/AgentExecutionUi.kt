@@ -60,6 +60,7 @@ fun AgentExecutionCard(
     onCancel: () -> Unit,
     onDismissError: () -> Unit,
     onRetryNode: (Long) -> Unit = {},
+    onSkipNode: (Long) -> Unit = {},
     onEndTask: () -> Unit = {},
     onContinueWaiting: () -> Unit = {},
     onEndWaiting: () -> Unit = {},
@@ -197,6 +198,7 @@ fun AgentExecutionCard(
                                 (recoveryEnabled && node.id == currentNodeId)),
                             waitingActions = waitingCurrent,
                             onRetry = { node.id?.let(onRetryNode) },
+                            onSkip = { node.id?.let(onSkipNode) },
                             onEnd = onEndTask,
                             onContinue = onContinueWaiting,
                             onEndWaiting = onEndWaiting
@@ -257,6 +259,7 @@ private fun AgentNodeRow(
     showActions: Boolean = false,
     waitingActions: Boolean = false,
     onRetry: () -> Unit = {},
+    onSkip: () -> Unit = {},
     onEnd: () -> Unit = {},
     onContinue: () -> Unit = {},
     onEndWaiting: () -> Unit = {}
@@ -324,6 +327,7 @@ private fun AgentNodeRow(
                     TextButton(onClick = onEndWaiting, enabled = actionsEnabled) { Text("结束任务") }
                 } else {
                     TextButton(onClick = onRetry, enabled = actionsEnabled) { Text("重试") }
+                    TextButton(onClick = onSkip, enabled = actionsEnabled) { Text("跳过并继续") }
                     TextButton(onClick = onEnd, enabled = actionsEnabled) { Text("结束") }
                 }
             }

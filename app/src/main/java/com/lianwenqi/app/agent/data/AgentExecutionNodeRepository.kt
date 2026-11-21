@@ -204,6 +204,30 @@ class AgentExecutionNodeRepository(private val db: AppDatabase) {
 
     suspend fun maxSequence(taskId: Long): Long = dao.maxNodeSequence(taskId)
 
+    /**
+     * 用户跳过失败节点：仅允许 FAILED → SKIPPED。
+     *
+     * 跳过的节点保留失败原因，但不产生成功结果；引擎恢复时会跨过它继续后续步骤。
+     */
+    suspend fun skipFailedNode(nodeId: Long, reason: String): Boolean = db.withTransaction {
+        val node = dao.getNode(nodeId) ?: return@withTransaction false
+        if (node.status != AgentNodeStatus.FAILED) return@withTransaction false
+        val now = System.currentTimeMillis()
+        val affected = dao.skipFailedNode(nodeId, now)
+        if (affected != 1) return@withTransaction false
+        events.append(
+            taskId = node.taskId,
+            eventType = AgentEventType.NODE_SKIPPED,
+            nodeId = nodeId,
+            payloadJson = jsonPayload {
+                put("from", node.status)
+                put("to", AgentNodeStatus.SKIPPED)
+                put("reason", reason.take(500))
+            }
+        )
+        true
+    }
+
     /** 更新节点展示信息与结构化输入 / 输出；不改变状态，不追加事件 */
     suspend fun updateContent(
         nodeId: Long,
