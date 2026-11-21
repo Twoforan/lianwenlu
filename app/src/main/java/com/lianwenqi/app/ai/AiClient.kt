@@ -66,7 +66,16 @@ class AiClient(
      * [AiError.InvalidConfig]，绝不能抛出异常 —— 一旦异常逃出协程会直接把 App 打崩
      * （OkHttp 对含中文的 header 会抛 IllegalArgumentException）。
      */
-    suspend fun listModels(baseUrl: String, apiKey: String): Result<List<String>> {
+    suspend fun listModels(baseUrl: String, apiKey: String): Result<List<String>> =
+        listModelInfos(baseUrl, apiKey).map { infos -> infos.map { it.id } }
+
+    /**
+     * 读取供应商模型列表，并解析供应商暴露的上下文窗口。
+     *
+     * 不同供应商字段名不一致（context_length / context_window / max_model_len 等），
+     * 解析不到时 [RemoteModelInfo.contextWindow] 为 0，调用方不得用 0 覆盖已有配置。
+     */
+    suspend fun listModelInfos(baseUrl: String, apiKey: String): Result<List<RemoteModelInfo>> {
         if (apiKey.isBlank()) {
             return Result.failure(AiException(AiError.InvalidConfig("未填写 apikey")))
         }
@@ -96,7 +105,11 @@ class AiClient(
                     if (!resp.isSuccessful) {
                         return@withContext Result.failure(AiException(errorForStatus(resp.code, body.take(200))))
                     }
-                    Result.success(json.decodeFromString<ModelListResponse>(body).data.map { it.id })
+                    Result.success(
+                        json.decodeFromString<ModelListResponse>(body).data.map {
+                            RemoteModelInfo(it.id, it.resolvedContextWindow())
+                        }
+                    )
                 }
             } catch (e: CancellationException) {
                 throw e

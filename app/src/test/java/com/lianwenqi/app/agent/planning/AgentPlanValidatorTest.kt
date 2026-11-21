@@ -191,4 +191,33 @@ class AgentPlanValidatorTest {
         val result = validator.validate(plan().copy(schemaVersion = 99))
         assertFalse(result.isValid)
     }
+
+    @Test
+    fun 单步批量超过五个同类对象时提示拆分但不阻塞() {
+        val result = validator.validate(
+            plan(
+                steps = listOf(
+                    step(
+                        "step_001",
+                        title = "按十世界建立大纲节点",
+                        description = "创建人设1、人设2，共 15 个节点"
+                    ),
+                    step("step_002", title = "生成第1-3章梗概")
+                )
+            )
+        )
+        assertTrue(result.isValid)
+        assertEquals(1, result.splitSuggestions.size)
+        assertTrue(result.splitSuggestions.first().contains("15"))
+        assertTrue(result.warnings.any { it.contains("拆分为每步最多 5 个") })
+    }
+
+    @Test
+    fun 五个及以下同类对象不提示拆分() {
+        val result = validator.validate(
+            plan(steps = listOf(step("step_001", title = "生成第一至第五章梗概")))
+        )
+        assertTrue(result.isValid)
+        assertTrue(result.splitSuggestions.isEmpty())
+    }
 }

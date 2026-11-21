@@ -81,6 +81,7 @@ import com.lianwenqi.app.ai.AiError
 import com.lianwenqi.app.ai.AiException
 import com.lianwenqi.app.ai.AiResult
 import com.lianwenqi.app.ai.ReasoningLevel
+import com.lianwenqi.app.ai.RemoteModelInfo
 import com.lianwenqi.app.data.entity.AiModel
 import com.lianwenqi.app.data.entity.ApiType
 import com.lianwenqi.app.data.entity.Prompt
@@ -117,12 +118,16 @@ class SettingsViewModel(private val container: AppContainer) : ViewModel() {
     fun saveProvider(provider: Provider) = viewModelScope.launch { configRepository.saveProvider(provider) }
     fun deleteProvider(id: Long) = viewModelScope.launch { configRepository.deleteProvider(id) }
 
-    fun fetchModels(provider: Provider, onResult: (List<String>, String?) -> Unit) =
+    fun fetchModels(provider: Provider, onResult: (List<RemoteModelInfo>, String?) -> Unit) =
         viewModelScope.launch {
             // 兜底再包一层：即使底层意外抛出（如非法配置），也只把错误交给 UI，绝不让异常逃出协程崩 App
-            runCatching { configRepository.fetchRemoteModels(provider) }
+            runCatching { configRepository.fetchRemoteModelInfos(provider) }
                 .getOrElse { Result.failure(it) }
-                .onSuccess { onResult(it, null) }
+                .onSuccess { infos ->
+                    // 供应商暴露了上下文窗口时，回填到该供应商下仍为「未知」的模型
+                    runCatching { configRepository.syncModelContextWindows(provider.id, infos) }
+                    onResult(infos, null)
+                }
                 // 失败时展示按类型区分后的提示（未填 key / 非法字符 / 鉴权 / 超时 / 服务器错误…）
                 .onFailure { onResult(emptyList(), (it as? AiException)?.error?.userMessage ?: it.message) }
         }
@@ -831,7 +836,7 @@ private fun ProvidersTab(
     onEditModel: (AiModel) -> Unit,
     onDeleteModel: (AiModel) -> Unit,
     onSetActive: (AiModel) -> Unit,
-    onFetchModels: (Provider, (List<String>, String?) -> Unit) -> Unit,
+    onFetchModels: (Provider, (List<RemoteModelInfo>, String?) -> Unit) -> Unit,
     onTestChat: (Provider, AiModel?, (Boolean, String) -> Unit) -> Unit
 ) {
     val context = LocalContext.current
@@ -1212,7 +1217,7 @@ private fun ProviderDialog(
 private fun AddModelDialog(
     provider: Provider,
     onDismiss: () -> Unit,
-    onFetch: ((List<String>, String?) -> Unit) -> Unit,
+    onFetch: ((List<RemoteModelInfo>, String?) -> Unit) -> Unit,
     onSave: (AiModel) -> Unit
 ) {
     var name by remember { mutableStateOf("") }
@@ -1223,11 +1228,12 @@ private fun AddModelDialog(
     var maxTokens by remember { mutableStateOf(8192) }
     var unlimited by remember { mutableStateOf(false) }
     var maxContext by remember { mutableStateOf(20) }
+    var contextWindow by remember { mutableStateOf(0) }
     var systemPrompt by remember { mutableStateOf("") }
     var reasoningEnabled by remember { mutableStateOf(true) }
     var reasoningLevel by remember { mutableStateOf(ReasoningLevel.DEFAULT.storage) }
     var webSearchEnabled by remember { mutableStateOf(false) }
-    var remote by remember { mutableStateOf<List<String>>(emptyList()) }
+    var remote by remember { mutableStateOf<List<RemoteModelInfo>>(emptyList()) }
     var error by remember { mutableStateOf<String?>(null) }
     var showRemote by remember { mutableStateOf(false) }
 
@@ -1247,6 +1253,7 @@ private fun AddModelDialog(
                             temperature = temperature,
                             maxTokens = if (unlimited) 0 else maxTokens,
                             maxContext = maxContext,
+                            contextWindow = contextWindow,
                             systemPrompt = systemPrompt,
                             reasoningEnabled = reasoningEnabled,
                             reasoningLevel = reasoningLevel,
@@ -1277,8 +1284,18 @@ private fun AddModelDialog(
             DropdownMenu(expanded = showRemote, onDismissRequest = { showRemote = false }) {
                 remote.forEach { r ->
                     DropdownMenuItem(
-                        text = { Text(r) },
-                        onClick = { name = r; fromRemote = true; showRemote = false }
+                        text = {
+                            Text(
+                                if (r.contextWindow > 0) "${r.id} · ${r.contextWindow} token"
+                                else r.id
+                            )
+                        },
+                        onClick = {
+                            name = r.id
+                            contextWindow = r.contextWindow
+                            fromRemote = true
+                            showRemote = false
+                        }
                     )
                 }
             }
@@ -1301,6 +1318,17 @@ private fun AddModelDialog(
             onUnlimitedChange = { unlimited = it }
         )
         MaxContextSetting(maxContext = maxContext, onContextChange = { maxContext = it })
+        Spacer(Modifier.height(8.dp))
+        OutlinedTextField(
+            value = if (contextWindow > 0) contextWindow.toString() else "",
+            onValueChange = { text ->
+                contextWindow = text.filter { it.isDigit() }.take(9).toIntOrNull() ?: 0
+            },
+            label = { Text("上下文窗口（token，留空=未知）") },
+            placeholder = { Text("从供应商模型列表自动读取，也可手动填写") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
         Spacer(Modifier.height(12.dp))
         ReasoningSetting(
             enabled = reasoningEnabled,
@@ -1344,6 +1372,7 @@ private fun ModelDetailDialog(
     var maxTokens by remember { mutableStateOf(if (model.maxTokens > 0) model.maxTokens else 8192) }
     var unlimited by remember { mutableStateOf(model.maxTokens <= 0) }
     var maxContext by remember { mutableStateOf(model.maxContext) }
+    var contextWindow by remember { mutableStateOf(model.contextWindow) }
     var systemPrompt by remember { mutableStateOf(model.systemPrompt) }
     var reasoningEnabled by remember { mutableStateOf(model.reasoningEnabled) }
     var reasoningLevel by remember { mutableStateOf(model.reasoningLevel) }
@@ -1371,6 +1400,7 @@ private fun ModelDetailDialog(
                             temperature = temperature,
                             maxTokens = if (unlimited) 0 else maxTokens,
                             maxContext = maxContext,
+                            contextWindow = contextWindow,
                             systemPrompt = systemPrompt,
                             reasoningEnabled = reasoningEnabled,
                             reasoningLevel = reasoningLevel,
@@ -1408,6 +1438,17 @@ private fun ModelDetailDialog(
             onUnlimitedChange = { unlimited = it }
         )
         MaxContextSetting(maxContext = maxContext, onContextChange = { maxContext = it })
+        Spacer(Modifier.height(8.dp))
+        OutlinedTextField(
+            value = if (contextWindow > 0) contextWindow.toString() else "",
+            onValueChange = { text ->
+                contextWindow = text.filter { it.isDigit() }.take(9).toIntOrNull() ?: 0
+            },
+            label = { Text("上下文窗口（token，留空=未知）") },
+            placeholder = { Text("从供应商模型列表自动读取，也可手动填写") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
         Spacer(Modifier.height(12.dp))
         ReasoningSetting(
             enabled = reasoningEnabled,

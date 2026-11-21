@@ -75,5 +75,7 @@ data class AgentPlanValidationResult(
     val unknownCapabilities: List<String> = emptyList(),
     /** 已登记但 F3 尚不可执行的能力 */
     val notYetAvailableCapabilities: List<String> = emptyList(),
+    /** 单步疑似批量处理超过上限的同类对象，建议拆分步骤；不阻塞执行 */
+    val splitSuggestions: List<String> = emptyList(),
     val stepCount: Int = 0
 )

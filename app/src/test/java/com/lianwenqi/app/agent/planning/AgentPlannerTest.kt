@@ -72,6 +72,7 @@ class AgentPlannerTest {
         assertTrue(success.validation.isValid)
         assertTrue(success.trace.systemPrompt.contains("任务规划 Agent"))
         assertTrue(success.trace.systemPrompt.contains("READ_OUTLINE"))
+        assertTrue(success.trace.systemPrompt.contains("每步最多处理 5 个对象"))
         assertTrue(success.trace.userPrompt.contains("帮我检查第三卷人物关系"))
         assertFalse(success.trace.systemPrompt.contains("普通聊天系统提示"))
         assertEquals("planner-model", success.trace.modelName)
@@ -124,5 +125,78 @@ class AgentPlannerTest {
         val result = AgentPlanner(client).plan(1L, "目标", "", null)
         assertTrue(result is AgentPlanningResult.Failure)
         assertEquals("请求超时", (result as AgentPlanningResult.Failure).message)
+    }
+
+    @Test
+    fun 单步批量过大时要求模型拆分后重新返回计划() = runBlocking {
+        val bigBatchPlan = """
+            {
+              "schemaVersion": 1,
+              "taskTitle": "建立大纲",
+              "goalSummary": "按世界建立大纲节点",
+              "thinkingSummary": "先读取再创建。",
+              "needsClarification": false,
+              "clarificationQuestions": [],
+              "steps": [
+                {
+                  "stepId": "step_001",
+                  "title": "按十世界建立大纲节点",
+                  "description": "共 12 个节点，含人设与世界观",
+                  "capabilityKey": "CREATE_OUTLINE_NODE",
+                  "expectedOutput": "12 个大纲节点",
+                  "dependencies": [],
+                  "riskLevel": "LOW"
+                }
+              ]
+            }
+        """.trimIndent()
+        val splitPlan = """
+            {
+              "schemaVersion": 1,
+              "taskTitle": "建立大纲",
+              "goalSummary": "按世界建立大纲节点",
+              "thinkingSummary": "拆分后分批创建。",
+              "needsClarification": false,
+              "clarificationQuestions": [],
+              "steps": [
+                {
+                  "stepId": "step_001",
+                  "title": "创建第1-5个大纲节点",
+                  "description": "创建前 5 个世界的大纲节点",
+                  "capabilityKey": "CREATE_OUTLINE_NODE",
+                  "expectedOutput": "5 个大纲节点",
+                  "dependencies": [],
+                  "riskLevel": "LOW"
+                },
+                {
+                  "stepId": "step_002",
+                  "title": "创建第6-10个大纲节点",
+                  "description": "创建剩余世界的大纲节点",
+                  "capabilityKey": "CREATE_OUTLINE_NODE",
+                  "expectedOutput": "5 个大纲节点",
+                  "dependencies": ["step_001"],
+                  "riskLevel": "LOW"
+                }
+              ]
+            }
+        """.trimIndent()
+
+        var calls = 0
+        val client = AgentModelClient(
+            endpointFor = { endpoint },
+            invoke = { _, turns ->
+                calls++
+                if (calls == 1) {
+                    AiResult.ok(bigBatchPlan)
+                } else {
+                    assertTrue(turns.last().content.contains("每步最多处理 5 个"))
+                    AiResult.ok(splitPlan)
+                }
+            }
+        )
+        val result = AgentPlanner(client).plan(1L, "按世界建立大纲", "", null)
+        assertTrue(result is AgentPlanningResult.Success)
+        assertEquals(2, (result as AgentPlanningResult.Success).plan.steps.size)
+        assertEquals(2, calls)
     }
 }

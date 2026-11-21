@@ -40,6 +40,7 @@ object AgentPlannerPrompt {
         appendLine("14. 只输出一个 JSON 对象，不要输出 Markdown 代码围栏或解释文字。")
         appendLine("15. 生成梗概 / 正文只产出草稿；如需保存，必须另行安排 WRITE_* 受控写入步骤，生成步骤本身不写入数据。")
         appendLine("16. 计划的步骤只服务于完成目标，不要安排“向用户征求建议 / 等待用户追加需求 / 提议下一步”的步骤。")
+        appendLine("17. 同一类对象需要创建或生成超过 5 个时（例如人设1、人设2……，或第一章梗概、第二章正文……），必须拆分成多个步骤，每步最多处理 5 个对象；步骤标题写明范围（如「创建人设1-5」），禁止把全部对象塞进一个步骤。")
         appendLine()
         appendLine("【能力目录】")
         AgentCapabilityCatalog.all.forEach { capability ->

@@ -70,6 +70,10 @@ class AgentModelClient(
     suspend fun outputTokenLimit(modelId: Long): Int =
         runCatching { endpointFor(modelId)?.maxTokens ?: 0 }.getOrDefault(0)
 
+    /** 当前模型真实 Token 上下文窗口；0 表示未知 */
+    suspend fun contextWindow(modelId: Long): Int =
+        runCatching { endpointFor(modelId)?.contextWindow ?: 0 }.getOrDefault(0)
+
     private suspend fun runRequest(
         modelId: Long,
         turns: List<ChatTurn>,

@@ -1,5 +1,6 @@
 package com.lianwenqi.app.agent.planning
 
+import com.lianwenqi.app.agent.context.AgentContextCompressor
 import com.lianwenqi.app.agent.model.AgentPlan
 import com.lianwenqi.app.agent.model.AgentPlanParseResult
 import com.lianwenqi.app.agent.model.AgentPlanValidationResult
@@ -47,8 +48,22 @@ class AgentPlanner(
     private val modelClient: AgentModelClient,
     private val requestBuilder: AgentRequestBuilder = AgentRequestBuilder(),
     private val parser: AgentPlanParser = AgentPlanParser(),
-    private val validator: AgentPlanValidator = AgentPlanValidator()
+    private val validator: AgentPlanValidator = AgentPlanValidator(),
+    /** 计划模式上下文自动压缩；为空表示不启用 */
+    private val contextCompressor: AgentContextCompressor? = null
 ) {
+
+    /** 规划前按需压缩上下文；压缩失败时保留原消息并继续，避免规划直接不可用 */
+    private suspend fun compressIfNeeded(modelId: Long, turns: List<ChatTurn>): List<ChatTurn> {
+        val compressor = contextCompressor ?: return turns
+        val window = modelClient.contextWindow(modelId)
+        if (!compressor.shouldCompress(turns, window)) return turns
+        return when (val result = compressor.compress(modelId, turns, window)) {
+            is AgentContextCompressor.Result.Success ->
+                compressor.rebuildTurns(turns, result.summary, window)
+            is AgentContextCompressor.Result.Failure -> turns
+        }
+    }
 
     suspend fun plan(
         modelId: Long,
@@ -73,7 +88,7 @@ class AgentPlanner(
             clarificationAnswers,
             previousPlanJson
         )
-        val response = modelClient.complete(modelId, request.turns)
+        val response = modelClient.complete(modelId, compressIfNeeded(modelId, request.turns))
         if (!response.success) {
             return AgentPlanningResult.Failure(
                 message = response.errorMessage.ifBlank { "模型规划请求失败" },
@@ -81,7 +96,11 @@ class AgentPlanner(
             )
         }
         val first = parseAndValidate(response, request)
-        if (first.isValidPlan()) return first
+        if (first is AgentPlanningResult.Success) {
+            if (first.validation.splitSuggestions.isEmpty()) return first
+            // 结构有效但单步批量过大：定向要求拆分，失败时保留原计划，不阻塞用户
+            return repairSplitSteps(modelId, first, response, request) ?: first
+        }
 
         // 一次自动修复：模型可能返回空计划 / 非 JSON 说明文字，要求它只输出完整 JSON
         val repairRequest = AgentPlanningRequest(
@@ -97,7 +116,7 @@ class AgentPlanner(
             systemPrompt = request.systemPrompt,
             userPrompt = request.userPrompt + "\n\n【修复要求】只输出完整计划 JSON。"
         )
-        val retry = modelClient.complete(modelId, repairRequest.turns)
+        val retry = modelClient.complete(modelId, compressIfNeeded(modelId, repairRequest.turns))
         return if (retry.success) {
             parseAndValidate(retry, repairRequest)
         } else {
@@ -106,6 +125,40 @@ class AgentPlanner(
                 trace = retry.traceOf(repairRequest)
             )
         }
+    }
+
+    /**
+     * 计划结构有效、但存在单步批量过大的步骤时，要求模型拆分后重新给计划。
+     * 修复失败（请求或解析异常）返回 null，调用方保留原计划。
+     */
+    private suspend fun repairSplitSteps(
+        modelId: Long,
+        current: AgentPlanningResult.Success,
+        response: AgentModelResponse,
+        request: AgentPlanningRequest
+    ): AgentPlanningResult? {
+        val hints = current.validation.splitSuggestions
+        val splitRequest = AgentPlanningRequest(
+            turns = request.turns + listOf(
+                ChatTurn(ChatRole.ASSISTANT, response.content.take(4_000)),
+                ChatTurn(
+                    ChatRole.USER,
+                    buildString {
+                        appendLine("上面的计划存在单步批量过大的问题：")
+                        hints.take(5).forEach { appendLine("· $it") }
+                        append("请保持任务目标和已有步骤语义不变，把这些步骤拆分为多个步骤，")
+                        append("每步最多处理 ${AgentPlanValidator.MAX_BATCH_ITEMS} 个同类对象，")
+                        append("并同步调整后续步骤的依赖；只输出完整计划 JSON，不要输出解释文字或 Markdown 代码围栏。")
+                    }
+                )
+            ),
+            systemPrompt = request.systemPrompt,
+            userPrompt = request.userPrompt + "\n\n【修复要求】拆分批量过大的步骤后，只输出完整计划 JSON。"
+        )
+        val retry = modelClient.complete(modelId, compressIfNeeded(modelId, splitRequest.turns))
+        if (!retry.success) return null
+        val repaired = parseAndValidate(retry, splitRequest)
+        return if (repaired is AgentPlanningResult.Success) repaired else null
     }
 
     private fun parseAndValidate(

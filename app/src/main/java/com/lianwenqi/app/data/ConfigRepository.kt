@@ -4,6 +4,7 @@ import com.lianwenqi.app.ai.AiClient
 import com.lianwenqi.app.ai.AiRequest
 import com.lianwenqi.app.ai.AiResult
 import com.lianwenqi.app.ai.ModelEndpoint
+import com.lianwenqi.app.ai.RemoteModelInfo
 import com.lianwenqi.app.data.entity.AiModel
 import com.lianwenqi.app.data.entity.Prompt
 import com.lianwenqi.app.data.entity.Provider
@@ -69,6 +70,31 @@ class ConfigRepository(
     suspend fun fetchRemoteModels(provider: Provider): Result<List<String>> =
         ai.listModels(provider.baseUrl, provider.apiKey)
 
+    /** 读取供应商模型列表，包含供应商暴露的上下文窗口（未提供时为 0） */
+    suspend fun fetchRemoteModelInfos(provider: Provider): Result<List<RemoteModelInfo>> =
+        ai.listModelInfos(provider.baseUrl, provider.apiKey)
+
+    /**
+     * 把供应商返回的上下文窗口回填到该供应商下仍为「未知」的模型。
+     *
+     * 只补 0，不覆盖用户已填写的值；返回更新条数。
+     */
+    suspend fun syncModelContextWindows(
+        providerId: Long,
+        infos: List<RemoteModelInfo>
+    ): Int {
+        val byName = infos.filter { it.contextWindow > 0 }.associate { it.id to it.contextWindow }
+        if (byName.isEmpty()) return 0
+        var updated = 0
+        modelDao.getByProvider(providerId).forEach { model ->
+            if (model.contextWindow > 0) return@forEach
+            val resolved = byName[model.name] ?: return@forEach
+            modelDao.update(model.copy(contextWindow = resolved))
+            updated++
+        }
+        return updated
+    }
+
     /** 组装可用于发请求的模型配置 */
     suspend fun endpointFor(modelId: Long): ModelEndpoint? {
         val model = modelDao.getById(modelId) ?: return null
@@ -80,6 +106,7 @@ class ConfigRepository(
             temperature = model.temperature,
             maxTokens = model.maxTokens,
             maxContext = model.maxContext,
+            contextWindow = model.contextWindow,
             systemPrompt = model.systemPrompt,
             reasoningEnabled = model.reasoningEnabled,
             reasoningLevel = model.reasoningLevel,

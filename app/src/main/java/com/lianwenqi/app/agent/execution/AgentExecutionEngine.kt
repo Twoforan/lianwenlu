@@ -1,8 +1,10 @@
 package com.lianwenqi.app.agent.execution
 
 import com.lianwenqi.app.agent.context.AgentContextAssembler
+import com.lianwenqi.app.agent.context.AgentContextCompressor
 import com.lianwenqi.app.agent.context.AgentContextItemStatus
 import com.lianwenqi.app.agent.context.AgentContextResult
+import com.lianwenqi.app.agent.context.ContextEstimator
 import com.lianwenqi.app.agent.data.AgentEventRepository
 import com.lianwenqi.app.agent.data.AgentExecutionLeaseRepository
 import com.lianwenqi.app.agent.data.AgentExecutionNodeRepository
@@ -50,6 +52,13 @@ import kotlinx.serialization.json.put
 /** 注入 Agent 上下文的历史对话字符上限 */
 private const val MAX_HISTORY_CHARS = 12_000
 
+/** 自动上下文压缩在工具记录里的名称与展示名 */
+private const val CONTEXT_COMPRESS_TOOL = "context_compress"
+private const val CONTEXT_COMPRESS_TOOL_LABEL = "自动压缩上下文"
+
+/** 同一任务最多自动压缩次数，避免压缩后仍超限时无限循环 */
+private const val MAX_COMPRESSIONS_PER_TASK = 3
+
 /** F7 执行入口参数；为空时保持 F4/F6 的“单次直接执行”兼容行为 */
 data class AgentExecutionOptions(
     /** 执行租约持有者；空表示旧式直接执行（测试 / 页面内兼容路径） */
@@ -94,7 +103,9 @@ class AgentExecutionEngine(
     private val writeGate: AgentWriteConfirmationGate? = null,
     /** F7：执行租约与模型请求记录；测试可省略 */
     private val leases: AgentExecutionLeaseRepository? = null,
-    private val modelRequests: AgentModelRequestRepository? = null
+    private val modelRequests: AgentModelRequestRepository? = null,
+    /** 上下文自动压缩；为空表示不启用 */
+    private val contextCompressor: AgentContextCompressor? = null
 ) {
 
     suspend fun execute(
@@ -194,6 +205,8 @@ class AgentExecutionEngine(
         if (toolSpecs.isEmpty()) {
             return AgentExecutionResult.Blocked(taskId, "没有注册任何工具")
         }
+        // 上下文窗口只取真实配置；未知时由压缩器决定是否使用默认值
+        val contextWindow = contextCompressor?.let { modelClient.contextWindow(modelId) } ?: 0
         writeOperations?.let { operations ->
             if (options.owner.isBlank()) {
                 // 兼容旧式直接执行：没有 Runner 时仍先清理遗留 EXECUTING
@@ -291,14 +304,18 @@ class AgentExecutionEngine(
         // 每次执行轮次重新计预算；否则失败重试会被历史调用次数直接卡死
         var totalToolCalls = 0
         var totalModelRounds = 0
+        var lastPromptTokens = -1
         val signatureCounts = mutableMapOf<String, Int>()
         val startedAt = System.currentTimeMillis()
         var waitAccumulatedMs = 0L
         // 用户在任务中途回答的补充信息：恢复执行时注入模型上下文
+        // 压缩确认属于控制指令，不作为业务补充信息注入
         val clarificationBlock = runCatching {
-            tasks.answeredClarifications(taskId).joinToString("\n") {
-                "问：${it.question}\n答：${it.answer}"
-            }
+            tasks.answeredClarifications(taskId)
+                .filterNot { it.question.trim() == AgentContextCompressor.QUESTION_TEXT }
+                .joinToString("\n") {
+                    "问：${it.question}\n答：${it.answer}"
+                }
         }.getOrDefault("")
         // Agent 会话是连续的：把本会话此前轮次的历史对话注入当前任务（与前缀词设置无关）
         val historyBlock = runCatching {
@@ -384,6 +401,17 @@ class AgentExecutionEngine(
 
                 while (finalText == null) {
                     checkControl(taskId, options)
+                    // 上下文接近上限：计划执行模式自动压缩；自动模式先询问用户
+                    applyContextCompression(
+                        taskId = taskId,
+                        nodeId = stepNodeId,
+                        autoMode = autoMode,
+                        modelId = modelId,
+                        turns = turns,
+                        contextWindow = contextWindow,
+                        stepIndex = index,
+                        actualPromptTokens = lastPromptTokens
+                    )?.let { return it }
                     val elapsed = System.currentTimeMillis() - startedAt - waitAccumulatedMs
                     if (elapsed > limits.maxTaskDurationMs) {
                         throw ExecutionFailure(
@@ -412,6 +440,10 @@ class AgentExecutionEngine(
                         options = options
                     )
                     val response = call.response
+                    // 记录服务端真实 prompt 用量，作为下一轮是否压缩的优先依据
+                    if (response.usage.promptTokens > 0) {
+                        lastPromptTokens = response.usage.promptTokens
+                    }
                     if (response.content.length > limits.maxModelResponseChars) {
                         throw ExecutionFailure(
                             AgentFailureKind.VALIDATION,
@@ -843,6 +875,119 @@ class AgentExecutionEngine(
         val response: AgentModelResponse,
         val requestId: Long?
     )
+
+    /**
+     * 上下文接近模型窗口上限时的处理。
+     *
+     * - 计划执行模式：直接压缩，压缩过程以一条“自动压缩上下文”工具记录回显；
+     * - 自动模式：先询问用户，同意后压缩继续，拒绝则停止并提示新开对话；
+     * - 压缩失败或压缩次数达到上限时抛出可恢复的失败，不伪装成成功。
+     *
+     * 返回非空表示任务需要暂停等待用户确认。
+     */
+    private suspend fun applyContextCompression(
+        taskId: Long,
+        nodeId: Long,
+        autoMode: Boolean,
+        modelId: Long,
+        turns: MutableList<ChatTurn>,
+        contextWindow: Int,
+        stepIndex: Int,
+        actualPromptTokens: Int
+    ): AgentExecutionResult.WaitingConfirmation? {
+        val compressor = contextCompressor ?: return null
+        if (!compressor.shouldCompress(turns, contextWindow, actualPromptTokens)) return null
+
+        val completed = runCatching {
+            toolExecutions.executionsOfTask(taskId).count {
+                it.toolName == CONTEXT_COMPRESS_TOOL && it.status == AgentToolStatus.SUCCEEDED
+            }
+        }.getOrDefault(0)
+        if (completed >= MAX_COMPRESSIONS_PER_TASK) {
+            throw ExecutionFailure(
+                AgentFailureKind.BACKGROUND_LIMIT,
+                "上下文压缩后仍接近上限（已压缩 $completed 次），请新开对话继续"
+            )
+        }
+
+        if (autoMode) {
+            val answers = runCatching { tasks.answeredClarifications(taskId) }
+                .getOrDefault(emptyList())
+                .filter { it.question.trim() == AgentContextCompressor.QUESTION_TEXT }
+            if (answers.size <= completed) {
+                // 本轮上下文压力还没有征得用户同意
+                tasks.createClarification(
+                    taskId = taskId,
+                    question = AgentContextCompressor.QUESTION_TEXT,
+                    options = listOf("压缩后继续", "不压缩，新开对话")
+                )
+                tasks.updateStatus(taskId, AgentTaskStatus.WAITING_CONFIRMATION)
+                tasks.updateExecutionCursor(taskId, stepIndex, nodeId)
+                runCatching {
+                    nodes.updateStatus(
+                        nodeId,
+                        AgentNodeStatus.WAITING,
+                        errorMessage = "等待上下文压缩确认"
+                    )
+                }
+                return AgentExecutionResult.WaitingConfirmation(taskId, 0)
+            }
+            val latest = answers.last()
+            if (!AgentContextCompressor.isAffirmative(latest.answer)) {
+                throw ExecutionFailure(
+                    AgentFailureKind.BACKGROUND_LIMIT,
+                    "上下文已达到上限，且用户选择不压缩；请新开对话继续"
+                )
+            }
+        }
+
+        val beforeTokens = ContextEstimator.estimateTokens(turns)
+        val executionId = runCatching {
+            toolExecutions.createExecution(
+                taskId = taskId,
+                toolName = CONTEXT_COMPRESS_TOOL,
+                toolDisplayName = CONTEXT_COMPRESS_TOOL_LABEL,
+                nodeId = nodeId,
+                argumentsJson = jsonPayload { put("beforeTokens", beforeTokens) }
+            )
+        }.getOrElse {
+            throw ExecutionFailure(
+                AgentFailureKind.MODEL_PARSE,
+                "创建上下文压缩记录失败：${it.message ?: it::class.simpleName}"
+            )
+        }
+        toolExecutions.start(executionId)
+        val startedAt = System.currentTimeMillis()
+        return when (val result = compressor.compress(modelId, turns, contextWindow)) {
+            is AgentContextCompressor.Result.Success -> {
+                val rebuilt = compressor.rebuildTurns(turns, result.summary, contextWindow)
+                turns.clear()
+                turns.addAll(rebuilt)
+                toolExecutions.succeed(
+                    executionId = executionId,
+                    resultJson = jsonPayload {
+                        put("beforeTokens", result.beforeTokens)
+                        put("afterTokens", result.afterTokens)
+                        put("summaryChars", result.summary.length)
+                    },
+                    durationMs = System.currentTimeMillis() - startedAt
+                )
+                null
+            }
+
+            is AgentContextCompressor.Result.Failure -> {
+                toolExecutions.fail(
+                    executionId = executionId,
+                    errorMessage = result.message,
+                    durationMs = System.currentTimeMillis() - startedAt
+                )
+                throw ExecutionFailure(
+                    AgentFailureKind.MODEL_PARSE,
+                    "上下文自动压缩失败：${result.message}"
+                )
+            }
+        }
+    }
 
     private suspend fun requestModelWithRetry(
         taskId: Long,

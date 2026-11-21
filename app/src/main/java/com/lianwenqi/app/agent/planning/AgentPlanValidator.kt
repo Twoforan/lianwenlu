@@ -21,6 +21,7 @@ class AgentPlanValidator(
         val warnings = mutableListOf<String>()
         val unknownCapabilities = mutableListOf<String>()
         val notYetAvailable = mutableListOf<String>()
+        val splitSuggestions = mutableListOf<String>()
 
         if (plan.schemaVersion != SUPPORTED_SCHEMA_VERSION) {
             errors += "不支持的计划版本：${plan.schemaVersion}"
@@ -110,6 +111,13 @@ class AgentPlanValidator(
                         errors += "$label 依赖不存在的步骤：$dep"
                 }
             }
+            val batchSize = estimatedBatchSize("${step.title}\n${step.description}")
+            if (batchSize > MAX_BATCH_ITEMS) {
+                val suggestion =
+                    "$label 疑似一次处理 $batchSize 个同类对象（超过 $MAX_BATCH_ITEMS 个），应拆分为每步最多 $MAX_BATCH_ITEMS 个"
+                warnings += suggestion
+                splitSuggestions += suggestion
+            }
         }
 
         // 循环依赖检测（DFS）
@@ -143,8 +151,54 @@ class AgentPlanValidator(
             warnings = warnings.distinct(),
             unknownCapabilities = unknownCapabilities.distinct(),
             notYetAvailableCapabilities = notYetAvailable.distinct(),
+            splitSuggestions = splitSuggestions.distinct(),
             stepCount = plan.steps.size
         )
+    }
+
+    /**
+     * 估算一个步骤要处理的同类对象数量。
+     *
+     * 支持「人设1、人设2」「第1-10章」「十世界」「15 个节点」等常见写法，取最大值；
+     * 仅用于提示拆分，不参与计划有效性判定。
+     */
+    private fun estimatedBatchSize(text: String): Int {
+        var best = 0
+        RANGE_PATTERN.findAll(text).forEach { match ->
+            val start = match.groupValues[1].toIntOrNull()
+            val end = match.groupValues[2].toIntOrNull()
+            if (start != null && end != null && end >= start) {
+                best = maxOf(best, end - start + 1)
+            }
+        }
+        ARABIC_ITEM_PATTERN.findAll(text).forEach { match ->
+            match.groupValues.drop(1).firstOrNull { it.isNotEmpty() }?.toIntOrNull()
+                ?.let { best = maxOf(best, it) }
+        }
+        CHINESE_ITEM_PATTERN.findAll(text).forEach { match ->
+            match.groupValues.drop(1).firstOrNull { it.isNotEmpty() }
+                ?.let { chineseNumber(it) }
+                ?.let { best = maxOf(best, it) }
+        }
+        return best
+    }
+
+    /** 解析 1-99 的中文数字；无法解析时返回 null */
+    private fun chineseNumber(value: String): Int? {
+        if (value.isEmpty()) return null
+        val digits = mapOf(
+            '一' to 1, '二' to 2, '三' to 3, '四' to 4, '五' to 5,
+            '六' to 6, '七' to 7, '八' to 8, '九' to 9
+        )
+        return when {
+            value == "十" -> 10
+            value.startsWith("十") -> digits[value.getOrNull(1)]?.plus(10)
+            value.endsWith("十") -> digits[value.first()]?.times(10)
+            value.length == 3 && value[1] == '十' ->
+                digits[value[0]]?.let { tens -> digits[value[2]]?.let { tens * 10 + it } }
+            value.length == 1 -> digits[value[0]]
+            else -> null
+        }
     }
 
     companion object {
@@ -160,6 +214,24 @@ class AgentPlanValidator(
         const val MAX_CLARIFICATION_OPTIONS = 4
         const val MAX_OPTION_CHARS = 100
 
+        /** 单步建议处理的同类对象上限，超过即提示拆分 */
+        const val MAX_BATCH_ITEMS = 5
+
+        private const val ITEM_UNITS = "章|节|卷|世界|人设|人物|角色|节点|大纲"
+
         private val STEP_ID_PATTERN = Regex("^[A-Za-z0-9_-]{1,64}$")
+
+        /** 范围写法：1-10、1~10、1至10 */
+        private val RANGE_PATTERN = Regex("""(\d{1,3})\s*(?:-|–|—|~|～|至|到)\s*(\d{1,3})""")
+
+        /** 阿拉伯数字写法：第10章、15 个节点、人设3 */
+        private val ARABIC_ITEM_PATTERN = Regex(
+            """(?:第\s*)?(\d{1,3})\s*(?:个\s*)?(?:$ITEM_UNITS)|(?:人设|世界|人物|角色|章节|卷)\s*(\d{1,3})"""
+        )
+
+        /** 中文数字写法：第十章、十世界、人设五 */
+        private val CHINESE_ITEM_PATTERN = Regex(
+            """(?:第\s*)?([一二三四五六七八九十]{1,3})\s*(?:个\s*)?(?:$ITEM_UNITS)|(?:人设|世界|人物|角色|章节|卷)\s*([一二三四五六七八九十]{1,3})"""
+        )
     }
 }

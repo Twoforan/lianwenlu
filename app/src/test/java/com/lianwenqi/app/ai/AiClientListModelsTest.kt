@@ -1,6 +1,7 @@
 package com.lianwenqi.app.ai
 
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -41,5 +42,31 @@ class AiClientListModelsTest {
         val result = client.listModels("", "sk-abcdef")
         assertTrue(result.isFailure)
         assertTrue(errorOf(result) is AiError.InvalidConfig)
+    }
+
+    @Test
+    fun 解析供应商模型列表里的上下文窗口字段() {
+        val json = Json { ignoreUnknownKeys = true }
+        val body = """
+            {"data":[
+              {"id":"openrouter-model","context_length":128000},
+              {"id":"relay-model","context_window":32000},
+              {"id":"vllm-model","max_model_len":8192},
+              {"id":"nested-model","top_provider":{"context_length":200000}},
+              {"id":"unknown-model"}
+            ]}
+        """.trimIndent()
+        val parsed = json.decodeFromString<ModelListResponse>(body).data
+            .map { it.id to it.resolvedContextWindow() }
+        assertEquals(
+            listOf(
+                "openrouter-model" to 128000,
+                "relay-model" to 32000,
+                "vllm-model" to 8192,
+                "nested-model" to 200000,
+                "unknown-model" to 0
+            ),
+            parsed
+        )
     }
 }

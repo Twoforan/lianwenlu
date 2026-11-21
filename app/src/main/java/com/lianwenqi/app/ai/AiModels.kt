@@ -400,8 +400,46 @@ data class ModelListResponse(
     val error: ApiError? = null
 ) {
     @Serializable
-    data class ModelItem(val id: String = "")
+    data class ModelItem(
+        val id: String = "",
+        /** OpenRouter 等：模型最大上下文 token */
+        @SerialName("context_length") val contextLength: Int? = null,
+        /** 部分中转站：上下文窗口 */
+        @SerialName("context_window") val contextWindow: Int? = null,
+        /** vLLM 等：最大模型长度 */
+        @SerialName("max_model_len") val maxModelLen: Int? = null,
+        /** 部分供应商：最大上下文长度 / 最大输入 token */
+        @SerialName("max_context_length") val maxContextLength: Int? = null,
+        @SerialName("max_input_tokens") val maxInputTokens: Int? = null,
+        /** OpenRouter：供应商侧上下文长度 */
+        @SerialName("top_provider") val topProvider: TopProvider? = null
+    ) {
+        @Serializable
+        data class TopProvider(
+            @SerialName("context_length") val contextLength: Int? = null
+        )
+
+        /** 按常见字段优先级解析上下文窗口；都没有时返回 0（未知） */
+        fun resolvedContextWindow(): Int {
+            val candidates = listOf(
+                contextLength,
+                contextWindow,
+                maxContextLength,
+                maxInputTokens,
+                maxModelLen,
+                topProvider?.contextLength
+            )
+            return candidates.firstOrNull { it != null && it > 0 } ?: 0
+        }
+    }
 }
+
+/** 供应商模型列表中的一项：模型标识 + 可选的上下文窗口 */
+data class RemoteModelInfo(
+    val id: String,
+    /** Token 数；0 表示供应商未提供 */
+    val contextWindow: Int = 0
+)
 
 /** 供应商 + 模型的可发送配置 */
 data class ModelEndpoint(
@@ -413,6 +451,8 @@ data class ModelEndpoint(
     val maxTokens: Int = 2048,
     /** 携带的历史消息条数上限 */
     val maxContext: Int = 20,
+    /** 模型真实 Token 上下文窗口；0 表示未知（不能拿 [maxContext] 顶替） */
+    val contextWindow: Int = 0,
     val systemPrompt: String = "",
     /** 是否开启思考/推理模式（默认开启） */
     val reasoningEnabled: Boolean = true,

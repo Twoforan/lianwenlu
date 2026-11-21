@@ -3,6 +3,7 @@ package com.lianwenqi.app
 import android.app.Application
 import android.content.Context
 import com.lianwenqi.app.agent.context.AgentContextAssembler
+import com.lianwenqi.app.agent.context.AgentContextCompressor
 import com.lianwenqi.app.agent.context.AgentReferenceResolver
 import com.lianwenqi.app.agent.background.AgentTaskController
 import com.lianwenqi.app.agent.background.AgentTaskRecoveryCoordinator
@@ -128,10 +129,13 @@ class AppContainer(val app: Application) {
     )
     val agentPlanParser: AgentPlanParser = AgentPlanParser()
     val agentPlanValidator: AgentPlanValidator = AgentPlanValidator()
+    /** Agent 上下文自动压缩：计划与执行接近模型窗口上限时使用 */
+    val agentContextCompressor: AgentContextCompressor = AgentContextCompressor(agentModelClient)
     val agentPlanner: AgentPlanner = AgentPlanner(
         modelClient = agentModelClient,
         parser = agentPlanParser,
-        validator = agentPlanValidator
+        validator = agentPlanValidator,
+        contextCompressor = agentContextCompressor
     )
     val outlineRepository: OutlineRepository = OutlineRepository(database)
     val configRepository: ConfigRepository = ConfigRepository(database, aiClient, prefs)
@@ -393,7 +397,8 @@ class AppContainer(val app: Application) {
         writeService = agentWriteExecutionService,
         writeGate = agentWriteConfirmationGate,
         leases = agentExecutionLeaseRepository,
-        modelRequests = agentModelRequestRepository
+        modelRequests = agentModelRequestRepository,
+        contextCompressor = agentContextCompressor
     )
 
     /** F7：后台执行生命周期编排与用户控制入口（使用 lazy 避免容器初始化顺序问题） */
