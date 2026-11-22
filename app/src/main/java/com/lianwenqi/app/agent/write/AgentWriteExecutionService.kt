@@ -31,6 +31,20 @@ data class AgentOutlineUpdateArgs(
     val content: String? = null
 )
 
+/** 大纲分类参数；itemCount 用于删除前确认分类下条目未变化 */
+@Serializable
+data class AgentOutlineCategoryArgs(
+    val category: String,
+    val itemCount: Int = 0
+)
+
+/** 移动大纲节点参数 */
+@Serializable
+data class AgentOutlineMoveArgs(
+    val outlineId: Long,
+    val category: String
+)
+
 /** 一次写入提议的结果 */
 data class AgentWriteProposalResult(
     val operation: AgentWriteOperation,
@@ -49,7 +63,17 @@ class AgentWriteExecutionService(
     private val operations: AgentWriteOperationRepository,
     private val writer: AgentWriteBusinessWriter,
     private val policyProvider: suspend () -> String,
-    private val transactionRunner: AgentWriteTransactionRunner
+    private val transactionRunner: AgentWriteTransactionRunner,
+    /** 当前书籍的大纲分类标签；用于新增 / 删除分类的去重与冲突检测 */
+    private val outlineCategories: suspend (Long) -> List<String> = { emptyList() },
+    /** 某分类下的大纲条目数 */
+    private val outlineItemCount: suspend (Long, String) -> Int = { _, _ -> 0 },
+    /** 把分类注册到书籍的大纲标签列表（已存在则忽略） */
+    private val addOutlineCategory: suspend (Long, String) -> Unit = { _, _ -> },
+    /** 仅从书籍的大纲标签列表移除分类，不删除条目 */
+    private val removeOutlineCategory: suspend (Long, String) -> Unit = { _, _ -> },
+    /** 删除分类及其下全部条目 */
+    private val deleteOutlineCategory: suspend (Long, String) -> Unit = { _, _ -> }
 ) {
 
     private val mutexes = ConcurrentHashMap<Long, Mutex>()
@@ -225,6 +249,53 @@ class AgentWriteExecutionService(
 
             AgentWriteOperationType.CREATE_OUTLINE_NODE -> null
 
+            AgentWriteOperationType.CREATE_OUTLINE_CATEGORY -> {
+                val args = decodeCategoryArgs(operation.argumentsJson)
+                    ?: return "分类参数无法解析"
+                if (args.category in outlineCategories(operation.bookId)) {
+                    "分类已存在，请重新预览并确认"
+                } else {
+                    null
+                }
+            }
+
+            AgentWriteOperationType.DELETE_OUTLINE_CATEGORY -> {
+                val args = decodeCategoryArgs(operation.argumentsJson)
+                    ?: return "分类参数无法解析"
+                when {
+                    args.category !in outlineCategories(operation.bookId) ->
+                        "分类已不存在，请重新预览并确认"
+
+                    outlineItemCount(operation.bookId, args.category) != args.itemCount ->
+                        "分类下的大纲条目已变化，请重新预览并确认"
+
+                    else -> null
+                }
+            }
+
+            AgentWriteOperationType.MOVE_OUTLINE_NODE -> {
+                val before = decodeOutline(operation.beforeSnapshot)
+                    ?: return "执行前快照无法解析"
+                val current = writer.outline(operation.targetId)
+                    ?: return "目标大纲节点已删除"
+                if (current.bookId != operation.bookId) return "目标大纲节点已不属于当前书籍"
+                if (current.category != before.category ||
+                    current.tag != before.tag ||
+                    current.title != before.title ||
+                    current.content != before.content
+                ) {
+                    "大纲节点已在预览后发生变化，请重新预览并确认"
+                } else {
+                    val args = decodeMoveArgs(operation.argumentsJson)
+                        ?: return "移动参数无法解析"
+                    if (args.category == current.category) {
+                        "节点已在该分类中，请重新预览并确认"
+                    } else {
+                        null
+                    }
+                }
+            }
+
             AgentWriteOperationType.DELETE_OUTLINE_NODE -> {
                 val before = decodeOutline(operation.beforeSnapshot)
                     ?: return "执行前快照无法解析"
@@ -335,6 +406,39 @@ class AgentWriteExecutionService(
                 }
             }
 
+            AgentWriteOperationType.CREATE_OUTLINE_CATEGORY -> {
+                val args = decodeCategoryArgs(operation.argumentsJson)
+                    ?: return "分类参数无法解析"
+                when {
+                    args.category !in outlineCategories(operation.bookId) ->
+                        "分类已不存在，无法撤销"
+
+                    outlineItemCount(operation.bookId, args.category) > 0 ->
+                        "分类下已有大纲条目，拒绝自动撤销"
+
+                    else -> null
+                }
+            }
+
+            AgentWriteOperationType.DELETE_OUTLINE_CATEGORY ->
+                "删除大纲分类不支持撤销"
+
+            AgentWriteOperationType.MOVE_OUTLINE_NODE -> {
+                val after = decodeOutline(operation.afterSnapshot)
+                    ?: return "执行后快照无法解析"
+                val current = writer.outline(operation.targetId)
+                    ?: return "目标大纲节点已删除，无法撤销"
+                if (current.category != after.category ||
+                    current.tag != after.tag ||
+                    current.title != after.title ||
+                    current.content != after.content
+                ) {
+                    "大纲节点已被其他修改覆盖，拒绝自动撤销"
+                } else {
+                    null
+                }
+            }
+
             AgentWriteOperationType.CREATE_CHAPTER -> {
                 val createdId = operation.createdTargetId
                     ?: return "未记录新建章节 id，无法撤销"
@@ -419,6 +523,8 @@ class AgentWriteExecutionService(
                     title = args.title,
                     content = args.content
                 )
+                // 新分类必须同步注册到书籍标签列表，否则大纲页没有对应标签页
+                addOutlineCategory(operation.bookId, args.category)
                 val after = writer.outline(createdId)
                     ?: error("新建大纲后无法读取节点")
                 operations.markSucceeded(
@@ -426,6 +532,38 @@ class AgentWriteExecutionService(
                     encodeOutline(after),
                     createdTargetId = createdId
                 )
+            }
+
+            AgentWriteOperationType.CREATE_OUTLINE_CATEGORY -> {
+                val args = decodeCategoryArgs(operation.argumentsJson)
+                    ?: error("新建分类参数无法解析")
+                addOutlineCategory(operation.bookId, args.category)
+                operations.markSucceeded(operation.id, "{}")
+            }
+
+            AgentWriteOperationType.DELETE_OUTLINE_CATEGORY -> {
+                val args = decodeCategoryArgs(operation.argumentsJson)
+                    ?: error("删除分类参数无法解析")
+                deleteOutlineCategory(operation.bookId, args.category)
+                operations.markSucceeded(operation.id, "{}")
+            }
+
+            AgentWriteOperationType.MOVE_OUTLINE_NODE -> {
+                val args = decodeMoveArgs(operation.argumentsJson)
+                    ?: error("移动大纲参数无法解析")
+                val current = writer.outline(operation.targetId)
+                    ?: error("目标大纲节点不存在")
+                writer.updateOutlineContent(
+                    outlineId = operation.targetId,
+                    category = args.category,
+                    tag = current.tag,
+                    title = current.title,
+                    content = current.content
+                )
+                addOutlineCategory(operation.bookId, args.category)
+                val after = writer.outline(operation.targetId)
+                    ?: error("移动后无法读取大纲节点")
+                operations.markSucceeded(operation.id, encodeOutline(after))
             }
 
             AgentWriteOperationType.UPDATE_OUTLINE_NODE -> {
@@ -444,6 +582,7 @@ class AgentWriteExecutionService(
                     title = title,
                     content = content
                 )
+                addOutlineCategory(operation.bookId, category)
                 val after = writer.outline(operation.targetId)
                     ?: error("修改后大纲节点无法读取")
                 operations.markSucceeded(operation.id, encodeOutline(after))
@@ -550,6 +689,25 @@ class AgentWriteExecutionService(
                 writer.deleteOutline(createdId)
             }
 
+            AgentWriteOperationType.CREATE_OUTLINE_CATEGORY -> {
+                val args = decodeCategoryArgs(operation.argumentsJson)
+                    ?: error("分类参数无法解析")
+                removeOutlineCategory(operation.bookId, args.category)
+            }
+
+            AgentWriteOperationType.MOVE_OUTLINE_NODE -> {
+                val before = decodeOutline(operation.beforeSnapshot)
+                    ?: error("执行前快照无法解析")
+                writer.updateOutlineContent(
+                    outlineId = operation.targetId,
+                    category = before.category,
+                    tag = before.tag,
+                    title = before.title,
+                    content = before.content
+                )
+                addOutlineCategory(operation.bookId, before.category)
+            }
+
             AgentWriteOperationType.CREATE_CHAPTER -> {
                 val createdId = operation.createdTargetId
                     ?: error("未记录新建章节 id")
@@ -599,6 +757,14 @@ class AgentWriteExecutionService(
 
     private fun decodeUpdateArgs(raw: String): AgentOutlineUpdateArgs? = runCatching {
         agentJson.decodeFromString(AgentOutlineUpdateArgs.serializer(), raw)
+    }.getOrNull()
+
+    private fun decodeCategoryArgs(raw: String): AgentOutlineCategoryArgs? = runCatching {
+        agentJson.decodeFromString(AgentOutlineCategoryArgs.serializer(), raw)
+    }.getOrNull()
+
+    private fun decodeMoveArgs(raw: String): AgentOutlineMoveArgs? = runCatching {
+        agentJson.decodeFromString(AgentOutlineMoveArgs.serializer(), raw)
     }.getOrNull()
 
     private fun decodeChapterCreateArgs(raw: String): AgentChapterCreateArgs? = runCatching {

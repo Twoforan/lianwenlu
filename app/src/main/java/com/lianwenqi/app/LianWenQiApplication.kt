@@ -71,6 +71,7 @@ import com.lianwenqi.app.data.volume.OutlineDiffService
 import com.lianwenqi.app.data.volume.VolumeCompressionCoordinator
 import com.lianwenqi.app.data.volume.VolumeCompressionService
 import com.lianwenqi.app.data.volume.VolumeOutlineUpdateCoordinator
+import com.lianwenqi.app.data.entity.defaultOutlineKeys
 import com.lianwenqi.app.update.UpdateChecker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -255,12 +256,40 @@ class AppContainer(val app: Application) {
         operations = agentWriteOperationRepository,
         writer = agentWriteBusinessWriter,
         policyProvider = { prefs.agentWritePolicy.first() },
-        transactionRunner = RoomAgentWriteTransactionRunner(database)
+        transactionRunner = RoomAgentWriteTransactionRunner(database),
+        outlineCategories = { bookId ->
+            prefs.outlineCategories(bookId) ?: defaultOutlineKeys
+        },
+        outlineItemCount = { bookId, category ->
+            outlineRepository.getOutline(bookId).count { it.category == category }
+        },
+        addOutlineCategory = { bookId, category ->
+            val current = prefs.outlineCategories(bookId) ?: defaultOutlineKeys
+            if (category !in current) {
+                prefs.setOutlineCategories(bookId, current + category)
+            }
+        },
+        removeOutlineCategory = { bookId, category ->
+            val current = prefs.outlineCategories(bookId) ?: defaultOutlineKeys
+            if (category in current) {
+                prefs.setOutlineCategories(bookId, current - category)
+            }
+        },
+        deleteOutlineCategory = { bookId, category ->
+            outlineRepository.deleteOutlineByCategory(bookId, category)
+            val current = prefs.outlineCategories(bookId) ?: defaultOutlineKeys
+            if (category in current) {
+                prefs.setOutlineCategories(bookId, current - category)
+            }
+        }
     )
     /** F7：写入中断恢复核对；只读业务数据，不自动确认或重放写入 */
     val agentWriteRecoveryService: AgentWriteRecoveryService = AgentWriteRecoveryService(
         operations = agentWriteOperationRepository,
-        writer = agentWriteBusinessWriter
+        writer = agentWriteBusinessWriter,
+        outlineCategories = { bookId ->
+            prefs.outlineCategories(bookId) ?: defaultOutlineKeys
+        }
     )
 
     val agentToolRegistry: AgentToolRegistry = AgentToolRegistry().apply {
@@ -294,7 +323,13 @@ class AppContainer(val app: Application) {
                 },
                 outlineOf = { outlineId -> agentWriteBusinessWriter.outline(outlineId) },
                 volumeOf = { volumeId -> agentWriteBusinessWriter.volume(volumeId) },
-                writeService = agentWriteExecutionService
+                writeService = agentWriteExecutionService,
+                outlineCategoriesOf = { bookId ->
+                    prefs.outlineCategories(bookId) ?: defaultOutlineKeys
+                },
+                outlineItemCountOf = { bookId, category ->
+                    outlineRepository.getOutline(bookId).count { it.category == category }
+                }
             ).create()
         )
         registerAll(

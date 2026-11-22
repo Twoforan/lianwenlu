@@ -29,7 +29,9 @@ data class AgentWriteRecoveryReport(
  */
 class AgentWriteRecoveryService(
     private val operations: AgentWriteOperationRepository,
-    private val writer: AgentWriteBusinessWriter
+    private val writer: AgentWriteBusinessWriter,
+    /** 当前书籍的大纲分类标签；用于核对新建分类是否已生效 */
+    private val outlineCategories: suspend (Long) -> List<String> = { emptyList() }
 ) {
 
     suspend fun reconcileInterrupted(taskId: Long): AgentWriteRecoveryReport {
@@ -135,6 +137,43 @@ class AgentWriteRecoveryService(
                     "新建大纲操作中断，无法定位可能已创建的节点；请人工核对后重新提议"
                 )
 
+            AgentWriteOperationType.CREATE_OUTLINE_CATEGORY -> {
+                val args = decodeCategoryArgs(operation.argumentsJson)
+                    ?: return Inspection.NotApplied("分类参数无法解析；未自动重试")
+                if (args.category in outlineCategories(operation.bookId)) {
+                    Inspection.Applied("{}")
+                } else {
+                    Inspection.NotApplied("新建分类未生效；未自动重试")
+                }
+            }
+
+            AgentWriteOperationType.DELETE_OUTLINE_CATEGORY ->
+                Inspection.NotApplied(
+                    "删除分类操作中断，无法确认分类与条目是否已删除；请人工核对后重新提议"
+                )
+
+            AgentWriteOperationType.MOVE_OUTLINE_NODE -> {
+                val before = decodeOutline(operation.beforeSnapshot)
+                    ?: return Inspection.NotApplied("执行前快照无法解析；未自动重试")
+                val args = decodeMoveArgs(operation.argumentsJson)
+                    ?: return Inspection.NotApplied("移动大纲参数无法解析；未自动重试")
+                val current = writer.outline(operation.targetId)
+                    ?: return Inspection.NotApplied("目标大纲节点已删除；未自动重试")
+                when {
+                    current.category == args.category -> Inspection.Applied(
+                        encodeOutline(current)
+                    )
+
+                    current.category == before.category &&
+                        current.tag == before.tag &&
+                        current.title == before.title &&
+                        current.content == before.content ->
+                        Inspection.NotApplied("上次移动大纲未生效；未自动重试")
+
+                    else -> Inspection.Conflicted("大纲节点已被其他修改覆盖，拒绝自动恢复")
+                }
+            }
+
             AgentWriteOperationType.DELETE_OUTLINE_NODE ->
                 Inspection.NotApplied(
                     "删除大纲操作中断，无法确认节点是否已删除；请人工核对后重新提议"
@@ -194,5 +233,13 @@ class AgentWriteRecoveryService(
 
     private fun decodeUpdateArgs(raw: String): AgentOutlineUpdateArgs? = runCatching {
         agentJson.decodeFromString(AgentOutlineUpdateArgs.serializer(), raw)
+    }.getOrNull()
+
+    private fun decodeCategoryArgs(raw: String): AgentOutlineCategoryArgs? = runCatching {
+        agentJson.decodeFromString(AgentOutlineCategoryArgs.serializer(), raw)
+    }.getOrNull()
+
+    private fun decodeMoveArgs(raw: String): AgentOutlineMoveArgs? = runCatching {
+        agentJson.decodeFromString(AgentOutlineMoveArgs.serializer(), raw)
     }.getOrNull()
 }

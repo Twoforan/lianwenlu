@@ -23,6 +23,7 @@ import com.lianwenqi.app.data.outlineFieldsForDisplay
 import com.lianwenqi.app.data.parseOutlineFieldText
 import com.lianwenqi.app.data.entity.Book
 import com.lianwenqi.app.data.entity.normalizeOutlineCategory
+import com.lianwenqi.app.data.entity.outlineCategoryLabel
 import kotlinx.serialization.json.put
 
 /**
@@ -37,7 +38,11 @@ class AgentWriteTools(
     private val chapterContentOf: suspend (Long) -> String?,
     private val outlineOf: suspend (Long) -> AgentOutlineSnapshot?,
     private val volumeOf: suspend (Long) -> AgentVolumeSnapshot?,
-    private val writeService: AgentWriteExecutionService
+    private val writeService: AgentWriteExecutionService,
+    /** 当前书籍的大纲分类标签（存储值有序列表） */
+    private val outlineCategoriesOf: suspend (Long) -> List<String> = { emptyList() },
+    /** 某分类下的大纲条目数 */
+    private val outlineItemCountOf: suspend (Long, String) -> Int = { _, _ -> 0 }
 ) {
 
     fun create(): List<AgentTool> = listOf(
@@ -46,6 +51,9 @@ class AgentWriteTools(
         createOutlineNode(),
         updateOutlineNode(),
         deleteOutlineNode(),
+        createOutlineCategory(),
+        deleteOutlineCategory(),
+        moveOutlineNode(),
         createChapter(),
         deleteChapter(),
         createVolume(),
@@ -529,6 +537,197 @@ class AgentWriteTools(
                 context.taskId,
                 "delete_outline_node",
                 "$outlineId:${PromptDiagnostics.hash(displayName)}"
+            )
+        )
+    }
+
+    private fun createOutlineCategory(): AgentTool = AgentTool(
+        toolKey = "create_outline_category",
+        name = "create_outline_category",
+        description = "提出在当前书籍中新建大纲分类标签（如「伏笔」「势力」）；" +
+            "分类已存在时不会重复创建。只生成待确认操作，不会立即写入。",
+        capabilityKey = "CREATE_OUTLINE_CATEGORY",
+        permissionLevel = AgentToolPermission.CREATE,
+        maxArgumentsChars = 4_000,
+        parameters = listOf(
+            AgentToolParam(
+                name = "category",
+                type = AgentToolParamType.STRING,
+                description = "新分类标签名称，例如「伏笔」「势力」",
+                required = true,
+                minLength = 1,
+                maxLength = 50
+            ),
+            reasonParam()
+        )
+    ) { args, context ->
+        val bookId = context.bookId ?: return@AgentTool AgentToolResult.fail(NO_BOOK)
+        val book = bookOf(bookId) ?: return@AgentTool AgentToolResult.fail("当前书籍不存在")
+        val raw = args.string("category").trim()
+        if (raw.isEmpty()) return@AgentTool AgentToolResult.fail("category 不能为空")
+        val category = normalizeOutlineCategory(raw)
+        val existing = outlineCategoriesOf(bookId)
+        if (existing.any { it == category || outlineCategoryLabel(it) == raw }) {
+            return@AgentTool AgentToolResult.fail("分类已存在：$raw")
+        }
+        val reason = args.string("reason").take(AgentWriteLimits.MAX_REASON_CHARS)
+        val summary = "在《${book.title}》中新建大纲分类「$category」" +
+            reason.takeIf { it.isNotBlank() }?.let { "；原因：$it" }.orEmpty()
+        propose(
+            context = context,
+            toolName = "create_outline_category",
+            operationType = AgentWriteOperationType.CREATE_OUTLINE_CATEGORY,
+            targetType = AgentWriteTargetType.OUTLINE,
+            targetId = 0L,
+            book = book,
+            targetTitle = category,
+            riskLevel = AgentWriteRiskLevel.NORMAL_WRITE,
+            argumentsJson = jsonPayload {
+                put("category", category)
+                if (reason.isNotBlank()) put("reason", reason)
+            },
+            beforeSnapshot = "{}",
+            proposedContent = category,
+            operationSummary = summary,
+            reversible = true,
+            idempotencyKey = writeKey(
+                context.taskId,
+                "create_outline_category",
+                category
+            )
+        )
+    }
+
+    private fun deleteOutlineCategory(): AgentTool = AgentTool(
+        toolKey = "delete_outline_category",
+        name = "delete_outline_category",
+        description = "提出删除指定大纲分类标签，并一并删除该分类下的全部大纲条目；" +
+            "高风险且不可恢复，必须经用户逐条确认。",
+        capabilityKey = "DELETE_OUTLINE_CATEGORY",
+        permissionLevel = AgentToolPermission.OVERWRITE,
+        maxArgumentsChars = 4_000,
+        parameters = listOf(
+            AgentToolParam(
+                name = "category",
+                type = AgentToolParamType.STRING,
+                description = "要删除的分类标签存储值或展示名，例如 CHARACTER / 人设 / 伏笔",
+                required = true,
+                minLength = 1,
+                maxLength = 50
+            ),
+            reasonParam()
+        )
+    ) { args, context ->
+        val bookId = context.bookId ?: return@AgentTool AgentToolResult.fail(NO_BOOK)
+        val book = bookOf(bookId) ?: return@AgentTool AgentToolResult.fail("当前书籍不存在")
+        val raw = args.string("category").trim()
+        if (raw.isEmpty()) return@AgentTool AgentToolResult.fail("category 不能为空")
+        val categories = outlineCategoriesOf(bookId)
+        val category = categories.firstOrNull { it == raw || outlineCategoryLabel(it) == raw }
+            ?: normalizeOutlineCategory(raw).takeIf { it in categories }
+            ?: return@AgentTool AgentToolResult.fail("分类不存在：$raw")
+        val label = outlineCategoryLabel(category)
+        val itemCount = outlineItemCountOf(bookId, category)
+        val reason = args.string("reason").take(AgentWriteLimits.MAX_REASON_CHARS)
+        val summary = "删除大纲分类「$label」及其下 $itemCount 条大纲条目（不可恢复）" +
+            reason.takeIf { it.isNotBlank() }?.let { "；原因：$it" }.orEmpty()
+        propose(
+            context = context,
+            toolName = "delete_outline_category",
+            operationType = AgentWriteOperationType.DELETE_OUTLINE_CATEGORY,
+            targetType = AgentWriteTargetType.OUTLINE,
+            targetId = 0L,
+            book = book,
+            targetTitle = label,
+            riskLevel = AgentWriteRiskLevel.HIGH_RISK_WRITE,
+            argumentsJson = jsonPayload {
+                put("category", category)
+                put("itemCount", itemCount)
+                put("label", label)
+                if (reason.isNotBlank()) put("reason", reason)
+            },
+            beforeSnapshot = "{}",
+            proposedContent = "",
+            operationSummary = summary,
+            reversible = false,
+            idempotencyKey = writeKey(
+                context.taskId,
+                "delete_outline_category",
+                "$category:$itemCount"
+            )
+        )
+    }
+
+    private fun moveOutlineNode(): AgentTool = AgentTool(
+        toolKey = "move_outline_node",
+        name = "move_outline_node",
+        description = "提出把已有大纲节点移动到另一个分类标签；目标分类不存在时会一并新建该分类。",
+        capabilityKey = "MOVE_OUTLINE_NODE",
+        permissionLevel = AgentToolPermission.UPDATE,
+        maxArgumentsChars = 4_000,
+        parameters = listOf(
+            AgentToolParam(
+                name = "outlineId",
+                type = AgentToolParamType.LONG,
+                description = "要移动的大纲条目 id（可用 get_outline 查询）",
+                required = true,
+                minValue = 1
+            ),
+            AgentToolParam(
+                name = "category",
+                type = AgentToolParamType.STRING,
+                description = "目标分类标签存储值或展示名，例如 CHARACTER / 人设 / 伏笔",
+                required = true,
+                minLength = 1,
+                maxLength = 50
+            ),
+            reasonParam()
+        )
+    ) { args, context ->
+        val bookId = context.bookId ?: return@AgentTool AgentToolResult.fail(NO_BOOK)
+        val book = bookOf(bookId) ?: return@AgentTool AgentToolResult.fail("当前书籍不存在")
+        val outlineId = args.long("outlineId")
+        val current = outlineOf(outlineId)
+            ?: return@AgentTool AgentToolResult.fail("大纲节点不存在：$outlineId")
+        if (current.bookId != bookId) {
+            return@AgentTool AgentToolResult.fail("无权移动其他书籍的大纲节点：$outlineId")
+        }
+        val raw = args.string("category").trim()
+        if (raw.isEmpty()) return@AgentTool AgentToolResult.fail("category 不能为空")
+        val category = normalizeOutlineCategory(raw)
+        if (category == current.category) {
+            return@AgentTool AgentToolResult.fail("节点已在该分类中，无需移动")
+        }
+        val displayName = outlineDisplayName(current.title, current.content)
+        val reason = args.string("reason").take(AgentWriteLimits.MAX_REASON_CHARS)
+        val summary = "将大纲节点《$displayName》从「${outlineCategoryLabel(current.category)}」" +
+            "移动到「${outlineCategoryLabel(category)}」" +
+            reason.takeIf { it.isNotBlank() }?.let { "；原因：$it" }.orEmpty()
+        propose(
+            context = context,
+            toolName = "move_outline_node",
+            operationType = AgentWriteOperationType.MOVE_OUTLINE_NODE,
+            targetType = AgentWriteTargetType.OUTLINE,
+            targetId = outlineId,
+            book = book,
+            targetTitle = displayName,
+            riskLevel = AgentWriteRiskLevel.NORMAL_WRITE,
+            argumentsJson = jsonPayload {
+                put("outlineId", outlineId)
+                put("category", category)
+                if (reason.isNotBlank()) put("reason", reason)
+            },
+            beforeSnapshot = agentJson.encodeToString(
+                AgentOutlineSnapshot.serializer(),
+                current
+            ),
+            proposedContent = current.content,
+            operationSummary = summary,
+            reversible = true,
+            idempotencyKey = writeKey(
+                context.taskId,
+                "move_outline_node",
+                "$outlineId:$category:${PromptDiagnostics.hash(current.content)}"
             )
         )
     }

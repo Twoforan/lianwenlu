@@ -108,7 +108,19 @@ class BookDetailViewModel(
     }
 
     private suspend fun refreshCategories() {
-        _categories.value = container.prefs.outlineCategories(bookId) ?: defaultOutlineKeys
+        val stored = container.prefs.outlineCategories(bookId) ?: defaultOutlineKeys
+        // 兼容历史/异常数据：数据库里已有、但标签列表缺失的分类自动补回，避免条目不可见
+        val missing = outlineRepository.getOutline(bookId)
+            .map { it.category }
+            .filter { it.isNotBlank() && it !in stored }
+            .distinct()
+        if (missing.isEmpty()) {
+            _categories.value = stored
+        } else {
+            val merged = stored + missing
+            container.prefs.setOutlineCategories(bookId, merged)
+            _categories.value = merged
+        }
     }
 
     fun addCategory(label: String) = viewModelScope.launch {

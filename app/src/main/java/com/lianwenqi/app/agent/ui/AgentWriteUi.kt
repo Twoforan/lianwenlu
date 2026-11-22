@@ -355,6 +355,25 @@ fun AgentWritePreviewDialog(
                 } else if (operation.operationType == AgentWriteOperationType.DELETE_OUTLINE_NODE) {
                     Text("将删除的内容", style = MaterialTheme.typography.labelMedium)
                     OutlineFieldsPreview(beforeContent(operation))
+                } else if (operation.operationType ==
+                    AgentWriteOperationType.CREATE_OUTLINE_CATEGORY
+                ) {
+                    Text("新分类", style = MaterialTheme.typography.labelMedium)
+                    Text(
+                        operation.proposedContent,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                } else if (operation.operationType ==
+                    AgentWriteOperationType.DELETE_OUTLINE_CATEGORY
+                ) {
+                    Text(
+                        "将删除该分类及其下全部大纲条目，且不可恢复",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                } else if (operation.operationType == AgentWriteOperationType.MOVE_OUTLINE_NODE) {
+                    Text("移动后内容", style = MaterialTheme.typography.labelMedium)
+                    OutlineFieldsPreview(operation.proposedContent)
                 } else {
                     Text("修改前后差异", style = MaterialTheme.typography.labelMedium)
                     AgentWriteDiffView(
@@ -720,6 +739,9 @@ private fun confirmLabel(operationType: String): String = when (operationType) {
     AgentWriteOperationType.CREATE_OUTLINE_NODE -> "确认创建大纲节点"
     AgentWriteOperationType.UPDATE_OUTLINE_NODE -> "确认修改大纲节点"
     AgentWriteOperationType.DELETE_OUTLINE_NODE -> "确认删除大纲节点"
+    AgentWriteOperationType.CREATE_OUTLINE_CATEGORY -> "确认新增大纲分类"
+    AgentWriteOperationType.DELETE_OUTLINE_CATEGORY -> "确认删除大纲分类"
+    AgentWriteOperationType.MOVE_OUTLINE_NODE -> "确认移动大纲节点"
     AgentWriteOperationType.CREATE_CHAPTER -> "确认新建章节"
     AgentWriteOperationType.DELETE_CHAPTER -> "确认删除章节"
     AgentWriteOperationType.CREATE_VOLUME -> "确认新建分卷"
