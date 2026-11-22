@@ -164,6 +164,22 @@ class AgentChatViewModel(private val container: AppContainer) : ViewModel() {
     val filterBookId = MutableStateFlow<Long?>(null)
     val input = MutableStateFlow("")
 
+    /** 已收起正文的消息 id：按消息记录，切换会话 / 模式或重组后仍保持 */
+    private val _collapsedMessageIds = MutableStateFlow<Set<Long>>(emptySet())
+    val collapsedMessageIds: StateFlow<Set<Long>> = _collapsedMessageIds.asStateFlow()
+
+    fun toggleMessageCollapsed(messageId: Long) {
+        _collapsedMessageIds.value = _collapsedMessageIds.value.toggle(messageId)
+    }
+
+    /** 「深度思考」面板展开状态：同一时刻只有最新一轮展示，因此用单一状态记录 */
+    private val _thinkingExpanded = MutableStateFlow(false)
+    val thinkingExpanded: StateFlow<Boolean> = _thinkingExpanded.asStateFlow()
+
+    fun toggleThinkingExpanded() {
+        _thinkingExpanded.value = !_thinkingExpanded.value
+    }
+
     /** 快捷提示词：与普通 AI 聊天共用同一份提示词库 */
     val prompts: StateFlow<List<Prompt>> = configRepository.observePrompts()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())

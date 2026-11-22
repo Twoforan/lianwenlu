@@ -22,6 +22,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.PressInteraction
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -161,7 +162,7 @@ import coil.compose.AsyncImage
 import com.lianwenqi.app.agent.ui.AgentChatMode
 import com.lianwenqi.app.agent.ui.AgentChatScreen
 import com.lianwenqi.app.ai.CacheRateCalculator
-import com.lianwenqi.app.ai.CacheRateState
+import com.lianwenqi.app.ai.describe
 import com.lianwenqi.app.ai.GenerationDialog
 import com.lianwenqi.app.ai.MemoryScopePick
 import com.lianwenqi.app.ai.RefreshRetrievalChoice
@@ -4085,54 +4086,35 @@ private fun AssistantBlock(
                     resetKey = ui.selectionReset
                 )
                 Spacer(Modifier.height(6.dp))
-                // 模型与本次消耗的 token 同行显示，位于操作按钮行上方
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                // 模型独占一行；token 消耗与缓存命中率另起一行，避免和模型名挤在一起
+                Text(
+                    "model: $modelName",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                val promptKnown = msg.promptTokens >= 0
+                val tokens = (if (promptKnown) msg.promptTokens else 0) + msg.completionTokens
+                // 旧记录可能全是 0（当时没有可用统计），保持原来的「不显示」行为
+                val hasStats = msg.promptTokens > 0 || msg.completionTokens > 0 ||
+                    msg.cachedTokens > 0 || msg.promptTokens < 0 || msg.cachedTokens < 0
+                if (hasStats) {
+                    Spacer(Modifier.height(2.dp))
                     Text(
-                        "model: $modelName",
+                        buildString {
+                            append(
+                                "消耗 $tokens tokens（输入 ${
+                                    if (promptKnown) msg.promptTokens else "未知"
+                                } / 输出 ${msg.completionTokens}）"
+                            )
+                            // 缓存三态 + 分母三态：未知不显示成 0%，分母未知不计算百分比
+                            val rate = CacheRateCalculator.of(msg.promptTokens, msg.cachedTokens)
+                            append(" · ").append(
+                                rate.describe(msg.promptTokens, msg.cachedTokens)
+                            )
+                        },
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    val promptKnown = msg.promptTokens >= 0
-                    val tokens = (if (promptKnown) msg.promptTokens else 0) + msg.completionTokens
-                    // 旧记录可能全是 0（当时没有可用统计），保持原来的「不显示」行为
-                    val hasStats = msg.promptTokens > 0 || msg.completionTokens > 0 ||
-                        msg.cachedTokens > 0 || msg.promptTokens < 0 || msg.cachedTokens < 0
-                    if (hasStats) {
-                        Spacer(Modifier.weight(1f))
-                        Text(
-                            buildString {
-                                append(
-                                    "消耗 $tokens tokens（输入 ${
-                                        if (promptKnown) msg.promptTokens else "未知"
-                                    } / 输出 ${msg.completionTokens}）"
-                                )
-                                // 缓存三态 + 分母三态：未知不显示成 0%，分母未知不计算百分比
-                                val rate = CacheRateCalculator.of(msg.promptTokens, msg.cachedTokens)
-                                when (rate.state) {
-                                    CacheRateState.UNKNOWN ->
-                                        append(" · 缓存命中率：暂无供应商数据")
-                                    CacheRateState.INCOMPLETE ->
-                                        append(
-                                            " · 缓存读取 Token：${msg.cachedTokens}" +
-                                                " / 总输入 Token：未知 · 缓存命中率：统计口径不完整"
-                                        )
-                                    CacheRateState.ANOMALY ->
-                                        append(
-                                            " · 缓存读取 Token：${msg.cachedTokens}" +
-                                                " / 总输入 Token：${msg.promptTokens} · 上游 usage 数据异常"
-                                        )
-                                    else ->
-                                        append(
-                                            " · 缓存读取 Token：${msg.cachedTokens}" +
-                                                " / 总输入 Token：${msg.promptTokens}" +
-                                                " / 缓存命中率：${rate.percent}%"
-                                        )
-                                }
-                            },
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
                 }
             }
         }
@@ -4194,6 +4176,13 @@ internal fun ChatComposer(
     /** 输入框获得焦点时回调，例如让聊天列表跳到最末尾 */
     onFocus: () -> Unit = {}
 ) {
+    // 每次点按输入框都回到底部（已获得焦点时不会再触发 onFocusChanged）
+    val inputInteraction = remember { MutableInteractionSource() }
+    LaunchedEffect(inputInteraction) {
+        inputInteraction.interactions.collect { interaction ->
+            if (interaction is PressInteraction.Release) onFocus()
+        }
+    }
     Surface(
         modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(18.dp),
@@ -4210,6 +4199,7 @@ internal fun ChatComposer(
                 modifier = Modifier
                     .weight(1f)
                     .onFocusChanged { if (it.isFocused) onFocus() },
+                interactionSource = inputInteraction,
                 placeholder = {
                     Text(placeholder, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 },

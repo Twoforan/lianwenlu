@@ -16,6 +16,7 @@ import com.lianwenqi.app.agent.data.AgentTaskRepository
 import com.lianwenqi.app.agent.data.AgentToolExecutionRepository
 import com.lianwenqi.app.agent.data.AgentWriteOperationRepository
 import com.lianwenqi.app.agent.data.entity.AgentEventType
+import com.lianwenqi.app.agent.data.entity.AgentMessage
 import com.lianwenqi.app.agent.data.entity.AgentMessageKind
 import com.lianwenqi.app.agent.data.entity.AgentMessageRole
 import com.lianwenqi.app.agent.data.entity.AgentNodeStatus
@@ -58,6 +59,9 @@ private const val CONTEXT_COMPRESS_TOOL_LABEL = "自动压缩上下文"
 
 /** 同一任务最多自动压缩次数，避免压缩后仍超限时无限循环 */
 private const val MAX_COMPRESSIONS_PER_TASK = 3
+
+/** 执行日志（提交给模型的完整输入）上限，避免单条消息过大 */
+private const val MAX_EXECUTION_LOG_CHARS = 200_000
 
 /** F7 执行入口参数；为空时保持 F4/F6 的“单次直接执行”兼容行为 */
 data class AgentExecutionOptions(
@@ -305,6 +309,14 @@ class AgentExecutionEngine(
         var totalToolCalls = 0
         var totalModelRounds = 0
         var lastPromptTokens = -1
+        // 汇总本次执行所有模型调用的 usage，写入最终回答供界面回显缓存命中率
+        var totalPromptTokens = 0
+        var totalCompletionTokens = 0
+        var totalCachedTokens = 0
+        var usagePromptKnown = true
+        var usageCacheKnown = true
+        // 本轮执行提交给模型的完整输入（按步骤记录），写入最终回答供「日志」查看
+        val executionLog = StringBuilder()
         val signatureCounts = mutableMapOf<String, Int>()
         val startedAt = System.currentTimeMillis()
         var waitAccumulatedMs = 0L
@@ -443,6 +455,18 @@ class AgentExecutionEngine(
                     // 记录服务端真实 prompt 用量，作为下一轮是否压缩的优先依据
                     if (response.usage.promptTokens > 0) {
                         lastPromptTokens = response.usage.promptTokens
+                    }
+                    // 累计执行期 usage；任一请求缺少字段时整体按「未知」展示，不用 0 冒充
+                    if (response.usage.promptTokens >= 0) {
+                        totalPromptTokens += response.usage.promptTokens
+                    } else {
+                        usagePromptKnown = false
+                    }
+                    totalCompletionTokens += response.usage.completionTokens
+                    if (response.usage.cachedTokens >= 0) {
+                        totalCachedTokens += response.usage.cachedTokens
+                    } else {
+                        usageCacheKnown = false
                     }
                     if (response.content.length > limits.maxModelResponseChars) {
                         throw ExecutionFailure(
@@ -599,6 +623,14 @@ class AgentExecutionEngine(
                     }
                 }
 
+                recordStepPromptLog(
+                    builder = executionLog,
+                    step = step,
+                    stepIndex = index,
+                    stepCount = ordered.size,
+                    turns = turns
+                )
+
                 checkControl(taskId, options)
                 // 自动模式兜底：模型把提问写在正文里时转成提问弹窗，避免用户只能反复打字确认
                 val answerText = finalText.orEmpty()
@@ -668,7 +700,19 @@ class AgentExecutionEngine(
                         taskId = taskId,
                         role = AgentMessageRole.ASSISTANT,
                         kind = AgentMessageKind.FINAL_ANSWER,
-                        content = summary
+                        content = summary,
+                        promptTokens = if (usagePromptKnown && totalPromptTokens > 0) {
+                            totalPromptTokens
+                        } else {
+                            AgentMessage.PROMPT_TOKENS_UNKNOWN
+                        },
+                        completionTokens = totalCompletionTokens,
+                        cachedTokens = if (usageCacheKnown) {
+                            totalCachedTokens
+                        } else {
+                            AgentMessage.CACHE_TOKENS_UNKNOWN
+                        },
+                        promptLog = executionLog.toString().take(MAX_EXECUTION_LOG_CHARS)
                     )
                 }
             }
@@ -1058,6 +1102,48 @@ class AgentExecutionEngine(
             }
             delay(decision.delayMs)
             attempt++
+        }
+    }
+
+    /**
+     * 记录一个步骤最终提交给模型的完整输入（system / user / 工具往返）。
+     *
+     * 仅在任务完成后随最终回答落库，供用户查看；不进入后续模型上下文。
+     */
+    private fun recordStepPromptLog(
+        builder: StringBuilder,
+        step: AgentPlanStep,
+        stepIndex: Int,
+        stepCount: Int,
+        turns: List<ChatTurn>
+    ) {
+        if (builder.length >= MAX_EXECUTION_LOG_CHARS) return
+        val section = buildString {
+            if (builder.isNotEmpty()) appendLine()
+            appendLine(
+                "========== 步骤 ${stepIndex + 1}/$stepCount：${step.title} =========="
+            )
+            turns.forEach { turn ->
+                val role = when (turn.role) {
+                    ChatRole.SYSTEM -> "系统"
+                    ChatRole.USER -> "用户"
+                    ChatRole.ASSISTANT -> "助手"
+                    else -> turn.role.name
+                }
+                appendLine("【$role】")
+                appendLine(turn.content)
+                if (turn.images.isNotEmpty()) {
+                    appendLine("（附带图片 ${turn.images.size} 张）")
+                }
+                appendLine()
+            }
+        }
+        val remaining = MAX_EXECUTION_LOG_CHARS - builder.length
+        if (section.length <= remaining) {
+            builder.append(section)
+        } else {
+            builder.append(section.take(remaining))
+            builder.append("\n（日志过长，后续内容已截断）")
         }
     }
 

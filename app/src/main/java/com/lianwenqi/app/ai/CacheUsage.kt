@@ -95,6 +95,24 @@ object CacheRateCalculator {
 }
 
 /**
+ * 命中率说明文案：普通聊天与 Agent 共用，避免两处展示口径分叉。
+ * 未知、口径不完整、上游数据异常都与「明确未命中」区分开。
+ */
+fun CacheRate.describe(promptTokens: Int, cachedTokens: Int): String = when (state) {
+    CacheRateState.NO_REQUEST,
+    CacheRateState.UNKNOWN -> "缓存命中率：暂无供应商数据"
+
+    CacheRateState.INCOMPLETE ->
+        "缓存读取 Token：$cachedTokens / 总输入 Token：未知 · 缓存命中率：统计口径不完整"
+
+    CacheRateState.ANOMALY ->
+        "缓存读取 Token：$cachedTokens / 总输入 Token：$promptTokens · 上游 usage 数据异常"
+
+    else -> "缓存读取 Token：$cachedTokens / 总输入 Token：$promptTokens" +
+        " / 缓存命中率：${percent}%"
+}
+
+/**
  * 各协议 usage → [CacheUsage] 的统一解析入口。
  *
  * 普通请求与流式请求共用这里的逻辑，避免两条链路对「字段缺失」的处理不一致。

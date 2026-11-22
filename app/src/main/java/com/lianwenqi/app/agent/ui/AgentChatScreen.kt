@@ -47,11 +47,15 @@ import com.lianwenqi.app.agent.data.entity.AgentClarification
 import com.lianwenqi.app.agent.data.entity.AgentNodeStatus
 import com.lianwenqi.app.agent.data.entity.AgentToolExecution
 import com.lianwenqi.app.agent.data.entity.AgentToolStatus
+import com.lianwenqi.app.ai.CacheRateCalculator
+import com.lianwenqi.app.ai.describe
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.automirrored.filled.ReceiptLong
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Bolt
@@ -188,6 +192,8 @@ fun AgentChatScreen(
     val workMode by vm.workMode.collectAsState()
     val pendingClarification by vm.pendingClarification.collectAsState()
     val input by vm.input.collectAsState()
+    val collapsedMessageIds by vm.collapsedMessageIds.collectAsState()
+    val thinkingExpanded by vm.thinkingExpanded.collectAsState()
     val books by vm.books.collectAsState()
     val models by vm.models.collectAsState()
     val providers by vm.providers.collectAsState()
@@ -244,6 +250,8 @@ fun AgentChatScreen(
     var replyDraft by remember { mutableStateOf("") }
     // 待确认删除的消息：点按聊天区域其他位置可取消
     var pendingDeleteId by remember { mutableStateOf<Long?>(null) }
+    // 查看某条 Agent 回复提交给模型的完整输入
+    var logMessage by remember { mutableStateOf<AgentMessage?>(null) }
     var dismissedClarificationId by remember { mutableStateOf<Long?>(null) }
     // 待确认写入改为弹窗；关闭后保留入口，出现新的写入时重新弹出
     var writeDialogDismissed by remember { mutableStateOf(false) }
@@ -468,26 +476,11 @@ fun AgentChatScreen(
                                 message.content.startsWith(CLARIFICATION_MESSAGE_PREFIX)
                         }
                     val hasPendingWrites = writeOperations.any { it.unresolved }
-                    val liveThinkingStatus = when {
-                        hasPendingWrites -> "请用户确认中"
-                        planning -> "思考中"
-                        executingCurrent -> {
-                            val runningNode = executionNodes.lastOrNull {
-                                it.status == AgentNodeStatus.RUNNING
-                            }
-                            val runningTools = runningNode?.id
-                                ?.let { nodeId ->
-                                    toolExecutions.filter { it.nodeId == nodeId }
-                                }
-                                .orEmpty()
-                            when {
-                                runningTools.any { it.status == AgentToolStatus.RUNNING } ->
-                                    "规划下一步中"
-                                runningTools.isEmpty() -> "思考中"
-                                else -> "对用户提问中"
-                            }
-                        }
-                        else -> null
+                    // 思考条只显示统一的「思考中」，不再区分规划下一步、对用户提问等阶段
+                    val liveThinkingStatus = if (planning || executingCurrent || hasPendingWrites) {
+                        "思考中"
+                    } else {
+                        null
                     }
 
                     // 新消息 / 状态变化后自动滚到最下方（等一帧拿到最新内容高度）
@@ -630,6 +623,10 @@ fun AgentChatScreen(
                             } else {
                                 null
                             },
+                            thinkingExpanded = thinkingExpanded,
+                            onToggleThinkingExpanded = vm::toggleThinkingExpanded,
+                            collapsed = message.id in collapsedMessageIds,
+                            onToggleCollapsed = { vm.toggleMessageCollapsed(message.id) },
                             thinkingNodes = executionNodes,
                             thinkingTools = toolExecutions,
                             showVersionSwitcher = hasVersions &&
@@ -642,7 +639,8 @@ fun AgentChatScreen(
                             },
                             onNextVersion = {
                                 versionTasks.getOrNull(versionIndex + 1)?.let { vm.openTask(it.id) }
-                            }
+                            },
+                            onViewLog = { logMessage = message }
                         )
                         historyBlocks.first[index]?.let { item ->
                             key(item.task.id) { AgentHistoryTaskBlock(item) }
@@ -716,6 +714,16 @@ fun AgentChatScreen(
                             onCancelTask = { vm.cancelTask(planTask.id) },
                             onDeleteTask = { vm.deleteTask(planTask.id) }
                         )
+                        // 计划模式没有独立回复气泡：把规划请求的 token / 缓存命中率回显在计划卡下方
+                        val planMessage = messages.lastOrNull {
+                            it.taskId == planTask.id && it.kind == AgentMessageKind.PLAN
+                        }
+                        if (planMessage != null) {
+                            AgentUsageLine(
+                                message = planMessage,
+                                modifier = Modifier.padding(horizontal = 14.dp)
+                            )
+                        }
                     }
 
                     // 待确认写入改为弹窗展示，执行记录区不再插入提示卡片
@@ -731,6 +739,8 @@ fun AgentChatScreen(
                                 nodes = executionNodes,
                                 tools = toolExecutions,
                                 clarifications = answeredClarifications,
+                                thinkingExpanded = thinkingExpanded,
+                                onToggleThinkingExpanded = vm::toggleThinkingExpanded,
                                 error = executionError.orEmpty().ifBlank {
                                     if (taskFailed) currentTask?.errorMessage ?: "" else ""
                                 },
@@ -1163,6 +1173,13 @@ fun AgentChatScreen(
                 vm.removeAttachment(attachment)
                 previewAttachment = null
             }
+        )
+    }
+
+    logMessage?.let { message ->
+        AgentPromptLogDialog(
+            content = message.promptLog,
+            onDismiss = { logMessage = null }
         )
     }
 
@@ -1623,13 +1640,18 @@ private fun AgentMessageRow(
     thinkingStatus: String? = null,
     thinkingNodes: List<AgentExecutionNode> = emptyList(),
     thinkingTools: List<AgentToolExecution> = emptyList(),
+    thinkingExpanded: Boolean = false,
+    onToggleThinkingExpanded: () -> Unit = {},
+    collapsed: Boolean = false,
+    onToggleCollapsed: () -> Unit = {},
     deletePending: Boolean = false,
     showVersionSwitcher: Boolean = false,
     versionIndex: Int = 0,
     versionCount: Int = 0,
     onPrevVersion: () -> Unit = {},
     onNextVersion: () -> Unit = {},
-    onDeleteMessage: () -> Unit = {}
+    onDeleteMessage: () -> Unit = {},
+    onViewLog: () -> Unit = {}
 ) {
     val isUser = message.role == AgentMessageRole.USER
     val label = when {
@@ -1640,7 +1662,6 @@ private fun AgentMessageRow(
     }
     // 自动模式：与普通聊天一致的整宽消息卡片，用户与 Agent 都不按轮次折叠
     if (chatStyle) {
-        var collapsed by remember(message.id) { mutableStateOf(false) }
         Surface(
             Modifier
                 .fillMaxWidth()
@@ -1657,7 +1678,9 @@ private fun AgentMessageRow(
                     AutoThinkingHeader(
                         status = thinkingStatus,
                         nodes = thinkingNodes,
-                        tools = thinkingTools
+                        tools = thinkingTools,
+                        expanded = thinkingExpanded,
+                        onToggleExpanded = onToggleThinkingExpanded
                     )
                     Spacer(Modifier.height(8.dp))
                 }
@@ -1685,6 +1708,13 @@ private fun AgentMessageRow(
                         maxLines = if (collapsed) 1 else Int.MAX_VALUE,
                         overflow = TextOverflow.Ellipsis
                     )
+                    // 助手回复的 token 消耗与缓存命中率，与普通聊天保持一致的口径
+                    if (!isUser && !collapsed) {
+                        AgentUsageLine(
+                            message = message,
+                            modifier = Modifier.padding(top = 4.dp)
+                        )
+                    }
                     // 与普通聊天一致的操作图标：重新生成 / 编辑 / 复制 / 删除 / 收起
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         if (isUser) {
@@ -1719,6 +1749,14 @@ private fun AgentMessageRow(
                             description = "复制",
                             onClick = onCopy
                         )
+                        // 查看本次提交给 Agent 的完整输入（系统提示、上下文、工具往返）
+                        if (!isUser && message.promptLog.isNotBlank()) {
+                            MessageIcon(
+                                icon = Icons.AutoMirrored.Filled.ReceiptLong,
+                                description = "查看提交日志",
+                                onClick = onViewLog
+                            )
+                        }
                         MessageIcon(
                             icon = if (deletePending) Icons.Filled.Check else Icons.Filled.Delete,
                             description = if (deletePending) "确认删除" else "删除",
@@ -1762,7 +1800,7 @@ private fun AgentMessageRow(
                                 Icons.Filled.KeyboardArrowUp
                             },
                             description = if (collapsed) "展开" else "收起",
-                            onClick = { collapsed = !collapsed }
+                            onClick = onToggleCollapsed
                         )
                     }
                 }
@@ -2064,16 +2102,17 @@ private fun AutoThinkingHeader(
     status: String?,
     nodes: List<AgentExecutionNode>,
     tools: List<AgentToolExecution>,
-    clarifications: List<AgentClarification> = emptyList()
+    clarifications: List<AgentClarification> = emptyList(),
+    expanded: Boolean = false,
+    onToggleExpanded: () -> Unit = {}
 ) {
-    var expanded by remember { mutableStateOf(false) }
     val active = status != null
     Column(
         Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(10.dp))
             .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
-            .clickable { expanded = !expanded }
+            .clickable { onToggleExpanded() }
             .padding(horizontal = 12.dp, vertical = 8.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -2086,7 +2125,7 @@ private fun AutoThinkingHeader(
                 Spacer(Modifier.width(8.dp))
             }
             Text(
-                // 运行中回显实时阶段，结束后显示“深度思考”
+                // 运行中只显示「思考中」，结束后显示「深度思考」
                 status ?: "深度思考",
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -2159,6 +2198,8 @@ private fun AutoLiveAssistantCard(
     nodes: List<AgentExecutionNode>,
     tools: List<AgentToolExecution>,
     clarifications: List<AgentClarification> = emptyList(),
+    thinkingExpanded: Boolean = false,
+    onToggleThinkingExpanded: () -> Unit = {},
     error: String = "",
     canRecover: Boolean = false,
     endedByUser: Boolean = false,
@@ -2181,7 +2222,9 @@ private fun AutoLiveAssistantCard(
                 status = if (endedByUser) "任务完成" else status,
                 nodes = nodes,
                 tools = tools,
-                clarifications = clarifications
+                clarifications = clarifications,
+                expanded = thinkingExpanded,
+                onToggleExpanded = onToggleThinkingExpanded
             )
             Spacer(Modifier.height(8.dp))
             if (endedByUser) {
@@ -2212,6 +2255,70 @@ private fun AutoLiveAssistantCard(
             }
         }
     }
+}
+
+/**
+ * 助手回复的 token 消耗与缓存命中率。
+ *
+ * 与普通聊天使用同一套 [CacheRateCalculator] 口径；没有可用统计时不占位。
+ */
+@Composable
+private fun AgentUsageLine(
+    message: AgentMessage,
+    modifier: Modifier = Modifier
+) {
+    val promptKnown = message.promptTokens >= 0
+    val hasStats = message.promptTokens > 0 || message.completionTokens > 0 ||
+        message.cachedTokens > 0
+    if (!hasStats) return
+    val tokens = (if (promptKnown) message.promptTokens else 0) + message.completionTokens
+    Text(
+        buildString {
+            append(
+                "消耗 $tokens tokens（输入 ${
+                    if (promptKnown) message.promptTokens else "未知"
+                } / 输出 ${message.completionTokens}）"
+            )
+            val rate = CacheRateCalculator.of(message.promptTokens, message.cachedTokens)
+            append(" · ").append(
+                rate.describe(message.promptTokens, message.cachedTokens)
+            )
+        },
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = modifier.fillMaxWidth()
+    )
+}
+
+/** 查看某条 Agent 回复提交给模型的完整输入；内容较长时可滚动、可选中复制 */
+@Composable
+private fun AgentPromptLogDialog(
+    content: String,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("提交日志") },
+        text = {
+            SelectionContainer {
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 420.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    Text(
+                        content.ifBlank { "本次回复没有记录提交日志" },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("关闭") }
+        }
+    )
 }
 
 private fun nodeStatusMark(status: String): String = when (status) {
