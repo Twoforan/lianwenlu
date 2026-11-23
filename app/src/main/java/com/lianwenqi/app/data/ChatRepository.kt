@@ -129,6 +129,10 @@ class ChatRepository(private val db: AppDatabase) : ChatGateway {
     /** 编辑已有消息的正文（超长在前面的输入校验里已拦下，这里不做截断） */
     suspend fun updateMessageContent(id: Long, content: String) = chatDao.updateContent(id, content)
 
+    /** 编辑后重发：同步更新隐藏的附加提示词，避免本轮上下文（本章梗概等）丢失 */
+    suspend fun updateMessagePromptExtra(id: Long, promptExtra: String) =
+        chatDao.updatePromptExtra(id, promptExtra)
+
     /** 设置某条回答正文的折叠状态（收起后再次进入会话仍保持） */
     suspend fun setContentCollapsed(id: Long, collapsed: Boolean) =
         chatDao.updateContentCollapsed(id, collapsed)

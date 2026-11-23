@@ -43,8 +43,10 @@ import com.lianwenqi.app.agent.tool.AgentToolRegistry
 import com.lianwenqi.app.agent.write.AgentWriteConfirmationGate
 import com.lianwenqi.app.agent.write.AgentWriteExecutionService
 import com.lianwenqi.app.ai.ChatTurn
+import com.lianwenqi.app.data.AttachmentStore
 import com.lianwenqi.app.data.entity.ChatRole
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -52,6 +54,9 @@ import kotlinx.serialization.json.put
 
 /** 注入 Agent 上下文的历史对话字符上限 */
 private const val MAX_HISTORY_CHARS = 12_000
+
+/** 注入执行上下文的任务附件字符上限 */
+private const val MAX_ATTACHMENT_CHARS = 20_000
 
 /** 自动上下文压缩在工具记录里的名称与展示名 */
 private const val CONTEXT_COMPRESS_TOOL = "context_compress"
@@ -109,7 +114,9 @@ class AgentExecutionEngine(
     private val leases: AgentExecutionLeaseRepository? = null,
     private val modelRequests: AgentModelRequestRepository? = null,
     /** 上下文自动压缩；为空表示不启用 */
-    private val contextCompressor: AgentContextCompressor? = null
+    private val contextCompressor: AgentContextCompressor? = null,
+    /** 任务附件（图片 / 文件）读取；为空表示本次执行不注入附件 */
+    private val attachmentStore: AttachmentStore? = null
 ) {
 
     suspend fun execute(
@@ -333,6 +340,9 @@ class AgentExecutionEngine(
         val historyBlock = runCatching {
             buildConversationHistory(taskId, task.sessionId, truncate = !autoMode)
         }.getOrDefault("")
+        // 任务附件：只在规划阶段可见是不够的，执行（含 AUTO 与恢复）也必须拿到正文与图片
+        val attachmentContext = runCatching { taskAttachmentContext(taskId) }
+            .getOrDefault(TaskAttachmentContext())
 
         try {
             val referenceContext = assembleReferenceContext(taskId, sessionId, unlimited = autoMode)
@@ -373,6 +383,10 @@ class AgentExecutionEngine(
                         if (isNotEmpty()) appendLine()
                         append("【历史对话】\n").append(historyBlock)
                     }
+                    if (attachmentContext.text.isNotBlank()) {
+                        if (isNotEmpty()) appendLine()
+                        append("【任务附件】\n").append(attachmentContext.text)
+                    }
                     if (clarificationBlock.isNotBlank()) {
                         if (isNotEmpty()) appendLine()
                         append("【用户补充信息】\n").append(clarificationBlock)
@@ -408,7 +422,9 @@ class AgentExecutionEngine(
                             toolResults = toolResults,
                             authorizedContext = authorizedBlock
                         )
-                    }
+                    },
+                    // 用户上传的图片随执行请求直传；文本附件已并入【任务附件】
+                    images = attachmentContext.imageDataUrls
                 )
 
                 while (finalText == null) {
@@ -1365,6 +1381,42 @@ class AgentExecutionEngine(
         }
         return result.takeIf { it.size == steps.size }
     }
+
+    /** 任务附件上下文：文本附件正文与图片 data URL */
+    private data class TaskAttachmentContext(
+        val text: String = "",
+        val imageDataUrls: List<String> = emptyList()
+    )
+
+    /**
+     * 读取任务用户消息中的附件。
+     *
+     * 附件在创建任务时只落库清单（本地路径），这里按任务的最后一条用户消息还原，
+     * 让 AUTO 模式、计划确认后的执行阶段与后台恢复执行都能拿到附件正文与图片，
+     * 而不是只有规划阶段能看到。
+     */
+    private suspend fun taskAttachmentContext(taskId: Long): TaskAttachmentContext =
+        withContext(Dispatchers.IO) {
+            val store = attachmentStore ?: return@withContext TaskAttachmentContext()
+            val message = runCatching { tasks.lastUserMessage(taskId) }.getOrNull()
+                ?: return@withContext TaskAttachmentContext()
+            val attachments = runCatching { store.decode(message.attachments) }
+                .getOrDefault(emptyList())
+            if (attachments.isEmpty()) return@withContext TaskAttachmentContext()
+            val text = attachments
+                .filter { it.type != "image" }
+                .mapNotNull { attachment ->
+                    store.textContent(attachment.path)
+                        ?.takeIf { it.isNotBlank() }
+                        ?.let { "【附件：${attachment.name}】\n$it" }
+                }
+                .joinToString("\n\n")
+                .take(MAX_ATTACHMENT_CHARS)
+            val images = attachments
+                .filter { it.type == "image" }
+                .mapNotNull { store.imageDataUrl(it.path) }
+            TaskAttachmentContext(text = text, imageDataUrls = images)
+        }
 
     /**
      * Agent 会话是连续的：把本会话此前轮次的问答注入当前任务上下文。

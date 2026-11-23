@@ -49,6 +49,7 @@ import com.lianwenqi.app.ai.LocalModelStore
 import com.lianwenqi.app.ai.MemoryEmbeddingGateway
 import com.lianwenqi.app.ai.RemoteEmbeddingGateway
 import com.lianwenqi.app.data.AppDatabase
+import com.lianwenqi.app.data.AttachmentStore
 import com.lianwenqi.app.data.BackupRepository
 import com.lianwenqi.app.data.BookRepository
 import com.lianwenqi.app.data.ChatRepository
@@ -433,7 +434,8 @@ class AppContainer(val app: Application) {
         writeGate = agentWriteConfirmationGate,
         leases = agentExecutionLeaseRepository,
         modelRequests = agentModelRequestRepository,
-        contextCompressor = agentContextCompressor
+        contextCompressor = agentContextCompressor,
+        attachmentStore = AttachmentStore(context)
     )
 
     /** F7：后台执行生命周期编排与用户控制入口（使用 lazy 避免容器初始化顺序问题） */

@@ -533,6 +533,10 @@ interface ChatDao {
     @Query("UPDATE chat_message SET content = :content WHERE id = :id")
     suspend fun updateContent(id: Long, content: String)
 
+    /** 编辑后重发：同步更新隐藏的附加提示词（本章梗概 / 新参考资料 / 记忆检索片段） */
+    @Query("UPDATE chat_message SET promptExtra = :extra WHERE id = :id")
+    suspend fun updatePromptExtra(id: Long, extra: String)
+
     @Query("UPDATE chat_message SET active = 0 WHERE replyToId = :replyToId")
     suspend fun deactivateVariants(replyToId: Long)
 

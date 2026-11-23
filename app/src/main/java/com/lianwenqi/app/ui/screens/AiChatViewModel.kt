@@ -3314,11 +3314,41 @@ class AiChatViewModel(
                             !(it.role == ChatRole.ASSISTANT && it.replyToId == editingId)
                     }
                     .map { it.id }
+                // 编辑后重发：这条消息会被排除出历史，附加上下文只能从它自身读取，
+                // 必须按编辑后的提示词重算并落库；否则「＋本章梗概」、本轮新增参考资料
+                // 与记忆检索片段会在编辑后悄悄消失。
+                val prefix = prepareSessionPrefix(sid)
+                val memory = memoryReferenceForText(text, prefix.sessionPrefix)
+                if (memory.freshKeys.isNotEmpty()) {
+                    val sp = prefix.sessionPrefix
+                    chatRepository.updateSessionPrefix(
+                        sid, sp.copy(autoMemoryKeys = sp.autoMemoryKeys + memory.freshKeys).encode()
+                    )
+                }
+                val memoryRef = memory.text
+                // 生成轮次本身必然携带本章梗概（生成路径以临时 SYSTEM 块提交），
+                // 编辑后改成普通发送时按原章节补回，不受「＋本章梗概」开关影响
+                val summaryBlock = chapterBlockSuffix(
+                    chapterId = target.chapterId.takeIf { it > 0L },
+                    always = generationKindOf(target.content) != null
+                )
+                val extra = listOf(prefix.newReference, summaryBlock, memoryRef, prefix.autoOutlineMaterial)
+                    .filter { it.isNotBlank() }
+                    .joinToString("\n\n")
                 chatRepository.updateMessageContent(editingId, text)
+                chatRepository.updateMessagePromptExtra(editingId, extra)
                 if (overrideText == null) input.value = ""
                 val ok = runGeneration(
                     sid, modelId, systemPrompt,
-                    replyToUserId = editingId, historyEndId = editingId, variantIndex = next
+                    replyToUserId = editingId, historyEndId = editingId, variantIndex = next,
+                    prefix = prefix,
+                    logContext = PromptLogContext(
+                        outlines = prefix.outlineEntries.map { PromptLogNode(outlineLogTitle(it.text), it.text) },
+                        context = prefix.contextLog,
+                        summary = summaryBlock,
+                        memory = memoryRef,
+                        autoOutline = prefix.autoOutlineMaterial
+                    )
                 )
                 if (ok) chatRepository.deleteMessagesByIds(staleIds)
                 return@launchGenerating
@@ -4188,11 +4218,19 @@ class AiChatViewModel(
     /**
      * 「＋本章梗概」：勾选时随消息发送但不在气泡显示的附加提示词（含章节名与梗概）。
      * 与 content 一起落库，重建历史时拼回，避免每换一章就改写缓存前缀。
+     *
+     * [chapterId] 默认取当前编辑章节；编辑历史消息后重发时传该消息所属章节，
+     * 避免把「当前打开的另一章」的梗概带进去。
+     * [always] 供生成轮次使用：生成正文 / 梗概本身必然携带本章梗概，
+     * 编辑后改成普通发送时也要按原章节补回，不受「＋本章梗概」开关影响。
      */
-    private suspend fun chapterBlockSuffix(): String {
-        if (!currentSummaryOn.value) return ""
-        val chapterId = fixedChapterId ?: return ""
-        val ch = bookRepository.getChapter(chapterId) ?: return ""
+    private suspend fun chapterBlockSuffix(
+        chapterId: Long? = fixedChapterId,
+        always: Boolean = false
+    ): String {
+        if (!always && !currentSummaryOn.value) return ""
+        val id = chapterId ?: return ""
+        val ch = bookRepository.getChapter(id) ?: return ""
         return buildString {
             append("【本章】").append(ch.title)
             if (ch.summary.isNotBlank()) append('\n').append("梗概：").append(ch.summary)
