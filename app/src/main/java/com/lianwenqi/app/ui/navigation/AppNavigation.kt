@@ -1,22 +1,41 @@
 package com.lianwenqi.app.ui.navigation
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -24,6 +43,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.lianwenqi.app.appContainer
 import com.lianwenqi.app.ui.screens.AiChatScreen
 import com.lianwenqi.app.ui.screens.AiToolsScreen
 import com.lianwenqi.app.ui.screens.BookDetailScreen
@@ -295,6 +315,8 @@ private fun MainShell(rootNav: NavHostController) {
     val tabNav = rememberNavController()
     val backStackEntry by tabNav.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route
+    val context = LocalContext.current
+    val night by context.appContainer.prefs.nightMode.collectAsState(initial = false)
 
     // 输入法弹出时隐藏底部导航栏，避免它占位导致输入框与键盘之间出现大块空白
     val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
@@ -304,22 +326,13 @@ private fun MainShell(rootNav: NavHostController) {
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         bottomBar = {
             if (!imeVisible) {
-                NavigationBar {
-                    tabs.forEach { tab ->
-                        NavigationBarItem(
-                            selected = currentRoute == tab.route,
-                            onClick = {
-                                if (currentRoute != tab.route) {
-                                    tabNav.navigate(tab.route) {
-                                        popUpTo(tabNav.graph.startDestinationId) { saveState = true }
-                                        launchSingleTop = true
-                                        restoreState = true
-                                    }
-                                }
-                            },
-                            icon = { Icon(tab.icon, contentDescription = tab.label) },
-                            label = { Text(tab.label) }
-                        )
+                ShelfBottomBar(currentRoute = currentRoute, night = night) { route ->
+                    if (currentRoute != route) {
+                        tabNav.navigate(route) {
+                            popUpTo(tabNav.graph.startDestinationId) { saveState = true }
+                            launchSingleTop = true
+                            restoreState = true
+                        }
                     }
                 }
             }
@@ -352,6 +365,69 @@ private fun MainShell(rootNav: NavHostController) {
                     onOpenManual = { rootNav.navigate(Routes.MANUAL) },
                     onOpenUpdate = { rootNav.navigate(Routes.UPDATE) },
                     onOpenCompression = { rootNav.navigate(Routes.COMPRESSION_SETTINGS) }
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 底部导航：按参考稿实现 75dp 高、淡紫底、选中项胶囊高亮、半粗标签。
+ * 夜间模式使用对应的深色底与文字色，避免浅色底刺眼。
+ */
+@Composable
+private fun ShelfBottomBar(
+    currentRoute: String?,
+    night: Boolean,
+    onSelect: (String) -> Unit
+) {
+    val background = if (night) Color(0xFF211F2A) else Color(0xFFF5EFF8)
+    val selectedPill = if (night) Color(0xFF352F48) else Color(0xFFE9E1F6)
+    val selectedText = if (night) Color(0xFFE9E5F2) else Color(0xFF21182B)
+    val normalText = if (night) Color(0xFFB7B2C1) else Color(0xFF4C4852)
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(background)
+            .windowInsetsPadding(WindowInsets.navigationBars)
+            .height(75.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceEvenly
+    ) {
+        tabs.forEach { tab ->
+            val selected = currentRoute == tab.route
+            Column(
+                modifier = Modifier
+                    .width(90.dp)
+                    .clip(RoundedCornerShape(18.dp))
+                    .clickable { onSelect(tab.route) }
+                    .padding(vertical = 4.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(22.dp))
+                        .background(if (selected) selectedPill else Color.Transparent)
+                        .padding(
+                            horizontal = if (selected) 24.dp else 12.dp,
+                            vertical = 3.dp
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        tab.icon,
+                        contentDescription = tab.label,
+                        tint = if (selected) selectedText else normalText,
+                        modifier = Modifier.size(23.dp)
+                    )
+                }
+                Text(
+                    tab.label,
+                    color = if (selected) selectedText else normalText,
+                    fontSize = 12.sp,
+                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
                 )
             }
         }

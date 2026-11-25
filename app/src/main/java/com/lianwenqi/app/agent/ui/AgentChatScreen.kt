@@ -32,6 +32,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
@@ -92,8 +93,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -108,12 +107,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.PathParser
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
@@ -121,6 +122,7 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import com.lianwenqi.app.agent.data.entity.AgentMessage
@@ -284,48 +286,62 @@ fun AgentChatScreen(
     }
 
     val session = currentSession
+    // 任务标题折叠后变成可拖动的悬浮圆球（位置按像素记录，随会话重置）
+    var headerExpanded by remember(session?.id) { mutableStateOf(true) }
+    var bubbleOffset by remember(session?.id) { mutableStateOf<Offset?>(null) }
+    var rootSize by remember { mutableStateOf(IntSize.Zero) }
     val selectedBookId = session?.bookId ?: filterBookId
     val selectedBookTitle = books.firstOrNull { it.id == selectedBookId }?.title
     val modelSelected = modelId > 0 && models.any { it.id == modelId }
     val executingCurrent = executingTaskId != null && executingTaskId == currentTask?.id
 
-    Box(Modifier.fillMaxSize()) {
+    Box(Modifier.fillMaxSize().onSizeChanged { rootSize = it }) {
     Scaffold(
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
-            TopAppBar(
-                // 全权接管模式用淡紫色顶栏区分，开关关闭即回到普通 AI 聊天
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = Color(0xFFEDE7F6),
-                    titleContentColor = Color(0xFF1D1B20),
-                    actionIconContentColor = Color(0xFF1D1B20)
-                ),
-                title = {
+            // 紧凑顶栏：44dp 高，保留全部入口，比默认 TopAppBar 更省纵向空间
+            Surface(color = Color(0xFFEDE7F6), contentColor = Color(0xFF1D1B20)) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .statusBarsPadding()
+                        .height(44.dp)
+                        .padding(start = 16.dp, end = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "自动化",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.weight(1f)
+                    )
                     // 模型统一在右上角「设置」里配置，标题栏不再放模型选择
-                    Text("自动化")
-                },
-                actions = {
-                    IconButton(onClick = { vm.newSession() }) {
-                        Icon(Icons.Filled.Add, contentDescription = "新建 Agent 会话")
+                    IconButton(onClick = { vm.newSession() }, modifier = Modifier.size(36.dp)) {
+                        Icon(
+                            Icons.Filled.Add,
+                            contentDescription = "新建 Agent 会话",
+                            modifier = Modifier.size(20.dp)
+                        )
                     }
-                    TextButton(onClick = { showAgentSettings = true }) { Text("设置") }
-                    TextButton(onClick = { showHistory = true }) { Text("历史") }
+                    CompactTextAction("设置") { showAgentSettings = true }
+                    CompactTextAction("历史") { showHistory = true }
                     // 机器人图标与开关固定在最右侧
                     Icon(
                         Icons.Filled.SmartToy,
                         contentDescription = "自动化",
-                        modifier = Modifier.size(20.dp),
+                        modifier = Modifier.size(18.dp),
                         tint = Color(0xFF5B4B8A)
                     )
+                    Spacer(Modifier.width(4.dp))
                     Switch(
                         checked = true,
                         onCheckedChange = { on ->
                             if (!on) onModeChange(AgentChatMode.NORMAL)
                         },
-                        modifier = Modifier.scale(0.75f)
+                        modifier = Modifier.scale(0.7f)
                     )
                 }
-            )
+            }
         }
     ) { padding ->
         Column(
@@ -398,19 +414,22 @@ fun AgentChatScreen(
                     modifier = Modifier.weight(1f)
                 )
             } else {
-                AgentSessionHeader(
-                    session = session,
-                    // 节点级执行状态不再作为对话消息展示，计数同步剔除
-                    messageCount = messages.count { message ->
-                        !(message.kind == AgentMessageKind.NOTICE &&
-                            isExecutionLifecycleNotice(message.content)) &&
-                            !(message.kind == AgentMessageKind.USER_INPUT &&
-                                message.content.startsWith(CLARIFICATION_MESSAGE_PREFIX))
-                    },
-                    onRename = { renaming = session },
-                    onOpenReferences = { showReferences = true }
-                )
-                HorizontalDivider()
+                if (headerExpanded) {
+                    AgentSessionHeader(
+                        session = session,
+                        // 节点级执行状态不再作为对话消息展示，计数同步剔除
+                        messageCount = messages.count { message ->
+                            !(message.kind == AgentMessageKind.NOTICE &&
+                                isExecutionLifecycleNotice(message.content)) &&
+                                !(message.kind == AgentMessageKind.USER_INPUT &&
+                                    message.content.startsWith(CLARIFICATION_MESSAGE_PREFIX))
+                        },
+                        onRename = { renaming = session },
+                        onOpenReferences = { showReferences = true },
+                        onCollapse = { headerExpanded = false }
+                    )
+                    HorizontalDivider()
+                }
 
                 val task = currentTask
                 // 同一提问的多个版本：在消息操作栏用 < n/m > 切换，不再单独弹窗展示分支
@@ -1136,6 +1155,55 @@ fun AgentChatScreen(
             onSubmit = { vm.answerClarification(it) }
         )
     }
+
+    // 任务标题收起后的悬浮圆球：点击展开，按住可拖到任意位置
+    if (session != null && !headerExpanded) {
+        val bubblePx = with(LocalDensity.current) { 44.dp.toPx() }
+        val marginPx = with(LocalDensity.current) { 12.dp.toPx() }
+        val defaultTopPx = with(LocalDensity.current) { 124.dp.toPx() }
+        LaunchedEffect(rootSize) {
+            if (bubbleOffset == null && rootSize.width > 0) {
+                bubbleOffset = Offset(
+                    (rootSize.width - bubblePx - marginPx).coerceAtLeast(0f),
+                    defaultTopPx.coerceAtMost((rootSize.height - bubblePx).coerceAtLeast(0f))
+                )
+            }
+        }
+        val pos = bubbleOffset ?: Offset.Zero
+        Box(
+            Modifier
+                .offset { IntOffset(pos.x.roundToInt(), pos.y.roundToInt()) }
+                .size(44.dp)
+                .shadow(6.dp, CircleShape)
+                .clip(CircleShape)
+                .background(Color(0xFF5B4B8A))
+                .pointerInput(rootSize) {
+                    detectDragGestures { change, drag ->
+                        change.consume()
+                        val current = bubbleOffset ?: Offset.Zero
+                        bubbleOffset = Offset(
+                            (current.x + drag.x).coerceIn(
+                                0f,
+                                (rootSize.width - bubblePx).coerceAtLeast(0f)
+                            ),
+                            (current.y + drag.y).coerceIn(
+                                0f,
+                                (rootSize.height - bubblePx).coerceAtLeast(0f)
+                            )
+                        )
+                    }
+                }
+                .clickable { headerExpanded = true },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                Icons.Filled.KeyboardArrowDown,
+                contentDescription = "展开任务标题",
+                tint = Color.White,
+                modifier = Modifier.size(24.dp)
+            )
+        }
+    }
     }
 
     if (showLinkDialog) {
@@ -1588,9 +1656,15 @@ private fun AgentSessionHeader(
     session: AgentSession,
     messageCount: Int,
     onRename: () -> Unit,
+    onCollapse: () -> Unit,
     onOpenReferences: () -> Unit = {}
 ) {
-    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
+    // 展开态：任务标题 + 已选资料 / 消息数 / 重命名；收起后由悬浮圆球接管
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp)
+    ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 session.title,
@@ -1611,10 +1685,33 @@ private fun AgentSessionHeader(
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            IconButton(onClick = onRename) {
-                Icon(Icons.Filled.Edit, contentDescription = "修改会话标题")
+            IconButton(onClick = onRename, modifier = Modifier.size(36.dp)) {
+                Icon(
+                    Icons.Filled.Edit,
+                    contentDescription = "修改会话标题",
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+            IconButton(onClick = onCollapse, modifier = Modifier.size(36.dp)) {
+                Icon(
+                    Icons.Filled.KeyboardArrowUp,
+                    contentDescription = "收起任务标题",
+                    modifier = Modifier.size(20.dp)
+                )
             }
         }
+    }
+}
+
+/** 顶栏里的紧凑文字按钮：比默认 TextButton 更矮，适配 44dp 顶栏 */
+@Composable
+private fun CompactTextAction(text: String, onClick: () -> Unit) {
+    TextButton(
+        onClick = onClick,
+        modifier = Modifier.height(32.dp),
+        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+    ) {
+        Text(text, style = MaterialTheme.typography.labelLarge)
     }
 }
 

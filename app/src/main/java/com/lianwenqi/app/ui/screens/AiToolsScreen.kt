@@ -84,6 +84,7 @@ import com.lianwenqi.app.data.style.StyleProfileRow
 import com.lianwenqi.app.data.style.StyleProfileSummaryReader
 import com.lianwenqi.app.ui.appViewModel
 import com.lianwenqi.app.ui.components.BookFormResult
+import com.lianwenqi.app.ui.theme.ShelfWhite
 import com.lianwenqi.app.util.AI_CHAPTER_TOOL_DEFINITION_TEXT
 import com.lianwenqi.app.util.AI_CHAPTER_TOOL_PROMPT
 import com.lianwenqi.app.util.AI_OUTLINE_TOOL_DEFINITION_TEXT
@@ -549,7 +550,7 @@ fun AiToolsScreen(onBack: () -> Unit) {
 }
 
 // ── 生成设置页配色（对齐设计稿：奶油底 + 淡紫点缀） ──────────────────────────
-private val GenBg = Color(0xFFFAF8F5)
+private val GenBg = ShelfWhite
 private val GenCardBg = Color(0xFFFFFEFD)
 private val GenInk = Color(0xFF29275F)
 private val GenMuted = Color(0xFF8587B0)

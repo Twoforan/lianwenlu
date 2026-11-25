@@ -6,9 +6,28 @@ import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.automirrored.outlined.Chat
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Error
+import androidx.compose.material.icons.outlined.Article
+import androidx.compose.material.icons.outlined.Bolt
+import androidx.compose.material.icons.outlined.CloudDownload
+import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.Dns
+import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.Key
+import androidx.compose.material.icons.outlined.NetworkCheck
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -23,7 +42,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -74,6 +95,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lianwenqi.app.AppContainer
@@ -85,7 +108,9 @@ import com.lianwenqi.app.ai.RemoteModelInfo
 import com.lianwenqi.app.data.entity.AiModel
 import com.lianwenqi.app.data.entity.ApiType
 import com.lianwenqi.app.data.entity.Prompt
+import com.lianwenqi.app.data.entity.PromptType
 import com.lianwenqi.app.data.entity.Provider
+import com.lianwenqi.app.data.entity.ProviderKey
 import com.lianwenqi.app.data.BackupPayload
 import com.lianwenqi.app.data.BackupSections
 import com.lianwenqi.app.data.RestoreResult
@@ -106,10 +131,16 @@ class SettingsViewModel(private val container: AppContainer) : ViewModel() {
 
     val providers: StateFlow<List<Provider>> =
         configRepository.observeProviders().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    val providerKeys: StateFlow<List<ProviderKey>> =
+        configRepository.observeProviderKeys().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     val models: StateFlow<List<AiModel>> =
         configRepository.observeModels().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     val prompts: StateFlow<List<Prompt>> =
         configRepository.observePrompts().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    /** 模型配置页「从提示词库选择」只看模型提示词，不会混入快捷提示词 */
+    val modelPrompts: StateFlow<List<Prompt>> =
+        configRepository.observePrompts(PromptType.MODEL)
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     val nightMode: StateFlow<Boolean> =
         prefs.nightMode.stateIn(viewModelScope, SharingStarted.Eagerly, false)
     val activeModelId: StateFlow<Long> =
@@ -118,14 +149,30 @@ class SettingsViewModel(private val container: AppContainer) : ViewModel() {
     fun saveProvider(provider: Provider) = viewModelScope.launch { configRepository.saveProvider(provider) }
     fun deleteProvider(id: Long) = viewModelScope.launch { configRepository.deleteProvider(id) }
 
-    fun fetchModels(provider: Provider, onResult: (List<RemoteModelInfo>, String?) -> Unit) =
+    /** 新建供应商，可选同时创建第一个 API 密钥 */
+    fun createProvider(provider: Provider, firstKey: ProviderKey?) = viewModelScope.launch {
+        val id = configRepository.saveProvider(provider)
+        if (firstKey != null && firstKey.apiKey.isNotBlank()) {
+            runCatching { configRepository.saveProviderKey(firstKey.copy(providerId = id)) }
+        }
+    }
+
+    /** 保存密钥；[onResult] 回传错误文案（null 表示成功） */
+    fun saveProviderKey(key: ProviderKey, onResult: (String?) -> Unit) = viewModelScope.launch {
+        onResult(runCatching { configRepository.saveProviderKey(key) }.exceptionOrNull()
+            ?.let { (it as? IllegalArgumentException)?.message ?: it.message ?: "保存失败" })
+    }
+
+    fun deleteProviderKey(id: Long) = viewModelScope.launch { configRepository.deleteProviderKey(id) }
+
+    fun fetchModels(provider: Provider, key: ProviderKey, onResult: (List<RemoteModelInfo>, String?) -> Unit) =
         viewModelScope.launch {
             // 兜底再包一层：即使底层意外抛出（如非法配置），也只把错误交给 UI，绝不让异常逃出协程崩 App
-            runCatching { configRepository.fetchRemoteModelInfos(provider) }
+            runCatching { configRepository.fetchRemoteModelInfos(provider, key) }
                 .getOrElse { Result.failure(it) }
                 .onSuccess { infos ->
-                    // 供应商暴露了上下文窗口时，回填到该供应商下仍为「未知」的模型
-                    runCatching { configRepository.syncModelContextWindows(provider.id, infos) }
+                    // 只回填当前密钥下仍为「未知」的模型，绝不跨密钥覆盖
+                    runCatching { configRepository.syncModelContextWindows(key.id, infos) }
                     onResult(infos, null)
                 }
                 // 失败时展示按类型区分后的提示（未填 key / 非法字符 / 鉴权 / 超时 / 服务器错误…）
@@ -134,16 +181,27 @@ class SettingsViewModel(private val container: AppContainer) : ViewModel() {
 
     /**
      * 真实对话测试：`/models` 能通不代表 `/chat/completions` 能通。
-     * 用该供应商下的模型真实发一次最小对话，并回传实际请求地址，便于定位 404。
+     * 使用该密钥的真实 API Key 与密钥下的模型发一次最小对话，并回传实际请求地址。
      */
-    fun testChat(provider: Provider, model: AiModel?, onResult: (Boolean, String) -> Unit) =
+    fun testChat(provider: Provider, key: ProviderKey, model: AiModel?, onResult: (Boolean, String) -> Unit) =
         viewModelScope.launch {
             if (model == null) {
-                onResult(false, "该供应商下还没有模型：请先点「添加模型」填写中转站返回的模型名（如 gemini-2.5-pro）")
+                onResult(false, "该密钥下还没有模型：请先点「读取模型」添加模型")
                 return@launch
             }
             val url = container.aiClient.chatUrl(provider.baseUrl, provider.apiType)
-            val result = runCatching { container.aiClient.testChat(provider, model.name) }
+            val endpoint = com.lianwenqi.app.ai.ModelEndpoint(
+                provider = provider,
+                apiKey = key.apiKey,
+                blockedReason = when {
+                    !key.enabled -> "密钥「${key.name}」已禁用，请先启用后再测试"
+                    key.apiKey.isBlank() -> "密钥「${key.name}」未填写 API Key，请先补填"
+                    else -> null
+                },
+                modelName = model.name,
+                apiType = provider.apiType
+            )
+            val result = runCatching { container.aiClient.testChat(endpoint) }
                 .getOrElse { AiResult.fail((it as? AiException)?.error ?: AiError.fromThrowable(it)) }
             val message = if (result.success) {
                 val reply = result.content.trim().replace(Regex("\\s+"), " ").take(40)
@@ -155,6 +213,10 @@ class SettingsViewModel(private val container: AppContainer) : ViewModel() {
         }
 
     fun saveModel(model: AiModel) = viewModelScope.launch { configRepository.saveModel(model) }
+
+    /** 远程多选批量添加模型 */
+    fun saveModels(models: List<AiModel>) = viewModelScope.launch { configRepository.saveModels(models) }
+
     fun deleteModel(id: Long) = viewModelScope.launch { configRepository.deleteModel(id) }
     fun setActiveModel(id: Long) = viewModelScope.launch { prefs.setActiveModelId(id) }
 
@@ -223,8 +285,10 @@ fun SettingsScreen(
 ) {
     val vm = appViewModel { SettingsViewModel(it) }
     val providers by vm.providers.collectAsState()
+    val providerKeys by vm.providerKeys.collectAsState()
     val models by vm.models.collectAsState()
     val prompts by vm.prompts.collectAsState()
+    val modelPrompts by vm.modelPrompts.collectAsState()
     val activeModelId by vm.activeModelId.collectAsState()
 
     // 默认停在「通用」页：点击底部「设置」以及从 AI 工具 / 前缀词管理 / 检查更新等子页面返回时，
@@ -232,10 +296,17 @@ fun SettingsScreen(
     var tab by remember { mutableStateOf(2) }
     var editProvider by remember { mutableStateOf<Provider?>(null) }
     var showProviderDialog by remember { mutableStateOf(false) }
-    var addModelFor by remember { mutableStateOf<Provider?>(null) }
+    // 密钥弹窗：addKeyFor 非空表示「添加」；editKey 非空表示「编辑」
+    var addKeyFor by remember { mutableStateOf<Provider?>(null) }
+    var editKey by remember { mutableStateOf<ProviderKey?>(null) }
+    var deleteKeyTarget by remember { mutableStateOf<ProviderKey?>(null) }
+    var addModelFor by remember { mutableStateOf<Pair<Provider, ProviderKey>?>(null) }
     var editModel by remember { mutableStateOf<AiModel?>(null) }
     var editPrompt by remember { mutableStateOf<Prompt?>(null) }
     var showPromptDialog by remember { mutableStateOf(false) }
+    /** 新建提示词时使用的类型（由提示词库当前分类决定） */
+    var newPromptType by remember { mutableStateOf(PromptType.QUICK) }
+    var deletePromptTarget by remember { mutableStateOf<Prompt?>(null) }
 
     // 数据备份 / 恢复：showBackupMenu 为备份多选弹窗；busyText 非空时展示不可取消的进度弹窗
     val context = LocalContext.current
@@ -325,7 +396,18 @@ fun SettingsScreen(
     // 用 Box 承载页面与弹层：InputDialog 是组合内覆盖层，需叠在设置页之上才能拿到输入法 inset
     Box(Modifier.fillMaxSize()) {
         Scaffold(
-            topBar = { TopAppBar(title = { Text("设置") }) }
+            topBar = {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .windowInsetsPadding(WindowInsets.statusBars)
+                        .height(56.dp)
+                        .padding(horizontal = 20.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("设置", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
         ) { padding ->
             Column(Modifier.fillMaxSize().padding(padding)) {
                 TabRow(selectedTabIndex = tab) {
@@ -337,23 +419,28 @@ fun SettingsScreen(
                 when (tab) {
                     0 -> ProvidersTab(
                         providers = providers,
+                        providerKeys = providerKeys,
                         models = models,
                         activeModelId = activeModelId,
                         onAddProvider = { editProvider = null; showProviderDialog = true },
                         onEditProvider = { editProvider = it; showProviderDialog = true },
                         onDeleteProvider = { vm.deleteProvider(it.id) },
-                        onAddModel = { addModelFor = it },
+                        onAddKey = { addKeyFor = it },
+                        onEditKey = { editKey = it },
+                        onDeleteKey = { deleteKeyTarget = it },
+                        onToggleKey = { key, enabled -> vm.saveProviderKey(key.copy(enabled = enabled)) {} },
+                        onAddModel = { p, k -> addModelFor = p to k },
                         onEditModel = { editModel = it },
                         onDeleteModel = { vm.deleteModel(it.id) },
                         onSetActive = { vm.setActiveModel(it.id) },
-                        onFetchModels = { p, cb -> vm.fetchModels(p, cb) },
-                        onTestChat = { p, m, cb -> vm.testChat(p, m, cb) }
+                        onFetchModels = { p, k, cb -> vm.fetchModels(p, k, cb) },
+                        onTestChat = { p, k, m, cb -> vm.testChat(p, k, m, cb) }
                     )
                     1 -> PromptsTab(
                         prompts = prompts,
-                        onAdd = { editPrompt = null; showPromptDialog = true },
+                        onAdd = { type -> newPromptType = type; editPrompt = null; showPromptDialog = true },
                         onEdit = { editPrompt = it; showPromptDialog = true },
-                        onDelete = { vm.deletePrompt(it.id) }
+                        onDelete = { deletePromptTarget = it }
                     )
                     // 通用设置项较多（含「检查更新」等），必须可纵向滚动，否则小屏看不到底部条目
                     else -> Column(
@@ -609,22 +696,79 @@ fun SettingsScreen(
             ProviderDialog(
                 initial = editProvider,
                 onDismiss = { showProviderDialog = false },
-                onSave = { vm.saveProvider(it); showProviderDialog = false }
+                onSave = { provider, firstKey ->
+                    if (provider.id == 0L) vm.createProvider(provider, firstKey) else vm.saveProvider(provider)
+                    showProviderDialog = false
+                }
             )
         }
 
-        addModelFor?.let { provider ->
+        addKeyFor?.let { provider ->
+            KeyDialog(
+                provider = provider,
+                initial = null,
+                onDismiss = { addKeyFor = null },
+                onSave = { key, onError ->
+                    vm.saveProviderKey(key) { err ->
+                        if (err == null) addKeyFor = null else onError(err)
+                    }
+                }
+            )
+        }
+
+        editKey?.let { key ->
+            val provider = providers.firstOrNull { it.id == key.providerId }
+            if (provider != null) {
+                KeyDialog(
+                    provider = provider,
+                    initial = key,
+                    onDismiss = { editKey = null },
+                    onSave = { updated, onError ->
+                        vm.saveProviderKey(updated) { err ->
+                            if (err == null) editKey = null else onError(err)
+                        }
+                    }
+                )
+            }
+        }
+
+        deleteKeyTarget?.let { key ->
+            val count = models.count { it.providerKeyId == key.id }
+            AlertDialog(
+                onDismissRequest = { deleteKeyTarget = null },
+                title = { Text("删除 API 密钥") },
+                text = {
+                    Text(
+                        if (count > 0) "该密钥下还有 $count 个模型，删除密钥会同时删除这些模型。是否继续？"
+                        else "确定删除密钥「${key.name}」吗？"
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        vm.deleteProviderKey(key.id)
+                        deleteKeyTarget = null
+                    }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+                },
+                dismissButton = { TextButton(onClick = { deleteKeyTarget = null }) { Text("取消") } }
+            )
+        }
+
+        addModelFor?.let { (provider, key) ->
             AddModelDialog(
                 provider = provider,
+                key = key,
+                existing = models.filter { it.providerKeyId == key.id },
+                modelPrompts = modelPrompts,
                 onDismiss = { addModelFor = null },
-                onFetch = { cb -> vm.fetchModels(provider, cb) },
-                onSave = { vm.saveModel(it); addModelFor = null }
+                onFetch = { cb -> vm.fetchModels(provider, key, cb) },
+                onSaveList = { list -> vm.saveModels(list); addModelFor = null }
             )
         }
 
         editModel?.let { model ->
             ModelDetailDialog(
                 model = model,
+                modelPrompts = modelPrompts,
                 onDismiss = { editModel = null },
                 onDelete = { vm.deleteModel(model.id); editModel = null },
                 onSave = { vm.saveModel(it); editModel = null }
@@ -634,8 +778,29 @@ fun SettingsScreen(
         if (showPromptDialog) {
             PromptDialog(
                 initial = editPrompt,
+                // 编辑时用原记录的类型，保证不会因为切换分类而改类型
+                type = editPrompt?.type ?: newPromptType,
                 onDismiss = { showPromptDialog = false },
                 onSave = { vm.savePrompt(it); showPromptDialog = false }
+            )
+        }
+
+        deletePromptTarget?.let { target ->
+            AlertDialog(
+                onDismissRequest = { deletePromptTarget = null },
+                title = { Text("删除提示词") },
+                text = { Text("确定删除「${target.title}」吗？删除后不可恢复。") },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            vm.deletePrompt(target.id)
+                            deletePromptTarget = null
+                        }
+                    ) { Text("删除", color = MaterialTheme.colorScheme.error) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { deletePromptTarget = null }) { Text("取消") }
+                }
             )
         }
 
@@ -827,170 +992,348 @@ fun SettingsScreen(
 @Composable
 private fun ProvidersTab(
     providers: List<Provider>,
+    providerKeys: List<ProviderKey>,
     models: List<AiModel>,
     activeModelId: Long,
     onAddProvider: () -> Unit,
     onEditProvider: (Provider) -> Unit,
     onDeleteProvider: (Provider) -> Unit,
-    onAddModel: (Provider) -> Unit,
+    onAddKey: (Provider) -> Unit,
+    onEditKey: (ProviderKey) -> Unit,
+    onDeleteKey: (ProviderKey) -> Unit,
+    onToggleKey: (ProviderKey, Boolean) -> Unit,
+    onAddModel: (Provider, ProviderKey) -> Unit,
     onEditModel: (AiModel) -> Unit,
     onDeleteModel: (AiModel) -> Unit,
     onSetActive: (AiModel) -> Unit,
-    onFetchModels: (Provider, (List<RemoteModelInfo>, String?) -> Unit) -> Unit,
-    onTestChat: (Provider, AiModel?, (Boolean, String) -> Unit) -> Unit
+    onFetchModels: (Provider, ProviderKey, (List<RemoteModelInfo>, String?) -> Unit) -> Unit,
+    onTestChat: (Provider, ProviderKey, AiModel?, (Boolean, String) -> Unit) -> Unit
 ) {
     val context = LocalContext.current
-    // 「测试读取模型 / 测试对话」正在测试的供应商 id，与测试结果文案（key = provider id）
-    var testingId by remember { mutableStateOf<Long?>(null) }
-    var testingChatId by remember { mutableStateOf<Long?>(null) }
+    // 「测试读取 / 测试对话」正在测试的密钥 id，与测试结果文案（key = 密钥 id）
+    var testingKeyId by remember { mutableStateOf<Long?>(null) }
+    var testingChatKeyId by remember { mutableStateOf<Long?>(null) }
     val testResults = remember { mutableStateMapOf<Long, String>() }
     val testOk = remember { mutableStateMapOf<Long, Boolean>() }
+    val scheme = MaterialTheme.colorScheme
+    val activeModel = models.firstOrNull { it.id == activeModelId }
 
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp)) {
+    LazyColumn(
+        Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
         item {
-            Button(onClick = onAddProvider) {
-                Icon(Icons.Filled.Add, null, Modifier.size(18.dp))
-                Spacer(Modifier.width(4.dp))
-                Text("添加供应商")
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("模型供应商", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        if (activeModel != null) "当前使用：${activeModel.displayName}"
+                        else "共 ${providers.size} 个供应商 · ${models.size} 个模型",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = scheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                FilledTonalButton(onClick = onAddProvider, contentPadding = PaddingValues(horizontal = 14.dp)) {
+                    Icon(Icons.Filled.Add, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("添加供应商")
+                }
             }
-            Spacer(Modifier.height(8.dp))
+        }
+        if (providers.isEmpty()) {
+            item {
+                Column(
+                    Modifier.fillMaxWidth().padding(vertical = 48.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Box(
+                        Modifier.size(64.dp).clip(CircleShape).background(scheme.secondaryContainer),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Outlined.Dns, null, Modifier.size(30.dp), tint = scheme.onSecondaryContainer)
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    Text("还没有模型供应商", style = MaterialTheme.typography.titleSmall)
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "点击右上角「添加供应商」，填写接口地址与 API 密钥",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = scheme.onSurfaceVariant
+                    )
+                }
+            }
         }
         items(providers, key = { it.id }) { p ->
-            Card(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
-                Column(Modifier.padding(12.dp)) {
+            val keys = providerKeys.filter { it.providerId == p.id }
+            val providerModels = models.filter { it.providerId == p.id }
+            val orphans = providerModels.filter { m -> keys.none { it.id == m.providerKeyId } }
+            Card(
+                Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = scheme.surface),
+                border = BorderStroke(1.dp, scheme.outlineVariant)
+            ) {
+                Column(Modifier.padding(14.dp)) {
+                    // ---------- 供应商头部 ----------
                     Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            Modifier.size(42.dp).clip(RoundedCornerShape(12.dp)).background(scheme.primaryContainer),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                p.name.trim().take(1).uppercase().ifBlank { "?" },
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = scheme.onPrimaryContainer
+                            )
+                        }
+                        Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
-                            Text(p.name, fontWeight = FontWeight.SemiBold)
-                            Text(p.baseUrl, style = MaterialTheme.typography.bodySmall,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text("接口：${p.apiType.label}", style = MaterialTheme.typography.labelSmall)
+                            Text(
+                                p.name,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                "${keys.size} 个密钥 · ${providerModels.size} 个模型",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = scheme.onSurfaceVariant
+                            )
+                            Spacer(Modifier.height(3.dp))
+                            StatusPill(p.apiType.label, scheme.secondaryContainer, scheme.onSecondaryContainer)
                         }
                         IconButton(onClick = { onEditProvider(p) }) {
-                            Icon(Icons.Filled.Edit, "编辑", Modifier.size(18.dp))
+                            Icon(Icons.Outlined.Edit, "编辑", Modifier.size(20.dp), tint = scheme.onSurfaceVariant)
                         }
                         IconButton(onClick = { onDeleteProvider(p) }) {
-                            Icon(Icons.Filled.Delete, "删除", Modifier.size(18.dp))
+                            Icon(Icons.Outlined.Delete, "删除", Modifier.size(20.dp), tint = scheme.onSurfaceVariant)
                         }
                     }
-                    HorizontalDivider(Modifier.padding(vertical = 8.dp))
-                    val providerModels = models.filter { it.providerId == p.id }
-                    providerModels.forEach { m ->
-                        Row(
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        p.baseUrl,
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(scheme.surfaceVariant.copy(alpha = 0.5f))
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = scheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+
+                    // ---------- 密钥列表 ----------
+                    Spacer(Modifier.height(14.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Outlined.Key, null, Modifier.size(16.dp), tint = scheme.primary)
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            "API 密钥",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = scheme.primary,
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextButton(
+                            onClick = { onAddKey(p) },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                            modifier = Modifier.heightIn(min = 32.dp)
+                        ) {
+                            Icon(Icons.Filled.Add, null, Modifier.size(16.dp))
+                            Spacer(Modifier.width(2.dp))
+                            Text("添加密钥", style = MaterialTheme.typography.labelMedium)
+                        }
+                    }
+                    if (keys.isEmpty()) {
+                        Text(
+                            "还没有 API 密钥，请先添加密钥，再为密钥读取模型",
                             Modifier
                                 .fillMaxWidth()
-                                .clip(RoundedCornerShape(8.dp))
-                                .clickable { onEditModel(m) }
-                                .padding(vertical = 2.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(Modifier.weight(1f)) {
-                                Text(
-                                    m.displayName,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                if (m.alias.isNotBlank()) {
-                                    Text(
-                                        m.name,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                            }
-                            Text(
-                                "T=${"%.1f".format(m.temperature)}",
-                                style = MaterialTheme.typography.labelSmall
-                            )
-                            FilterChip(
-                                selected = m.id == activeModelId,
-                                onClick = { onSetActive(m) },
-                                label = { Text(if (m.id == activeModelId) "使用中" else "使用") }
-                            )
-                            IconButton(onClick = { onEditModel(m) }) {
-                                Icon(Icons.Filled.Edit, "编辑", Modifier.size(16.dp))
-                            }
-                            IconButton(onClick = { onDeleteModel(m) }) {
-                                Icon(Icons.Filled.Delete, "删除", Modifier.size(16.dp))
-                            }
-                        }
-                    }
-                    Spacer(Modifier.height(4.dp))
-                    // 三个操作均分同一行；窄屏时压缩按钮内边距，保证文字不换行
-                    val compactPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(
-                            onClick = { onAddModel(p) },
-                            modifier = Modifier.weight(1f),
-                            contentPadding = compactPadding
-                        ) {
-                            Text("添加模型", style = MaterialTheme.typography.labelMedium, maxLines = 1)
-                        }
-                        OutlinedButton(
-                            enabled = testingId != p.id,
-                            modifier = Modifier.weight(1f),
-                            contentPadding = compactPadding,
-                            onClick = {
-                                // 真实请求一次模型列表：能连上并解析成功即视为连通
-                                testingId = p.id
-                                testResults.remove(p.id)
-                                onFetchModels(p) { list, err ->
-                                    testingId = null
-                                    val ok = err == null
-                                    testOk[p.id] = ok
-                                    val hint = if (p.baseUrl.trim().trimEnd('/').endsWith("/v1")) ""
-                                    else "；可尝试在 baseUrl 后面添加 /v1 试试看"
-                                    testResults[p.id] = when {
-                                        // 直接展示错误原因（未填写 API Key / 含非法字符 / 鉴权失败 / 超时…）
-                                        err != null -> err + hint
-                                        list.isEmpty() -> "连接成功，但未读取到模型（请检查 apiKey / baseUrl）" + hint
-                                        else -> "连接成功，读取到 ${list.size} 个模型"
-                                    }
-                                    Toast.makeText(context, testResults[p.id], Toast.LENGTH_SHORT).show()
-                                }
-                            }
-                        ) {
-                            Text(
-                                if (testingId == p.id) "测试中…" else "测试读取模型",
-                                style = MaterialTheme.typography.labelMedium,
-                                maxLines = 1
-                            )
-                        }
-                        OutlinedButton(
-                            enabled = testingChatId != p.id,
-                            modifier = Modifier.weight(1f),
-                            contentPadding = compactPadding,
-                            onClick = {
-                                // 真实发一次对话：/models 能通不代表 /chat/completions 能通（404 多为此处）
-                                val model = providerModels.firstOrNull { it.id == activeModelId }
-                                    ?: providerModels.firstOrNull()
-                                testingChatId = p.id
-                                testResults.remove(p.id)
-                                onTestChat(p, model) { ok, msg ->
-                                    testingChatId = null
-                                    testOk[p.id] = ok
-                                    testResults[p.id] = msg
-                                    Toast.makeText(context, msg.lineSequence().first(), Toast.LENGTH_SHORT).show()
-                                }
-                            }
-                        ) {
-                            Text(
-                                if (testingChatId == p.id) "测试对话中…" else "测试对话",
-                                style = MaterialTheme.typography.labelMedium,
-                                maxLines = 1
-                            )
-                        }
-                    }
-                    testResults[p.id]?.let { msg ->
-                        Spacer(Modifier.height(6.dp))
-                        Text(
-                            msg,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (testOk[p.id] == true) MaterialTheme.colorScheme.primary
-                            else MaterialTheme.colorScheme.error
+                                .padding(top = 6.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(scheme.surfaceVariant.copy(alpha = 0.4f))
+                                .padding(12.dp),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = scheme.onSurfaceVariant
                         )
+                    }
+                    keys.forEach { key ->
+                        val keyModels = providerModels.filter { it.providerKeyId == key.id }
+                        Surface(
+                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                            shape = RoundedCornerShape(12.dp),
+                            color = scheme.surfaceVariant.copy(alpha = if (key.enabled) 0.45f else 0.25f)
+                        ) {
+                            Column(Modifier.padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = 10.dp)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Column(Modifier.weight(1f)) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(
+                                                key.name,
+                                                style = MaterialTheme.typography.titleSmall,
+                                                fontWeight = FontWeight.SemiBold,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f, fill = false)
+                                            )
+                                            Spacer(Modifier.width(6.dp))
+                                            if (key.enabled) {
+                                                StatusPill("启用", scheme.primaryContainer, scheme.onPrimaryContainer)
+                                            } else {
+                                                StatusPill("已禁用", scheme.errorContainer, scheme.onErrorContainer)
+                                            }
+                                        }
+                                        Spacer(Modifier.height(2.dp))
+                                        Text(
+                                            "${key.maskedKey} · ${keyModels.size} 个模型",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontFamily = FontFamily.Monospace,
+                                            color = scheme.onSurfaceVariant
+                                        )
+                                    }
+                                    Switch(
+                                        checked = key.enabled,
+                                        onCheckedChange = { onToggleKey(key, it) },
+                                        modifier = Modifier.scale(0.8f)
+                                    )
+                                    IconButton(onClick = { onEditKey(key) }, modifier = Modifier.size(36.dp)) {
+                                        Icon(Icons.Outlined.Edit, "编辑密钥", Modifier.size(18.dp), tint = scheme.onSurfaceVariant)
+                                    }
+                                    IconButton(onClick = { onDeleteKey(key) }, modifier = Modifier.size(36.dp)) {
+                                        Icon(Icons.Outlined.Delete, "删除密钥", Modifier.size(18.dp), tint = scheme.onSurfaceVariant)
+                                    }
+                                }
+                                if (keyModels.isNotEmpty()) {
+                                    Spacer(Modifier.height(6.dp))
+                                    Column(
+                                        Modifier.padding(end = 8.dp),
+                                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        keyModels.forEach { m ->
+                                            ModelRowItem(
+                                                model = m,
+                                                active = m.id == activeModelId,
+                                                onEdit = { onEditModel(m) },
+                                                onDelete = { onDeleteModel(m) },
+                                                onSetActive = { onSetActive(m) }
+                                            )
+                                        }
+                                    }
+                                }
+                                Spacer(Modifier.height(8.dp))
+                                Row(
+                                    Modifier.padding(end = 8.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    KeyActionButton(
+                                        text = "读取模型",
+                                        icon = Icons.Outlined.CloudDownload,
+                                        primary = true,
+                                        enabled = true,
+                                        modifier = Modifier.weight(1f)
+                                    ) { onAddModel(p, key) }
+                                    KeyActionButton(
+                                        text = if (testingKeyId == key.id) "测试中…" else "测试读取",
+                                        icon = Icons.Outlined.NetworkCheck,
+                                        primary = false,
+                                        enabled = testingKeyId != key.id,
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        testingKeyId = key.id
+                                        testResults.remove(key.id)
+                                        onFetchModels(p, key) { list, err ->
+                                            testingKeyId = null
+                                            testOk[key.id] = err == null
+                                            val hint = if (p.baseUrl.trim().trimEnd('/').endsWith("/v1")) ""
+                                            else "；可尝试在 baseUrl 后面添加 /v1 试试看"
+                                            testResults[key.id] = when {
+                                                err != null -> err + hint
+                                                list.isEmpty() ->
+                                                    "连接成功，但未读取到模型（请检查 API Key / baseUrl）" + hint
+                                                else -> "连接成功，读取到 ${list.size} 个模型"
+                                            }
+                                            Toast.makeText(context, testResults[key.id], Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                    KeyActionButton(
+                                        text = if (testingChatKeyId == key.id) "测试中…" else "测试对话",
+                                        icon = Icons.AutoMirrored.Outlined.Chat,
+                                        primary = false,
+                                        enabled = testingChatKeyId != key.id,
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        val model = keyModels.firstOrNull { it.id == activeModelId }
+                                            ?: keyModels.firstOrNull()
+                                        testingChatKeyId = key.id
+                                        testResults.remove(key.id)
+                                        onTestChat(p, key, model) { ok, msg ->
+                                            testingChatKeyId = null
+                                            testOk[key.id] = ok
+                                            testResults[key.id] = msg
+                                            Toast.makeText(
+                                                context,
+                                                msg.lineSequence().first(),
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                        }
+                                    }
+                                }
+                                testResults[key.id]?.let { msg ->
+                                    val ok = testOk[key.id] == true
+                                    Spacer(Modifier.height(8.dp))
+                                    Row(
+                                        Modifier
+                                            .padding(end = 8.dp)
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(
+                                                if (ok) scheme.primaryContainer.copy(alpha = 0.6f)
+                                                else scheme.errorContainer.copy(alpha = 0.6f)
+                                            )
+                                            .padding(8.dp)
+                                    ) {
+                                        Icon(
+                                            if (ok) Icons.Filled.CheckCircle else Icons.Filled.Error,
+                                            null,
+                                            Modifier.size(16.dp),
+                                            tint = if (ok) scheme.primary else scheme.error
+                                        )
+                                        Spacer(Modifier.width(6.dp))
+                                        Text(
+                                            msg,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = if (ok) scheme.onPrimaryContainer else scheme.onErrorContainer
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (orphans.isNotEmpty()) {
+                        Spacer(Modifier.height(10.dp))
+                        Text(
+                            "未绑定密钥的模型（请编辑后重新保存以绑定）",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = scheme.error
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            orphans.forEach { m ->
+                                ModelRowItem(
+                                    model = m,
+                                    active = m.id == activeModelId,
+                                    onEdit = { onEditModel(m) },
+                                    onDelete = { onDeleteModel(m) },
+                                    onSetActive = { onSetActive(m) }
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -998,41 +1341,265 @@ private fun ProvidersTab(
     }
 }
 
+/** 小圆角状态标签 */
+@Composable
+private fun StatusPill(text: String, container: Color, content: Color) {
+    Text(
+        text,
+        Modifier
+            .clip(RoundedCornerShape(50))
+            .background(container)
+            .padding(horizontal = 7.dp, vertical = 1.dp),
+        style = MaterialTheme.typography.labelSmall,
+        fontSize = 10.sp,
+        color = content,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis
+    )
+}
+
+/** 密钥卡片底部的紧凑操作按钮 */
+@Composable
+private fun KeyActionButton(
+    text: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    primary: Boolean,
+    enabled: Boolean,
+    modifier: Modifier,
+    onClick: () -> Unit
+) {
+    val padding = PaddingValues(horizontal = 4.dp, vertical = 6.dp)
+    val content: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit = {
+        Icon(icon, null, Modifier.size(15.dp))
+        Spacer(Modifier.width(3.dp))
+        Text(text, style = MaterialTheme.typography.labelMedium, maxLines = 1)
+    }
+    if (primary) {
+        FilledTonalButton(
+            onClick = onClick,
+            enabled = enabled,
+            modifier = modifier.heightIn(min = 36.dp),
+            contentPadding = padding,
+            content = content
+        )
+    } else {
+        OutlinedButton(
+            onClick = onClick,
+            enabled = enabled,
+            modifier = modifier.heightIn(min = 36.dp),
+            contentPadding = padding,
+            content = content
+        )
+    }
+}
+
+/** 密钥分组下的单个模型行：名称 / 温度 / 使用 / 编辑 / 删除 */
+@Composable
+private fun ModelRowItem(
+    model: AiModel,
+    active: Boolean,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
+    onSetActive: () -> Unit
+) {
+    val scheme = MaterialTheme.colorScheme
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (active) scheme.primaryContainer.copy(alpha = 0.7f) else scheme.surface)
+            .then(
+                if (active) Modifier.border(1.dp, scheme.primary.copy(alpha = 0.5f), RoundedCornerShape(10.dp))
+                else Modifier
+            )
+            .clickable(onClick = onEdit)
+            .padding(start = 10.dp, top = 4.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            Modifier
+                .size(8.dp)
+                .clip(CircleShape)
+                .background(if (active) scheme.primary else scheme.outlineVariant)
+        )
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                model.displayName,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                buildString {
+                    if (model.alias.isNotBlank()) append(model.name).append(" · ")
+                    append("温度 ").append("%.1f".format(model.temperature))
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = scheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        if (active) {
+            StatusPill("使用中", scheme.primary, scheme.onPrimary)
+        } else {
+            TextButton(
+                onClick = onSetActive,
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                modifier = Modifier.heightIn(min = 30.dp)
+            ) {
+                Text("使用", style = MaterialTheme.typography.labelMedium)
+            }
+        }
+        IconButton(onClick = onDelete, modifier = Modifier.size(36.dp)) {
+            Icon(Icons.Outlined.Delete, "删除", Modifier.size(17.dp), tint = scheme.onSurfaceVariant)
+        }
+    }
+}
+
 @Composable
 private fun PromptsTab(
     prompts: List<Prompt>,
-    onAdd: () -> Unit,
+    onAdd: (PromptType) -> Unit,
     onEdit: (Prompt) -> Unit,
     onDelete: (Prompt) -> Unit
 ) {
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp)) {
-        item {
-            Button(onClick = onAdd) {
+    // 默认打开快捷提示词，保持原有使用习惯
+    var selectedType by remember { mutableStateOf(PromptType.QUICK) }
+    val scheme = MaterialTheme.colorScheme
+    val shown = prompts.filter { it.type == selectedType }
+
+    Column(Modifier.fillMaxSize()) {
+        Row(
+            Modifier.fillMaxWidth().padding(start = 14.dp, end = 14.dp, top = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("提示词库", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                Text(
+                    if (selectedType == PromptType.QUICK) "在 AI 对话 / Agent 输入栏点闪电图标追加到输入框"
+                    else "在模型设置里选择模板，填充模型的预设提示词",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = scheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            FilledTonalButton(
+                onClick = { onAdd(selectedType) },
+                contentPadding = PaddingValues(horizontal = 14.dp)
+            ) {
                 Icon(Icons.Filled.Add, null, Modifier.size(18.dp))
                 Spacer(Modifier.width(4.dp))
-                Text("新建提示词")
+                Text("新建")
             }
         }
-        items(prompts, key = { it.id }) { p ->
-            Card(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
-                Column(Modifier.padding(12.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(p.title, Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
-                        IconButton(onClick = { onEdit(p) }) {
-                            Icon(Icons.Filled.Edit, "编辑", Modifier.size(18.dp))
-                        }
-                        IconButton(onClick = { onDelete(p) }) {
-                            Icon(Icons.Filled.Delete, "删除", Modifier.size(18.dp))
-                        }
-                    }
-                    Text(
-                        p.content,
-                        style = MaterialTheme.typography.bodySmall,
-                        maxLines = 3,
-                        overflow = TextOverflow.Ellipsis
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            PromptTypeChip(
+                text = "快捷提示词",
+                count = prompts.count { it.type == PromptType.QUICK },
+                selected = selectedType == PromptType.QUICK
+            ) { selectedType = PromptType.QUICK }
+            PromptTypeChip(
+                text = "模型提示词",
+                count = prompts.count { it.type == PromptType.MODEL },
+                selected = selectedType == PromptType.MODEL
+            ) { selectedType = PromptType.MODEL }
+        }
+        if (shown.isEmpty()) {
+            Column(
+                Modifier.fillMaxWidth().padding(vertical = 48.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Box(
+                    Modifier.size(64.dp).clip(CircleShape).background(scheme.secondaryContainer),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        if (selectedType == PromptType.QUICK) Icons.Outlined.Bolt else Icons.Outlined.Article,
+                        null,
+                        Modifier.size(30.dp),
+                        tint = scheme.onSecondaryContainer
                     )
                 }
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    if (selectedType == PromptType.QUICK) "还没有快捷提示词" else "还没有模型提示词",
+                    style = MaterialTheme.typography.titleSmall
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    if (selectedType == PromptType.QUICK) "点右上角「新建」，保存常用的话术"
+                    else "点右上角「新建」，保存可复用的系统提示词模板",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = scheme.onSurfaceVariant
+                )
             }
+        } else {
+            LazyColumn(
+                Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = 2.dp, bottom = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                items(shown, key = { it.id }) { p ->
+                    PromptCard(prompt = p, onEdit = { onEdit(p) }, onDelete = { onDelete(p) })
+                }
+            }
+        }
+    }
+}
+
+/** 分类切换：与模型页的标签风格保持一致 */
+@Composable
+private fun PromptTypeChip(text: String, count: Int, selected: Boolean, onClick: () -> Unit) {
+    FilterChip(
+        selected = selected,
+        onClick = onClick,
+        label = { Text("$text $count", style = MaterialTheme.typography.labelLarge) },
+        shape = RoundedCornerShape(50)
+    )
+}
+
+/** 提示词卡片：标题 + 正文预览 + 编辑 / 删除 */
+@Composable
+private fun PromptCard(prompt: Prompt, onEdit: () -> Unit, onDelete: () -> Unit) {
+    val scheme = MaterialTheme.colorScheme
+    Card(
+        Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = scheme.surface),
+        border = BorderStroke(1.dp, scheme.outlineVariant)
+    ) {
+        Column(Modifier.padding(start = 14.dp, end = 4.dp, top = 8.dp, bottom = 12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    prompt.title,
+                    Modifier.weight(1f),
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                IconButton(onClick = onEdit, modifier = Modifier.size(36.dp)) {
+                    Icon(Icons.Outlined.Edit, "编辑", Modifier.size(18.dp), tint = scheme.onSurfaceVariant)
+                }
+                IconButton(onClick = onDelete, modifier = Modifier.size(36.dp)) {
+                    Icon(Icons.Outlined.Delete, "删除", Modifier.size(18.dp), tint = scheme.onSurfaceVariant)
+                }
+            }
+            Text(
+                prompt.content,
+                Modifier.padding(end = 10.dp),
+                style = MaterialTheme.typography.bodySmall,
+                color = scheme.onSurfaceVariant,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis
+            )
         }
     }
 }
@@ -1119,13 +1686,15 @@ private val vendorPresets = listOf(
 private fun ProviderDialog(
     initial: Provider?,
     onDismiss: () -> Unit,
-    onSave: (Provider) -> Unit
+    onSave: (Provider, ProviderKey?) -> Unit
 ) {
     var name by remember { mutableStateOf(initial?.name ?: "") }
     var baseUrl by remember { mutableStateOf(initial?.baseUrl ?: "https://api.openai.com/v1") }
     var apiType by remember { mutableStateOf(initial?.apiType ?: ApiType.CHAT_COMPLETIONS) }
-    var apiKey by remember { mutableStateOf(initial?.apiKey ?: "") }
     var showTypeMenu by remember { mutableStateOf(false) }
+    // 新建供应商时可选同时添加第一个密钥（编辑供应商不涉及密钥）
+    var firstKeyName by remember { mutableStateOf("") }
+    var firstKeyApiKey by remember { mutableStateOf("") }
     // 选了哪个供应商预设（仅作展示，选中即回填 baseUrl / 接口类型）
     var vendorLabel by remember { mutableStateOf("自定义") }
     var showVendorMenu by remember { mutableStateOf(false) }
@@ -1187,27 +1756,139 @@ private fun ProviderDialog(
                         }
                     }
                 }
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = apiKey,
-                    onValueChange = { apiKey = it },
-                    label = { Text("apiKey") },
-                    singleLine = true,
-                    visualTransformation = PasswordVisualTransformation(),
-                    modifier = Modifier.fillMaxWidth()
-                )
+                if (initial == null) {
+                    Spacer(Modifier.height(12.dp))
+                    HorizontalDivider()
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "第一个 API 密钥（可选，也可保存后再添加）",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = firstKeyName,
+                        onValueChange = { firstKeyName = it },
+                        label = { Text("密钥备注名称") },
+                        placeholder = { Text("主账号 / 备用账号 / 中转站 A") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = firstKeyApiKey,
+                        onValueChange = { firstKeyApiKey = it },
+                        label = { Text("API Key") },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
             }
         },
         confirmButton = {
             Button(
                 enabled = name.isNotBlank() && baseUrl.isNotBlank(),
                 onClick = {
-                    onSave(
-                        (initial ?: Provider(name = name, baseUrl = baseUrl))
-                            .copy(name = name.trim(), baseUrl = baseUrl.trim(), apiType = apiType, apiKey = apiKey.trim())
-                    )
+                    val provider = (initial ?: Provider(name = name, baseUrl = baseUrl))
+                        .copy(name = name.trim(), baseUrl = baseUrl.trim(), apiType = apiType)
+                    val firstKey = if (initial == null && firstKeyApiKey.isNotBlank()) {
+                        ProviderKey(
+                            providerId = provider.id,
+                            name = firstKeyName.trim().ifBlank { "默认密钥" },
+                            apiKey = firstKeyApiKey.trim()
+                        )
+                    } else null
+                    onSave(provider, firstKey)
                 }
             ) { Text("保存供应商") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
+}
+
+/**
+ * 添加 / 编辑 API 密钥。
+ *
+ * 编辑时 API Key 预填原值（输入框脱敏显示），不修改即保留原值；
+ * 保存前校验非空与同供应商下重复，错误回显在弹窗内。
+ */
+@Composable
+private fun KeyDialog(
+    provider: Provider,
+    initial: ProviderKey?,
+    onDismiss: () -> Unit,
+    onSave: (ProviderKey, (String) -> Unit) -> Unit
+) {
+    var name by remember { mutableStateOf(initial?.name ?: "") }
+    var apiKey by remember { mutableStateOf(initial?.apiKey ?: "") }
+    var enabled by remember { mutableStateOf(initial?.enabled ?: true) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var saving by remember { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(if (initial == null) "添加 API 密钥 · ${provider.name}" else "编辑 API 密钥")
+        },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("备注名称") },
+                    placeholder = { Text("主账号 / 备用账号 / 中转站 A / 测试密钥") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = apiKey,
+                    onValueChange = { apiKey = it },
+                    label = { Text("API Key") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = enabled, onCheckedChange = { enabled = it })
+                    Text("启用该密钥", style = MaterialTheme.typography.bodySmall)
+                }
+                if (initial != null) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "修改 API Key 后，建议重新测试该密钥并重新读取模型",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                error?.let {
+                    Spacer(Modifier.height(6.dp))
+                    Text(it, color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.labelSmall)
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                enabled = apiKey.isNotBlank() && !saving,
+                onClick = {
+                    saving = true
+                    error = null
+                    onSave(
+                        (initial ?: ProviderKey(providerId = provider.id)).copy(
+                            providerId = provider.id,
+                            name = name,
+                            apiKey = apiKey,
+                            enabled = enabled
+                        )
+                    ) { msg ->
+                        saving = false
+                        error = msg
+                    }
+                }
+            ) { Text("保存") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
     )
@@ -1216,9 +1897,12 @@ private fun ProviderDialog(
 @Composable
 private fun AddModelDialog(
     provider: Provider,
+    key: ProviderKey,
+    existing: List<AiModel>,
+    modelPrompts: List<Prompt>,
     onDismiss: () -> Unit,
     onFetch: ((List<RemoteModelInfo>, String?) -> Unit) -> Unit,
-    onSave: (AiModel) -> Unit
+    onSaveList: (List<AiModel>) -> Unit
 ) {
     var name by remember { mutableStateOf("") }
     var alias by remember { mutableStateOf("") }
@@ -1234,35 +1918,48 @@ private fun AddModelDialog(
     var reasoningLevel by remember { mutableStateOf(ReasoningLevel.DEFAULT.storage) }
     var webSearchEnabled by remember { mutableStateOf(false) }
     var remote by remember { mutableStateOf<List<RemoteModelInfo>>(emptyList()) }
+    var selected by remember { mutableStateOf<Set<String>>(emptySet()) }
     var error by remember { mutableStateOf<String?>(null) }
-    var showRemote by remember { mutableStateOf(false) }
+    var loading by remember { mutableStateOf(false) }
+    // 当前密钥下已存在的模型标识：读取列表里标记「已添加」，但不影响同供应商其他密钥
+    val existingNames = remember(existing) { existing.map { it.name }.toSet() }
+
+    fun buildModel(modelName: String, ctx: Int, remoteModel: Boolean): AiModel = AiModel(
+        providerId = provider.id,
+        providerKeyId = key.id,
+        name = modelName,
+        alias = alias.trim(),
+        temperature = temperature,
+        maxTokens = if (unlimited) 0 else maxTokens,
+        maxContext = maxContext,
+        contextWindow = ctx,
+        systemPrompt = systemPrompt,
+        reasoningEnabled = reasoningEnabled,
+        reasoningLevel = reasoningLevel,
+        webSearchEnabled = webSearchEnabled,
+        custom = !remoteModel
+    )
 
     InputDialog(
-        title = "添加模型 · ${provider.name}",
+        title = "模型 · ${provider.name} / ${key.name}",
         onDismiss = onDismiss,
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
         confirmButton = {
-            Button(
-                enabled = name.isNotBlank(),
-                onClick = {
-                    onSave(
-                        AiModel(
-                            providerId = provider.id,
-                            name = name.trim(),
-                            alias = alias.trim(),
-                            temperature = temperature,
-                            maxTokens = if (unlimited) 0 else maxTokens,
-                            maxContext = maxContext,
-                            contextWindow = contextWindow,
-                            systemPrompt = systemPrompt,
-                            reasoningEnabled = reasoningEnabled,
-                            reasoningLevel = reasoningLevel,
-                            webSearchEnabled = webSearchEnabled,
-                            custom = !fromRemote
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (selected.isNotEmpty()) {
+                    TextButton(onClick = {
+                        onSaveList(
+                            remote.filter { it.id in selected }
+                                .map { buildModel(it.id, it.contextWindow, remoteModel = true) }
                         )
-                    )
+                    }) { Text("添加选中 ${selected.size} 个") }
                 }
-            ) { Text("保存模型") }
+                Spacer(Modifier.width(8.dp))
+                Button(
+                    enabled = name.isNotBlank(),
+                    onClick = { onSaveList(listOf(buildModel(name.trim(), contextWindow, fromRemote))) }
+                ) { Text("添加") }
+            }
         }
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1272,31 +1969,65 @@ private fun AddModelDialog(
                 modifier = Modifier.weight(1f)
             )
             Spacer(Modifier.width(8.dp))
-            OutlinedButton(onClick = {
-                onFetch { list, err ->
-                    remote = list; error = err; showRemote = list.isNotEmpty()
+            OutlinedButton(
+                enabled = !loading,
+                onClick = {
+                    loading = true
+                    error = null
+                    onFetch { list, err ->
+                        loading = false
+                        remote = list
+                        error = err
+                        selected = emptySet()
+                    }
                 }
-            }) { Text("读取可选模型") }
+            ) { Text(if (loading) "读取中…" else "读取可选模型") }
         }
         error?.let { Text(it, color = MaterialTheme.colorScheme.error,
             style = MaterialTheme.typography.labelSmall) }
-        if (showRemote) {
-            DropdownMenu(expanded = showRemote, onDismissRequest = { showRemote = false }) {
-                remote.forEach { r ->
-                    DropdownMenuItem(
-                        text = {
-                            Text(
-                                if (r.contextWindow > 0) "${r.id} · ${r.contextWindow} token"
-                                else r.id
-                            )
-                        },
-                        onClick = {
-                            name = r.id
-                            contextWindow = r.contextWindow
-                            fromRemote = true
-                            showRemote = false
+        if (remote.isNotEmpty()) {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "勾选要添加的模型，可多选后批量添加；「已添加」表示当前密钥下已有",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            remote.forEach { r ->
+                val already = r.id in existingNames
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable(enabled = !already) {
+                            selected = if (r.id in selected) selected - r.id else selected + r.id
+                        }
+                        .padding(vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Checkbox(
+                        checked = r.id in selected,
+                        enabled = !already,
+                        onCheckedChange = {
+                            selected = if (it) selected + r.id else selected - r.id
                         }
                     )
+                    Column(Modifier.weight(1f)) {
+                        Text(r.id, style = MaterialTheme.typography.bodySmall)
+                        if (r.contextWindow > 0) {
+                            Text(
+                                "${r.contextWindow} token",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    if (already) {
+                        Text(
+                            "已添加",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
                 }
             }
         }
@@ -1348,12 +2079,10 @@ private fun AddModelDialog(
             )
         }
         Spacer(Modifier.height(12.dp))
-        OutlinedTextField(
+        SystemPromptEditor(
             value = systemPrompt,
-            onValueChange = { systemPrompt = it },
-            label = { Text("预设提示词") },
-            minLines = 3,
-            modifier = Modifier.fillMaxWidth()
+            prompts = modelPrompts,
+            onValueChange = { systemPrompt = it }
         )
     }
 }
@@ -1362,6 +2091,7 @@ private fun AddModelDialog(
 @Composable
 private fun ModelDetailDialog(
     model: AiModel,
+    modelPrompts: List<Prompt>,
     onDismiss: () -> Unit,
     onDelete: () -> Unit,
     onSave: (AiModel) -> Unit
@@ -1468,34 +2198,179 @@ private fun ModelDetailDialog(
             )
         }
         Spacer(Modifier.height(12.dp))
-        OutlinedTextField(
+        SystemPromptEditor(
             value = systemPrompt,
-            onValueChange = { systemPrompt = it },
-            label = { Text("预设提示词") },
-            minLines = 3,
-            modifier = Modifier.fillMaxWidth()
+            prompts = modelPrompts,
+            onValueChange = { systemPrompt = it }
         )
+    }
+}
+
+/**
+ * 模型表单里的「预设提示词」编辑区：保留手写能力，额外提供模型提示词库入口。
+ * 选择模板只是把内容写进表单状态，最终仍由模型自身的保存按钮落库。
+ */
+@Composable
+private fun SystemPromptEditor(
+    value: String,
+    prompts: List<Prompt>,
+    onValueChange: (String) -> Unit
+) {
+    var showPicker by remember { mutableStateOf(false) }
+    /** 已有内容时待确认的模板（替换 / 追加） */
+    var pendingTemplate by remember { mutableStateOf<Prompt?>(null) }
+
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            "预设提示词",
+            Modifier.weight(1f),
+            style = MaterialTheme.typography.labelLarge
+        )
+        TextButton(onClick = { showPicker = true }) {
+            Icon(Icons.Outlined.Article, null, Modifier.size(16.dp))
+            Spacer(Modifier.width(4.dp))
+            Text("从提示词库选择")
+        }
+    }
+    OutlinedTextField(
+        value = value,
+        onValueChange = onValueChange,
+        placeholder = { Text("留空则不注入系统提示词") },
+        minLines = 3,
+        modifier = Modifier.fillMaxWidth()
+    )
+
+    if (showPicker) {
+        PromptPickerDialog(
+            prompts = prompts,
+            onDismiss = { showPicker = false },
+            onPick = { picked ->
+                showPicker = false
+                if (value.isBlank()) {
+                    onValueChange(picked.content)
+                } else {
+                    pendingTemplate = picked
+                }
+            }
+        )
+    }
+
+    pendingTemplate?.let { picked ->
+        AlertDialog(
+            onDismissRequest = { pendingTemplate = null },
+            title = { Text("已有预设提示词") },
+            text = { Text("当前已填写 ${value.length} 个字，请选择如何处理「${picked.title}」：") },
+            confirmButton = {
+                Button(onClick = {
+                    onValueChange(picked.content)
+                    pendingTemplate = null
+                }) { Text("替换") }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(onClick = { pendingTemplate = null }) { Text("取消") }
+                    TextButton(onClick = {
+                        // 用空行分隔，避免原内容与模板直接粘连
+                        onValueChange(value.trimEnd() + "\n\n" + picked.content)
+                        pendingTemplate = null
+                    }) { Text("追加") }
+                }
+            }
+        )
+    }
+}
+
+/** 模型提示词选择器：只展示 MODEL 类型，点选即回传；用独立窗口保证浮在模型弹窗之上 */
+@Composable
+private fun PromptPickerDialog(
+    prompts: List<Prompt>,
+    onDismiss: () -> Unit,
+    onPick: (Prompt) -> Unit
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(24.dp),
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+            tonalElevation = 6.dp
+        ) {
+            Column(Modifier.padding(20.dp)) {
+                Text("从提示词库选择", style = MaterialTheme.typography.headlineSmall)
+                Spacer(Modifier.height(12.dp))
+                if (prompts.isEmpty()) {
+                    Text(
+                        "还没有模型提示词。可到「设置 → 提示词库 → 模型提示词」新建。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 420.dp)
+                            .verticalScroll(rememberScrollState())
+                    ) {
+                        prompts.forEach { p ->
+                            Surface(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .padding(bottom = 8.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .clickable { onPick(p) },
+                                shape = RoundedCornerShape(12.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                            ) {
+                                Column(Modifier.padding(12.dp)) {
+                                    Text(
+                                        p.title,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Spacer(Modifier.height(4.dp))
+                                    Text(
+                                        p.content,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 3,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+                Spacer(Modifier.height(4.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = onDismiss) { Text("关闭") }
+                }
+            }
+        }
     }
 }
 
 @Composable
 private fun PromptDialog(
     initial: Prompt?,
+    type: PromptType,
     onDismiss: () -> Unit,
     onSave: (Prompt) -> Unit
 ) {
     var title by remember { mutableStateOf(initial?.title ?: "") }
     var content by remember { mutableStateOf(initial?.content ?: "") }
+    val typeLabel = if (type == PromptType.MODEL) "模型提示词" else "快捷提示词"
 
     InputDialog(
-        title = if (initial == null) "新建提示词" else "编辑提示词",
+        title = if (initial == null) "新建$typeLabel" else "编辑$typeLabel",
         onDismiss = onDismiss,
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
         confirmButton = {
             Button(
                 enabled = title.isNotBlank() && content.isNotBlank(),
                 onClick = {
-                    onSave((initial ?: Prompt(title = title, content = content))
+                    // 新建按当前分类落类型；编辑沿用原记录的类型，绝不因入口变化而改类型
+                    onSave((initial ?: Prompt(title = title, content = content, type = type))
                         .copy(title = title.trim(), content = content))
                 }
             ) { Text("保存") }

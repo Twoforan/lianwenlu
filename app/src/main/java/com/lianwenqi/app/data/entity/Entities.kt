@@ -209,12 +209,24 @@ data class MemoryChunk(
     val createdAt: Long = System.currentTimeMillis()
 )
 
-/** 提示词库 */
+/**
+ * 提示词类型：
+ * - [MODEL]：模型提示词，只作为模板复制到模型的 systemPrompt，不参与对话注入；
+ * - [QUICK]：快捷提示词，在 AI 对话 / AI Agent 输入栏点击后追加到输入框。
+ */
+enum class PromptType(val label: String) {
+    MODEL("模型提示词"),
+    QUICK("快捷提示词")
+}
+
+/** 提示词库：两种类型共用一张表，靠 [Prompt.type] 区分 */
 @Entity(tableName = "prompt")
 data class Prompt(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val title: String,
     val content: String,
+    /** 旧版本数据迁移后一律为 [PromptType.QUICK] */
+    @ColumnInfo(defaultValue = "QUICK") val type: PromptType = PromptType.QUICK,
     val createdAt: Long = System.currentTimeMillis()
 )
 
@@ -236,11 +248,40 @@ data class Provider(
     val createdAt: Long = System.currentTimeMillis()
 )
 
-/** 供应商下的模型 */
-@Entity(tableName = "ai_model", indices = [Index("providerId")])
+/**
+ * 供应商下的 API 密钥。
+ *
+ * 一个供应商可以配置多个密钥（主账号 / 备用账号 / 中转站…），
+ * 模型必须归属于具体密钥，请求时也只使用所属密钥的 apiKey。
+ */
+@Entity(tableName = "provider_key", indices = [Index("providerId")])
+data class ProviderKey(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val providerId: Long,
+    /** 密钥备注，便于区分账号 / 用途 / 中转站 */
+    val name: String = "默认密钥",
+    val apiKey: String = "",
+    val enabled: Boolean = true,
+    val createdAt: Long = System.currentTimeMillis(),
+    val updatedAt: Long = System.currentTimeMillis()
+) {
+    /** 脱敏展示：保留前后少量字符，永远不展示完整密钥 */
+    val maskedKey: String
+        get() = when {
+            apiKey.isBlank() -> "未填写"
+            apiKey.length <= 8 -> "sk-****"
+            else -> apiKey.take(4) + "****" + apiKey.takeLast(4)
+        }
+}
+
+/** 供应商下的模型（[providerKeyId] 决定实际使用哪个密钥） */
+@Entity(tableName = "ai_model", indices = [Index("providerId"), Index("providerKeyId")])
 data class AiModel(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val providerId: Long,
+    /** 所属 API 密钥；0 表示历史数据尚未归属（启动迁移会回填） */
+    @ColumnInfo(defaultValue = "0")
+    val providerKeyId: Long = 0,
     /** 模型标识（请求时提交的 model 名） */
     val name: String,
     /** 用户自定义的显示名，用于区分同类模型；为空时回退显示 [name] */

@@ -15,7 +15,9 @@ import com.lianwenqi.app.data.entity.ChatSession
 import com.lianwenqi.app.data.entity.MemoryChunk
 import com.lianwenqi.app.data.entity.OutlineItem
 import com.lianwenqi.app.data.entity.Prompt
+import com.lianwenqi.app.data.entity.PromptType
 import com.lianwenqi.app.data.entity.Provider
+import com.lianwenqi.app.data.entity.ProviderKey
 import com.lianwenqi.app.data.entity.StyleProfile
 import com.lianwenqi.app.data.entity.Volume
 import kotlinx.coroutines.flow.Flow
@@ -398,12 +400,23 @@ interface PromptDao {
     @Query("SELECT * FROM prompt ORDER BY id DESC")
     fun observeAll(): Flow<List<Prompt>>
 
+    /** 只观察某一类型：快捷面板与提示词库分页都必须走这里，避免两种类型混在一起 */
+    @Query("SELECT * FROM prompt WHERE type = :type ORDER BY id DESC")
+    fun observeByType(type: PromptType): Flow<List<Prompt>>
+
     @Query("SELECT * FROM prompt ORDER BY id DESC")
     suspend fun getAll(): List<Prompt>
 
-    /** 按标题查找（恢复备份时同标题覆盖内容） */
+    @Query("SELECT * FROM prompt WHERE type = :type ORDER BY id DESC")
+    suspend fun getByType(type: PromptType): List<Prompt>
+
+    /** 按标题查找（恢复备份时同标题覆盖内容；保留给旧调用，新代码用 [findByTypeAndTitle]） */
     @Query("SELECT * FROM prompt WHERE title = :title LIMIT 1")
     suspend fun findByTitle(title: String): Prompt?
+
+    /** 恢复备份：标题允许跨类型重复，必须按「类型 + 标题」匹配 */
+    @Query("SELECT * FROM prompt WHERE type = :type AND title = :title LIMIT 1")
+    suspend fun findByTypeAndTitle(type: PromptType, title: String): Prompt?
 
     @Insert
     suspend fun insert(prompt: Prompt): Long
@@ -437,6 +450,30 @@ interface ProviderDao {
 }
 
 @Dao
+interface ProviderKeyDao {
+    @Query("SELECT * FROM provider_key ORDER BY id ASC")
+    fun observeAll(): Flow<List<ProviderKey>>
+
+    @Query("SELECT * FROM provider_key WHERE providerId = :providerId ORDER BY id ASC")
+    suspend fun getByProvider(providerId: Long): List<ProviderKey>
+
+    @Query("SELECT * FROM provider_key WHERE id = :id")
+    suspend fun getById(id: Long): ProviderKey?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(key: ProviderKey): Long
+
+    @Update
+    suspend fun update(key: ProviderKey)
+
+    @Query("DELETE FROM provider_key WHERE id = :id")
+    suspend fun deleteById(id: Long)
+
+    @Query("DELETE FROM provider_key WHERE providerId = :providerId")
+    suspend fun deleteByProvider(providerId: Long)
+}
+
+@Dao
 interface AiModelDao {
     @Query("SELECT * FROM ai_model ORDER BY id ASC")
     fun observeAll(): Flow<List<AiModel>>
@@ -446,6 +483,12 @@ interface AiModelDao {
 
     @Query("SELECT * FROM ai_model WHERE providerId = :providerId ORDER BY id ASC")
     suspend fun getByProvider(providerId: Long): List<AiModel>
+
+    @Query("SELECT * FROM ai_model WHERE providerKeyId = :providerKeyId ORDER BY id ASC")
+    suspend fun getByProviderKey(providerKeyId: Long): List<AiModel>
+
+    @Query("SELECT * FROM ai_model ORDER BY id ASC LIMIT 1")
+    suspend fun getFirst(): AiModel?
 
     @Query("SELECT * FROM ai_model WHERE id = :id")
     suspend fun getById(id: Long): AiModel?

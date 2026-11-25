@@ -9,6 +9,7 @@ import com.lianwenqi.app.data.entity.Chapter
 import com.lianwenqi.app.data.entity.OutlineCategory
 import com.lianwenqi.app.data.entity.OutlineItem
 import com.lianwenqi.app.data.entity.Prompt
+import com.lianwenqi.app.data.entity.PromptType
 import com.lianwenqi.app.data.entity.StyleProfile
 import com.lianwenqi.app.data.entity.StyleSourceType
 import com.lianwenqi.app.data.entity.Volume
@@ -154,6 +155,11 @@ object BackupSections {
 data class BackupPrompt(
     val title: String,
     val content: String = "",
+    /**
+     * 提示词类型：MODEL / QUICK。
+     * 旧备份没有该字段，反序列化时走默认值，一律按快捷提示词恢复。
+     */
+    val type: String = PromptType.QUICK.name,
     val createdAt: Long = 0
 )
 
@@ -328,13 +334,15 @@ class BackupRepository(
         )
     }
 
-    /** 恢复提示词库：同标题覆盖内容，否则新增；返回处理的条数 */
+    /** 恢复提示词库：按「类型 + 标题」匹配，同类型同标题覆盖内容，否则新增；返回处理的条数 */
     private suspend fun restorePrompts(prompts: List<BackupPrompt>): Int {
         var count = 0
         prompts.forEach { raw ->
             val title = raw.title.trim()
             if (title.isBlank()) return@forEach
-            val existing = promptDao.findByTitle(title)
+            // 旧备份没有 type 字段 / 出现未知值：按快捷提示词处理，保证老数据可见
+            val type = runCatching { PromptType.valueOf(raw.type) }.getOrDefault(PromptType.QUICK)
+            val existing = promptDao.findByTypeAndTitle(type, title)
             if (existing != null) {
                 promptDao.update(existing.copy(content = raw.content))
             } else {
@@ -342,6 +350,7 @@ class BackupRepository(
                     Prompt(
                         title = title,
                         content = raw.content,
+                        type = type,
                         createdAt = raw.createdAt.takeIf { it > 0 } ?: System.currentTimeMillis()
                     )
                 )
@@ -463,6 +472,7 @@ class BackupRepository(
                 BackupPrompt(
                     title = prompt.title,
                     content = prompt.content,
+                    type = prompt.type.name,
                     createdAt = prompt.createdAt
                 )
             },

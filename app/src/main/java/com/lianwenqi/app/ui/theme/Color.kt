@@ -10,5 +10,7 @@ val Indigo40 = Color(0xFF3F51B5)
 val IndigoGrey40 = Color(0xFF5B5D72)
 val Teal40 = Color(0xFF00796B)
 
-val PaperLight = Color(0xFFF7F5F0)
+// 书架背景白：全应用统一使用的页面底色
+val ShelfWhite = Color(0xFFFAF9F7)
+val PaperLight = ShelfWhite
 val PaperDark = Color(0xFF16171A)

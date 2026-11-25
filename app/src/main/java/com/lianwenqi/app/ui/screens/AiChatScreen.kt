@@ -341,42 +341,48 @@ private fun NormalAiChatScreen(
         // 顶部内边距交给 TopAppBar，底部由 union(navigationBars, ime) 统一处理
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
-            TopAppBar(
-                title = {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .windowInsetsPadding(WindowInsets.statusBars)
+                    .height(56.dp)
+                    .padding(start = 20.dp, end = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     // 模型选择与「AI 聊天」同排
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("AI 聊天")
-                        Spacer(Modifier.width(8.dp))
-                        ModelSelectorChip(
-                            models = models,
-                            providers = providers,
-                            activeId = activeModelId,
-                            maxLabelWidth = 110.dp,
-                            onSelect = { vm.setModel(it) }
-                        )
-                    }
-                },
-                actions = {
-                    IconButton(onClick = { vm.newSession() }) {
-                        Icon(Icons.Filled.Add, contentDescription = "新对话")
-                    }
-                    TextButton(onClick = { showSessions = true }) { Text("会话") }
-                    // 机器人图标与开关固定在最右侧
-                    Icon(
-                        Icons.Filled.SmartToy,
-                        contentDescription = "自动化",
-                        modifier = Modifier.size(20.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Switch(
-                        checked = mode == AgentChatMode.AGENT,
-                        onCheckedChange = { on ->
-                            if (on) onModeChange(AgentChatMode.AGENT)
-                        },
-                        modifier = Modifier.scale(0.75f)
+                    Text("AI 聊天", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.width(8.dp))
+                    ModelSelectorChip(
+                        models = models,
+                        providers = providers,
+                        activeId = activeModelId,
+                        maxLabelWidth = 110.dp,
+                        onSelect = { vm.setModel(it) }
                     )
                 }
-            )
+                IconButton(onClick = { vm.newSession() }) {
+                    Icon(Icons.Filled.Add, contentDescription = "新对话")
+                }
+                TextButton(onClick = { showSessions = true }) { Text("会话") }
+                // 机器人图标与开关固定在最右侧
+                Icon(
+                    Icons.Filled.SmartToy,
+                    contentDescription = "自动化",
+                    modifier = Modifier.size(20.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Switch(
+                    checked = mode == AgentChatMode.AGENT,
+                    onCheckedChange = { on ->
+                        if (on) onModeChange(AgentChatMode.AGENT)
+                    },
+                    modifier = Modifier.scale(0.75f)
+                )
+            }
         }
     ) { padding ->
         Column(

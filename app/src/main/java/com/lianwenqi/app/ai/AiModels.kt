@@ -441,9 +441,13 @@ data class RemoteModelInfo(
     val contextWindow: Int = 0
 )
 
-/** 供应商 + 模型的可发送配置 */
+/** 供应商 + 密钥 + 模型的可发送配置 */
 data class ModelEndpoint(
     val provider: Provider,
+    /** 本次请求使用的 API Key（来自模型所属的 ProviderKey） */
+    val apiKey: String = "",
+    /** 非空表示该模型当前不可用（密钥缺失 / 禁用 / 未填写），请求前直接返回此提示 */
+    val blockedReason: String? = null,
     val modelName: String,
     val apiType: ApiType = provider.apiType,
     val temperature: Float = 0.8f,

@@ -33,6 +33,7 @@ import com.lianwenqi.app.data.dao.MemoryChunkDao
 import com.lianwenqi.app.data.dao.OutlineDao
 import com.lianwenqi.app.data.dao.PromptDao
 import com.lianwenqi.app.data.dao.ProviderDao
+import com.lianwenqi.app.data.dao.ProviderKeyDao
 import com.lianwenqi.app.data.dao.StyleProfileDao
 import com.lianwenqi.app.data.dao.StyleTagDao
 import com.lianwenqi.app.data.dao.VolumeCompressionDao
@@ -50,6 +51,7 @@ import com.lianwenqi.app.data.entity.MemoryChunk
 import com.lianwenqi.app.data.entity.OutlineItem
 import com.lianwenqi.app.data.entity.Prompt
 import com.lianwenqi.app.data.entity.Provider
+import com.lianwenqi.app.data.entity.ProviderKey
 import com.lianwenqi.app.data.entity.StyleProfile
 import com.lianwenqi.app.data.entity.StyleSampleChunk
 import com.lianwenqi.app.data.entity.StyleSampleRecord
@@ -72,6 +74,7 @@ import com.lianwenqi.app.data.entity.VolumeSummary
         OutlineItem::class,
         Prompt::class,
         Provider::class,
+        ProviderKey::class,
         AiModel::class,
         ChatSession::class,
         ChatMessage::class,
@@ -101,7 +104,7 @@ import com.lianwenqi.app.data.entity.VolumeSummary
         AgentRecoveryLog::class,
         AgentClarification::class
     ],
-    version = 33,
+    version = 35,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
@@ -113,6 +116,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun outlineDao(): OutlineDao
     abstract fun promptDao(): PromptDao
     abstract fun providerDao(): ProviderDao
+    abstract fun providerKeyDao(): ProviderKeyDao
     abstract fun aiModelDao(): AiModelDao
     abstract fun chatDao(): ChatDao
     abstract fun memoryChunkDao(): MemoryChunkDao
@@ -1238,6 +1242,64 @@ abstract class AppDatabase : RoomDatabase() {
         }
 
         /**
+         * 33 → 34：供应商 → 模型 升级为 供应商 → API 密钥 → 模型。
+         *
+         * - 新建 provider_key 表；
+         * - ai_model 增加 providerKeyId；
+         * - 为每个旧供应商自动生成一条「默认密钥」（即使旧 key 为空也生成，界面提示补填），
+         *   并把该供应商下的模型全部回填到这条密钥上。
+         *
+         * 不删除旧列、不重建表，保证书籍 / 模型参数 / activeModelId / 默认模型都不受影响。
+         */
+        internal val MIGRATION_33_34 = object : Migration(33, 34) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS provider_key (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "providerId INTEGER NOT NULL, " +
+                        "name TEXT NOT NULL, " +
+                        "apiKey TEXT NOT NULL, " +
+                        "enabled INTEGER NOT NULL, " +
+                        "createdAt INTEGER NOT NULL, " +
+                        "updatedAt INTEGER NOT NULL)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_provider_key_providerId " +
+                        "ON provider_key (providerId)"
+                )
+                db.execSQL(
+                    "ALTER TABLE ai_model ADD COLUMN providerKeyId INTEGER NOT NULL DEFAULT 0"
+                )
+                db.execSQL(
+                    "INSERT INTO provider_key (providerId, name, apiKey, enabled, createdAt, updatedAt) " +
+                        "SELECT id, '默认密钥', apiKey, 1, createdAt, createdAt FROM provider"
+                )
+                db.execSQL(
+                    "UPDATE ai_model SET providerKeyId = (" +
+                        "SELECT pk.id FROM provider_key pk " +
+                        "WHERE pk.providerId = ai_model.providerId ORDER BY pk.id ASC LIMIT 1" +
+                        ") WHERE providerKeyId = 0"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_ai_model_providerKeyId " +
+                        "ON ai_model (providerKeyId)"
+                )
+            }
+        }
+
+        /**
+         * 34 → 35：提示词库拆成「模型提示词 / 快捷提示词」两种类型。
+         *
+         * 只加一列并给默认值 QUICK：老记录全部归类为快捷提示词，原有标题 / 正文 / 创建时间与 id 不变；
+         * 不做去重、不重建表、不加唯一约束（同名同类型仍允许重复，保持旧行为）。
+         */
+        internal val MIGRATION_34_35 = object : Migration(34, 35) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE prompt ADD COLUMN type TEXT NOT NULL DEFAULT 'QUICK'")
+            }
+        }
+
+        /**
          * 修复历史遗留的超长行：整本正文被冻结进会话前缀、超长提示词日志 / 正文等，
          * 单行超过 SQLite CursorWindow（2MB）上限后读取会抛 SQLiteBlobTooBigException 直接闪退。
          * 首次打开数据库时把超限文本截断到安全长度，之后用标记表跳过，避免每次启动全表扫描。
@@ -1264,7 +1326,7 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "lianwenqi.db"
-                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20, MIGRATION_20_21, MIGRATION_21_22, MIGRATION_22_23, MIGRATION_23_24, MIGRATION_24_25, MIGRATION_25_26, MIGRATION_26_27, MIGRATION_27_28, MIGRATION_28_29, MIGRATION_29_30, MIGRATION_30_31, MIGRATION_31_32, MIGRATION_32_33).addCallback(REPAIR_OVERSIZED_ROWS).build().also { INSTANCE = it }
+                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20, MIGRATION_20_21, MIGRATION_21_22, MIGRATION_22_23, MIGRATION_23_24, MIGRATION_24_25, MIGRATION_25_26, MIGRATION_26_27, MIGRATION_27_28, MIGRATION_28_29, MIGRATION_29_30, MIGRATION_30_31, MIGRATION_31_32, MIGRATION_32_33, MIGRATION_33_34, MIGRATION_34_35).addCallback(REPAIR_OVERSIZED_ROWS).build().also { INSTANCE = it }
             }
     }
 }

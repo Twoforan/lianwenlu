@@ -3,20 +3,27 @@ package com.lianwenqi.app.ui.screens
 import android.widget.Toast
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -76,10 +83,17 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.lianwenqi.app.R
+import com.lianwenqi.app.ui.theme.ShelfWhite
 import com.lianwenqi.app.data.BookSummary
 import com.lianwenqi.app.data.SortMode
 import com.lianwenqi.app.data.entity.Book
@@ -94,6 +108,45 @@ import java.util.Date
 import java.util.Locale
 
 private val timeFmt = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.CHINA)
+
+/**
+ * 书架配色：浅色值与设计稿完全一致；夜间模式使用对应深色值，避免硬编码浅色在深色主题下不可读。
+ */
+private data class ShelfPalette(
+    val page: Color,
+    val mainText: Color,
+    val secondaryText: Color,
+    val divider: Color,
+    val chipBg: Color,
+    val chipText: Color,
+    val headerIcon: Color,
+    val metaText: Color,
+    val pinText: Color
+)
+
+private val LightShelfPalette = ShelfPalette(
+    page = ShelfWhite,
+    mainText = Color(0xFF29272C),
+    secondaryText = Color(0xFF77717D),
+    divider = Color(0xFFEFEDF0),
+    chipBg = Color(0xFFF0EDF8),
+    chipText = Color(0xFF37333E),
+    headerIcon = Color(0xFF39363D),
+    metaText = Color(0xFF66616B),
+    pinText = Color(0xFF4B60BB)
+)
+
+private val DarkShelfPalette = ShelfPalette(
+    page = Color(0xFF17161C),
+    mainText = Color(0xFFE9E6EF),
+    secondaryText = Color(0xFFA5A0AE),
+    divider = Color(0xFF2C2A34),
+    chipBg = Color(0xFF2A2734),
+    chipText = Color(0xFFDAD5E4),
+    headerIcon = Color(0xFFD8D4DE),
+    metaText = Color(0xFFA9A3B2),
+    pinText = Color(0xFF9FB0F2)
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -115,6 +168,7 @@ fun BookshelfScreen(
     val sortAsc by vm.sortAsc.collectAsState()
     val groups by vm.groups.collectAsState()
     val styleLibrary by vm.styleLibrary.collectAsState()
+    val palette = if (night) DarkShelfPalette else LightShelfPalette
 
     var showCreate by remember { mutableStateOf(false) }
     var showMoreMenu by remember { mutableStateOf(false) }
@@ -155,22 +209,39 @@ fun BookshelfScreen(
     }
 
     Scaffold(
+        containerColor = palette.page,
         topBar = {
-            TopAppBar(
-                title = { Text(if (batchMode) "已选 ${selected.value.size} 本" else "书架") },
-                actions = {
-                    IconButton(onClick = { vm.toggleNight() }) {
-                        Icon(
-                            if (night) Icons.Filled.LightMode else Icons.Filled.DarkMode,
-                            contentDescription = "夜间模式"
-                        )
-                    }
-                    IconButton(onClick = { showCreate = true }) {
-                        Icon(Icons.Filled.Add, contentDescription = "新建书籍")
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(palette.page)
+                    .windowInsetsPadding(WindowInsets.statusBars)
+                    .height(56.dp)
+                    .padding(horizontal = 20.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = if (batchMode) "已选 ${selected.value.size} 本" else "书架",
+                    color = palette.mainText,
+                    fontSize = 25.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    HeaderIcon(
+                        iconRes = if (night) R.drawable.ic_shelf_sunny else R.drawable.ic_shelf_moon,
+                        description = if (night) "切换日间模式" else "切换夜间模式",
+                        color = palette.headerIcon
+                    ) { vm.toggleNight() }
+                    HeaderIcon(R.drawable.ic_shelf_add, "新建书籍", palette.headerIcon) {
+                        showCreate = true
                     }
                     Box {
-                        IconButton(onClick = { showMoreMenu = true }) {
-                            Icon(Icons.Filled.MoreVert, contentDescription = "更多")
+                        HeaderIcon(R.drawable.ic_shelf_more, "更多", palette.headerIcon) {
+                            showMoreMenu = true
                         }
                         DropdownMenu(
                             expanded = showMoreMenu,
@@ -206,33 +277,25 @@ fun BookshelfScreen(
                         }
                     }
                 }
-            )
+            }
         }
     ) { padding ->
         Box(modifier = Modifier.fillMaxSize().padding(padding)) {
             Column(modifier = Modifier.fillMaxSize()) {
                 Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 17.dp, end = 17.dp, top = 2.dp, bottom = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(9.dp)
                 ) {
                     Box {
-                        Surface(
-                            shape = RoundedCornerShape(20.dp),
-                            color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                            modifier = Modifier.clickable { showSortMenu = true }
-                        ) {
-                            Row(
-                                Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Icon(Icons.AutoMirrored.Filled.Sort, null, Modifier.size(16.dp))
-                                Spacer(Modifier.width(6.dp))
-                                Text(
-                                    (if (sortMode == "TIME") "按时间" else "按名称") + if (sortAsc) " ↑" else " ↓",
-                                    style = MaterialTheme.typography.labelLarge
-                                )
-                            }
-                        }
+                        ToolbarChip(
+                            text = "☷  " + (if (sortMode == "TIME") "按时间" else "按名称") +
+                                if (sortAsc) " ↑" else " ↓",
+                            palette = palette,
+                            onClick = { showSortMenu = true }
+                        )
                         DropdownMenu(expanded = showSortMenu, onDismissRequest = { showSortMenu = false }) {
                             DropdownMenuItem(
                                 text = { Text("按时间") },
@@ -253,49 +316,21 @@ fun BookshelfScreen(
                             )
                         }
                     }
-                    Spacer(Modifier.width(10.dp))
                     Text(
                         "共 ${visibleBooks.size} 本",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = palette.secondaryText,
+                        fontSize = 13.sp,
+                        maxLines = 1
                     )
                     Spacer(Modifier.weight(1f))
                     // 分组筛选：只显示某个分组的书籍
                     Box {
-                        Surface(
-                            shape = RoundedCornerShape(20.dp),
-                            color = if (groupFilter != null) MaterialTheme.colorScheme.secondaryContainer
-                            else MaterialTheme.colorScheme.surfaceContainerHigh,
-                            modifier = Modifier.clickable { showGroupFilterMenu = true }
-                        ) {
-                            Row(
-                                Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Icon(Icons.Filled.Folder, null, Modifier.size(16.dp))
-                                Spacer(Modifier.width(6.dp))
-                                Text(
-                                    groups.firstOrNull { it.id == groupFilter }?.name ?: "全部分组",
-                                    style = MaterialTheme.typography.labelLarge,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Spacer(Modifier.width(4.dp))
-                                if (groupFilter != null) {
-                                    Icon(
-                                        Icons.Filled.Close,
-                                        contentDescription = "清除筛选",
-                                        modifier = Modifier.size(16.dp).clickable { vm.setGroupFilter(null) }
-                                    )
-                                } else {
-                                    Icon(
-                                        Icons.Filled.KeyboardArrowDown,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                }
-                            }
-                        }
+                        ToolbarChip(
+                            text = groups.firstOrNull { it.id == groupFilter }?.name
+                                ?: "全部分组",
+                            palette = palette,
+                            onClick = { showGroupFilterMenu = true }
+                        )
                         DropdownMenu(
                             expanded = showGroupFilterMenu,
                             onDismissRequest = { showGroupFilterMenu = false }
@@ -324,14 +359,14 @@ fun BookshelfScreen(
                     LazyColumn(
                         state = listState,
                         modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                        contentPadding = PaddingValues(start = 17.dp, end = 17.dp, bottom = 12.dp)
                     ) {
                         items(visibleBooks, key = { it.book.id }) { item ->
-                            BookRow(
+                            ShelfBookRow(
                                 item = item,
                                 checked = item.book.id in selected.value,
                                 batchMode = batchMode,
+                                palette = palette,
                                 onToggleCheck = { toggleSelection(selected, item.book.id) },
                                 onClick = { onOpenBook(item.book.id) },
                                 onMore = { sheetBook = item },
@@ -355,7 +390,8 @@ fun BookshelfScreen(
                                 batchMode = batchMode,
                                 checked = item.book.id in selected.value,
                                 onToggleCheck = { toggleSelection(selected, item.book.id) },
-                                onClick = { onOpenBook(item.book.id) }
+                                onClick = { onOpenBook(item.book.id) },
+                                onMore = { sheetBook = item }
                             )
                         }
                     }
@@ -865,94 +901,181 @@ private fun ExportOption(text: String, onClick: () -> Unit) {
 }
 
 @Composable
-private fun BookRow(
+private fun HeaderIcon(
+    iconRes: Int,
+    description: String,
+    color: Color,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .size(32.dp)
+            .clip(CircleShape)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Image(
+            painter = painterResource(iconRes),
+            contentDescription = description,
+            colorFilter = ColorFilter.tint(color),
+            modifier = Modifier.size(22.dp)
+        )
+    }
+}
+
+@Composable
+private fun ToolbarChip(text: String, palette: ShelfPalette, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(24.dp))
+            .background(palette.chipBg)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 13.dp)
+            .height(38.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(text, color = palette.chipText, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun ShelfBookRow(
     item: BookSummary,
     checked: Boolean,
     batchMode: Boolean,
+    palette: ShelfPalette,
     onToggleCheck: () -> Unit,
     onClick: () -> Unit,
     onMore: () -> Unit,
     onPin: () -> Unit
 ) {
-    Card(
-        modifier = Modifier.fillMaxWidth().clickable { if (batchMode) onToggleCheck() else onClick() },
-        colors = CardDefaults.cardColors()
-    ) {
-        Row(Modifier.padding(10.dp), verticalAlignment = Alignment.Top) {
-            if (batchMode) {
-                androidx.compose.material3.Checkbox(checked = checked, onCheckedChange = { onToggleCheck() })
-            }
-            BookCover(
-                book = item.book,
-                modifier = Modifier.width(60.dp).height(84.dp)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(112.dp)
+            .combinedClickable(
+                onClick = { if (batchMode) onToggleCheck() else onClick() },
+                onLongClick = onMore
             )
-            Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (item.book.pinned) {
-                        Text("置顶 ", style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary)
-                    }
-                    Text(
-                        item.book.title,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
+            .padding(horizontal = 4.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (batchMode) {
+            androidx.compose.material3.Checkbox(checked = checked, onCheckedChange = { onToggleCheck() })
+            Spacer(Modifier.width(4.dp))
+        }
+        BookCover(
+            book = item.book,
+            modifier = Modifier.size(width = 66.dp, height = 82.dp),
+            cornerRadius = 7.dp,
+            titleSize = 12
+        )
+
+        Spacer(Modifier.width(14.dp))
+
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .padding(end = 22.dp),
+            verticalArrangement = Arrangement.Center
+        ) {
+            Text(
+                text = item.book.title,
+                color = palette.mainText,
+                fontSize = 17.sp,
+                lineHeight = 22.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = if (item.chapterCount == 0) "暂未创建正文"
+                else "${item.wordCount} 字 · ${item.chapterCount} 章",
+                color = palette.metaText,
+                fontSize = 13.sp,
+                lineHeight = 18.sp,
+                maxLines = 1
+            )
+            item.book.lastChapterTitle?.let {
                 Text(
-                    "${item.wordCount} 字 · ${item.chapterCount} 章",
-                    style = MaterialTheme.typography.bodySmall
-                )
-                item.book.lastChapterTitle?.let {
-                    Text(
-                        "上次编辑：$it",
-                        style = MaterialTheme.typography.bodySmall,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-                Text(
-                    "创建 ${timeFmt.format(Date(item.book.createdAt))}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Text(
-                    "修改 ${timeFmt.format(Date(item.book.updatedAt))}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    "上次编辑：$it",
+                    color = palette.metaText,
+                    fontSize = 13.sp,
+                    lineHeight = 18.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
-            Column(horizontalAlignment = Alignment.End) {
-                IconButton(onClick = onMore) {
-                    Icon(Icons.Filled.MoreVert, contentDescription = "更多")
-                }
-                TextButton(onClick = onPin) {
-                    Text(if (item.book.pinned) "取消置顶" else "置顶",
-                        style = MaterialTheme.typography.labelSmall)
-                }
+            Text(
+                "修改 ${timeFmt.format(Date(item.book.updatedAt))}",
+                color = palette.metaText,
+                fontSize = 12.sp,
+                lineHeight = 16.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+
+        Column(
+            modifier = Modifier.width(24.dp).height(82.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                "⋮",
+                modifier = Modifier.clickable(onClick = onMore),
+                color = palette.mainText,
+                fontSize = 23.sp,
+                lineHeight = 24.sp
+            )
+            if (item.book.pinned) {
+                Text(
+                    "置顶",
+                    modifier = Modifier.clickable(onClick = onPin),
+                    color = palette.pinText,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1
+                )
+            } else {
+                Text(
+                    "置顶",
+                    modifier = Modifier.clickable(onClick = onPin),
+                    color = palette.secondaryText,
+                    fontSize = 12.sp,
+                    maxLines = 1
+                )
             }
         }
     }
+    Box(
+        Modifier.fillMaxWidth().height(1.dp).background(palette.divider)
+    )
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun BookGridItem(
     item: BookSummary,
     batchMode: Boolean,
     checked: Boolean,
     onToggleCheck: () -> Unit,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onMore: () -> Unit
 ) {
     Column(
-        modifier = Modifier.clickable { if (batchMode) onToggleCheck() else onClick() },
+        modifier = Modifier.combinedClickable(
+            onClick = { if (batchMode) onToggleCheck() else onClick() },
+            onLongClick = onMore
+        ),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Box(Modifier.fillMaxWidth()) {
             BookCover(
                 book = item.book,
-                modifier = Modifier.fillMaxWidth().aspectRatio(0.72f)
+                modifier = Modifier.fillMaxWidth().aspectRatio(0.72f),
+                titleSize = 12
             )
             if (batchMode) {
                 androidx.compose.material3.Checkbox(

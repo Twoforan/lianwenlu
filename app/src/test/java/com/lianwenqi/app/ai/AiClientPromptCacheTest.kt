@@ -105,6 +105,8 @@ class AiClientPromptCacheTest {
             apiType = apiType,
             apiKey = "sk-test"
         ),
+        // 多密钥架构后，实际请求使用密钥上的 Key（Provider.apiKey 仅保留给旧数据）
+        apiKey = "sk-test",
         modelName = "test-model",
         apiType = apiType,
         temperature = 0.8f,

@@ -132,12 +132,9 @@ class AiClient(
      * 与「测试读取模型」不同：`/models` 能通并不代表 `/chat/completions` 能通，
      * 中转站经常只实现其中一部分，所以必须真正发一次对话请求才能确认。
      */
-    suspend fun testChat(provider: Provider, modelName: String): AiResult =
+    suspend fun testChat(endpoint: ModelEndpoint): AiResult =
         chat(
-            endpoint = ModelEndpoint(
-                provider = provider,
-                modelName = modelName,
-                apiType = provider.apiType,
+            endpoint = endpoint.copy(
                 temperature = 0.3f,
                 // 0 表示不发送 max_tokens，避免测试被输出上限截断
                 maxTokens = 0,
@@ -163,9 +160,10 @@ class AiClient(
         webSearch: Boolean = false
     ): AiResult =
         withContext(Dispatchers.IO) {
-            val apiKey = endpoint.provider.apiKey
+            endpoint.blockedReason?.let { return@withContext AiResult.fail(it) }
+            val apiKey = endpoint.apiKey
             if (endpoint.provider.baseUrl.isBlank()) return@withContext AiResult.fail("未配置 baseUrl")
-            if (apiKey.isBlank()) return@withContext AiResult.fail("未配置 apiKey")
+            if (apiKey.isBlank()) return@withContext AiResult.fail("该模型所属密钥未填写 API Key，请到设置中补填")
 
             val wantsStream = onDelta != null
             var sseDisabled = false
@@ -496,7 +494,7 @@ class AiClient(
         val body = bodyText.toRequestBody(JSON_MEDIA)
         val request = Request.Builder()
             .url(endpoint(endpoint.provider.baseUrl, ApiType.CHAT_COMPLETIONS))
-            .header("Authorization", "Bearer ${endpoint.provider.apiKey}")
+            .header("Authorization", "Bearer ${endpoint.apiKey}")
             .header("Content-Type", "application/json")
             .post(body)
             .build()
@@ -568,7 +566,7 @@ class AiClient(
         val body = bodyText.toRequestBody(JSON_MEDIA)
         val request = Request.Builder()
             .url(endpoint(endpoint.provider.baseUrl, ApiType.CHAT_COMPLETIONS))
-            .header("Authorization", "Bearer ${endpoint.provider.apiKey}")
+            .header("Authorization", "Bearer ${endpoint.apiKey}")
             .header("Content-Type", "application/json")
             .post(body)
             .build()
@@ -676,7 +674,7 @@ class AiClient(
         val body = bodyText.toRequestBody(JSON_MEDIA)
         val request = Request.Builder()
             .url(endpoint(endpoint.provider.baseUrl, ApiType.RESPONSES))
-            .header("Authorization", "Bearer ${endpoint.provider.apiKey}")
+            .header("Authorization", "Bearer ${endpoint.apiKey}")
             .header("Content-Type", "application/json")
             .post(body)
             .build()
@@ -733,7 +731,7 @@ class AiClient(
         val body = bodyText.toRequestBody(JSON_MEDIA)
         val request = Request.Builder()
             .url(endpoint(endpoint.provider.baseUrl, ApiType.RESPONSES))
-            .header("Authorization", "Bearer ${endpoint.provider.apiKey}")
+            .header("Authorization", "Bearer ${endpoint.apiKey}")
             .header("Content-Type", "application/json")
             .post(body)
             .build()
@@ -918,8 +916,8 @@ class AiClient(
     private fun anthropicRequest(endpoint: ModelEndpoint, bodyText: String): Request =
         Request.Builder()
             .url(endpoint(endpoint.provider.baseUrl, ApiType.ANTHROPIC_MESSAGES))
-            .header("x-api-key", endpoint.provider.apiKey)
-            .header("Authorization", "Bearer ${endpoint.provider.apiKey}")
+            .header("x-api-key", endpoint.apiKey)
+            .header("Authorization", "Bearer ${endpoint.apiKey}")
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header("Content-Type", "application/json")
             .post(bodyText.toRequestBody(JSON_MEDIA))
