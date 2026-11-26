@@ -13,9 +13,13 @@ import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.animateScrollBy
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -44,16 +48,13 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalDrawerSheet
-import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -136,6 +137,7 @@ import ptq.mpga.ptqbookpageview.widget.PTQBookPageViewRequest
 import ptq.mpga.ptqbookpageview.widget.PTQBookPageViewState
 import ptq.mpga.ptqbookpageview.widget.rememberPTQBookPageViewConfig
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 /** 正文底部为常驻页脚预留的额外间距（dp） */
 private const val READER_FOOTER_SPACE = 22
@@ -254,9 +256,12 @@ fun ReaderScreen(bookId: Long, chapterId: Long, onBack: () -> Unit) {
     var currentId by remember { mutableStateOf(chapterId) }
     var menuVisible by remember { mutableStateOf(false) }
     var panel by remember { mutableStateOf<String?>(null) }
-    // 目录：沿用原来的左侧抽屉
-    val drawerState = rememberDrawerState(DrawerValue.Closed)
+    // 目录：右上角入口，从右侧滑出的抽屉
+    var catalogOpen by remember { mutableStateOf(false) }
     var chapterProgress by remember { mutableStateOf(0f) }
+    // 底部进度条拖动跳页：seekTick 变化时由阅读器执行章内定位
+    var seekProgress by remember { mutableFloatStateOf(0f) }
+    var seekTick by remember { mutableIntStateOf(0) }
     // 连续滚动模式下的外部跳转请求（上一章 / 下一章 / 目录）
     var jumpIndex by remember { mutableIntStateOf(0) }
     var jumpTick by remember { mutableIntStateOf(0) }
@@ -269,6 +274,14 @@ fun ReaderScreen(bookId: Long, chapterId: Long, onBack: () -> Unit) {
     val index = chapters.indexOfFirst { it.id == currentId }
     // 进入阅读器时要定位到的章节
     val initialIndex = chapters.indexOfFirst { it.id == chapterId }
+
+    // 进度面板展示的当前分卷 / 章节位置
+    val progressGroups = remember(chapters, volumes) { readerVolumeGroups(chapters, volumes) }
+    val progressGroup = progressGroups
+        .firstOrNull { g -> g.chapters.any { it.id == currentId } }
+        ?.takeIf { it.volumeId != null }
+    val progressInGroupIndex =
+        progressGroup?.chapters?.indexOfFirst { it.id == currentId } ?: -1
 
     // 全屏阅读：隐藏系统状态栏与导航栏，退出时恢复
     DisposableEffect(immersive) {
@@ -292,9 +305,9 @@ fun ReaderScreen(bookId: Long, chapterId: Long, onBack: () -> Unit) {
     // 菜单 / 面板开合后重新拿回按键焦点，保证音量键翻页一直可用
     LaunchedEffect(menuVisible, panel) { focusRequester.requestFocus() }
 
-    BackHandler(enabled = menuVisible || panel != null || drawerState.isOpen) {
+    BackHandler(enabled = menuVisible || panel != null || catalogOpen) {
         when {
-            drawerState.isOpen -> scope.launch { drawerState.close() }
+            catalogOpen -> catalogOpen = false
             panel != null -> panel = null
             else -> menuVisible = false
         }
@@ -318,6 +331,15 @@ fun ReaderScreen(bookId: Long, chapterId: Long, onBack: () -> Unit) {
         jumpTo(chapters.indexOfFirst { it.id == id })
         panel = null
         menuVisible = false
+        catalogOpen = false
+    }
+
+    /** 底部进度条拖动：先本地反映，再请求阅读器跳到本章对应位置 */
+    fun seekTo(fraction: Float) {
+        val f = fraction.coerceIn(0f, 1f)
+        chapterProgress = f
+        seekProgress = f
+        seekTick++
     }
 
     fun togglePanel(key: String) {
@@ -370,32 +392,7 @@ fun ReaderScreen(bookId: Long, chapterId: Long, onBack: () -> Unit) {
         }
     }
 
-    ModalNavigationDrawer(
-        drawerState = drawerState,
-        gesturesEnabled = drawerState.isOpen,
-        drawerContent = {
-            ModalDrawerSheet(
-                modifier = Modifier
-                    .width(300.dp)
-                    .windowInsetsPadding(WindowInsets.navigationBars),
-                drawerContainerColor = MaterialTheme.colorScheme.surface,
-                windowInsets = WindowInsets.statusBars
-            ) {
-                CatalogPanel(
-                    chapters = chapters,
-                    volumes = volumes,
-                    currentId = currentId,
-                    wordCount = { TextTool.countWords(it) },
-                    onSelect = { id ->
-                        selectChapter(id)
-                        scope.launch { drawerState.close() }
-                    },
-                    onNew = {},
-                    showNew = false
-                )
-            }
-        }
-    ) {
+    Box(Modifier.fillMaxSize()) {
     Box(
         Modifier
             .fillMaxSize()
@@ -428,6 +425,8 @@ fun ReaderScreen(bookId: Long, chapterId: Long, onBack: () -> Unit) {
                 jumpTick = jumpTick,
                 navTick = navTick,
                 navDir = navDir,
+                seekProgress = seekProgress,
+                seekTick = seekTick,
                 style = style,
                 format = format,
                 onToggleMenu = { toggleMenu() },
@@ -445,6 +444,8 @@ fun ReaderScreen(bookId: Long, chapterId: Long, onBack: () -> Unit) {
                 pageStyle = settings.pageStyle,
                 navTick = navTick,
                 navDir = navDir,
+                seekProgress = seekProgress,
+                seekTick = seekTick,
                 previousChapterData = if (index > 0) chapters.getOrNull(index - 1) else null,
                 nextChapterData = if (index >= 0 && index < chapters.lastIndex) chapters.getOrNull(index + 1) else null,
                 onToggleMenu = { toggleMenu() },
@@ -509,7 +510,11 @@ fun ReaderScreen(bookId: Long, chapterId: Long, onBack: () -> Unit) {
             ReaderTopBar(
                 bookTitle = book?.title.orEmpty(),
                 chapterTitle = chapter?.title.orEmpty(),
-                onBack = onBack
+                onBack = onBack,
+                onCatalog = {
+                    focusRequester.requestFocus()
+                    catalogOpen = true
+                }
             )
         }
 
@@ -530,6 +535,20 @@ fun ReaderScreen(bookId: Long, chapterId: Long, onBack: () -> Unit) {
                         onFormat = { vm.updateFormat(it) },
                         onImmersive = { vm.setImmersive(it) },
                         onReader = { vm.updateSettings(it) }
+                    )
+
+                    READER_PANEL_PROGRESS -> ReaderProgressPanel(
+                        volumeTitle = progressGroup?.title ?: "未分卷",
+                        chapterTitle = chapter?.title.orEmpty(),
+                        chapterPosition = when {
+                            progressGroup != null && progressInGroupIndex >= 0 ->
+                                "第 ${progressInGroupIndex + 1}/${progressGroup.chapters.size} 章"
+
+                            index >= 0 -> "第 ${index + 1}/${chapters.size} 章"
+                            else -> "—"
+                        },
+                        progress = chapterProgress,
+                        onSeek = { seekTo(it) }
                     )
 
                     READER_PANEL_STYLE -> ReaderStylePanel(
@@ -577,25 +596,63 @@ fun ReaderScreen(bookId: Long, chapterId: Long, onBack: () -> Unit) {
                     hasNext = index in 0 until chapters.size - 1,
                     onPrevChapter = { goChapter(-1) },
                     onNextChapter = { goChapter(1) },
-                    onEntry = { entry ->
-                        // 「目录」不再占用底部面板，改为打开左侧抽屉
-                        if (entry == READER_PANEL_CATALOG) {
-                            menuVisible = false
-                            panel = null
-                            scope.launch { drawerState.open() }
-                        } else {
-                            togglePanel(entry)
-                        }
-                    }
+                    onEntry = { entry -> togglePanel(entry) }
                 )
             }
         }
     }
+        // 目录抽屉：从右侧滑入，遮罩点击关闭
+        AnimatedVisibility(
+            visible = catalogOpen,
+            enter = fadeIn(),
+            exit = fadeOut()
+        ) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.32f))
+                    .clickable { catalogOpen = false }
+            )
+        }
+        AnimatedVisibility(
+            visible = catalogOpen,
+            enter = slideInHorizontally(initialOffsetX = { it }),
+            exit = slideOutHorizontally(targetOffsetX = { it }),
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .zIndex(2f)
+        ) {
+            Surface(
+                modifier = Modifier
+                    .fillMaxHeight()
+                    .width(300.dp)
+                    .windowInsetsPadding(WindowInsets.statusBars)
+                    .windowInsetsPadding(WindowInsets.navigationBars),
+                color = MaterialTheme.colorScheme.surface,
+                tonalElevation = 3.dp,
+                shadowElevation = 8.dp
+            ) {
+                CatalogPanel(
+                    chapters = chapters,
+                    volumes = volumes,
+                    currentId = currentId,
+                    wordCount = { TextTool.countWords(it) },
+                    onSelect = { id -> selectChapter(id) },
+                    onNew = {},
+                    showNew = false
+                )
+            }
+        }
     }
 }
 
 @Composable
-private fun ReaderTopBar(bookTitle: String, chapterTitle: String, onBack: () -> Unit) {
+private fun ReaderTopBar(
+    bookTitle: String,
+    chapterTitle: String,
+    onBack: () -> Unit,
+    onCatalog: () -> Unit
+) {
     Surface(tonalElevation = 3.dp, shadowElevation = 4.dp) {
         Row(
             Modifier
@@ -625,6 +682,9 @@ private fun ReaderTopBar(bookTitle: String, chapterTitle: String, onBack: () -> 
                     )
                 }
             }
+            IconButton(onClick = onCatalog) {
+                Icon(Icons.AutoMirrored.Filled.List, contentDescription = "目录")
+            }
         }
     }
 }
@@ -641,6 +701,8 @@ private fun ScrollReader(
     jumpTick: Int,
     navTick: Int,
     navDir: Int,
+    seekProgress: Float,
+    seekTick: Int,
     style: StyleSettings,
     format: FormatSettings,
     onToggleMenu: () -> Unit,
@@ -704,6 +766,22 @@ private fun ScrollReader(
     LaunchedEffect(centerIndex) { if (centerIndex >= 0) currentIndex(centerIndex) }
     LaunchedEffect(progress) { currentProgress(progress) }
 
+    // 底部进度条拖动：按本章内比例把可视中线移到目标位置
+    LaunchedEffect(seekTick) {
+        if (seekTick <= 0) return@LaunchedEffect
+        val targetIndex = centerIndex
+        if (targetIndex !in chapters.indices) return@LaunchedEffect
+        val info = listState.layoutInfo
+        val item = info.visibleItemsInfo.firstOrNull { it.index == targetIndex }
+        if (item == null) {
+            listState.scrollToItem(targetIndex)
+            return@LaunchedEffect
+        }
+        val center = (info.viewportStartOffset + info.viewportEndOffset) / 2f
+        val target = item.offset + item.size * seekProgress.coerceIn(0f, 0.98f)
+        listState.scrollBy(target - center)
+    }
+
     LazyColumn(
         state = listState,
         modifier = Modifier
@@ -748,6 +826,8 @@ private fun PagedReader(
     pageStyle: String,
     navTick: Int,
     navDir: Int,
+    seekProgress: Float,
+    seekTick: Int,
     previousChapterData: Chapter?,
     nextChapterData: Chapter?,
     onToggleMenu: () -> Unit,
@@ -996,6 +1076,22 @@ private fun PagedReader(
                     if (pages.size <= 1) 1f else turnIndex.toFloat() / (pages.size - 1)
                 )
             }
+        }
+
+        // 底部进度条拖动：按本章内比例定位到对应页
+        LaunchedEffect(seekTick, pages.size) {
+            if (seekTick <= 0 || pages.isEmpty()) return@LaunchedEffect
+            val target = (seekProgress.coerceIn(0f, 1f) * pages.lastIndex).roundToInt()
+                .coerceIn(0, pages.lastIndex)
+            turnJob?.cancel()
+            targetPage = -1
+            turnProgress = 0f
+            when (pageStyle) {
+                ReaderPageStyle.NONE -> simplePage = target
+                ReaderPageStyle.SLIDE -> pagerState.scrollToPage(target)
+                else -> turnIndex = target
+            }
+            pages.getOrNull(target)?.let { anchorChar = it.startChar }
         }
 
         fun nextPage() {

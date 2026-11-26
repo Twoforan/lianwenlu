@@ -1247,6 +1247,8 @@ fun AgentChatScreen(
     logMessage?.let { message ->
         AgentPromptLogDialog(
             content = message.promptLog,
+            promptTokens = message.promptTokens,
+            contextWindow = models.firstOrNull { it.id == modelId }?.contextWindow ?: 0,
             onDismiss = { logMessage = null }
         )
     }
@@ -2387,15 +2389,37 @@ private fun AgentUsageLine(
     )
 }
 
+/** 提交日志标题下的上下文窗口用量说明；模型窗口或输入 token 未知时显示「未知」 */
+private fun agentContextUsageSummary(promptTokens: Int, contextWindow: Int): String {
+    val used = if (promptTokens >= 0) "%,d".format(promptTokens) else "未知"
+    val remain = if (promptTokens >= 0 && contextWindow > 0) {
+        "%,d".format((contextWindow - promptTokens).coerceAtLeast(0))
+    } else {
+        "未知"
+    }
+    return "上下文窗口占用：$used · 剩余：$remain"
+}
+
 /** 查看某条 Agent 回复提交给模型的完整输入；内容较长时可滚动、可选中复制 */
 @Composable
 private fun AgentPromptLogDialog(
     content: String,
+    promptTokens: Int,
+    contextWindow: Int,
     onDismiss: () -> Unit
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("提交日志") },
+        title = {
+            Column {
+                Text("提交日志")
+                Text(
+                    agentContextUsageSummary(promptTokens, contextWindow),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
         text = {
             SelectionContainer {
                 Column(

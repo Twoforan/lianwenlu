@@ -144,6 +144,7 @@ fun BookDetailScreen(
     val chapters by vm.chapters.collectAsState()
     val outline by vm.outline.collectAsState()
     val categories by vm.categories.collectAsState()
+    val lastOpenedChapterId by vm.lastOpenedChapterId.collectAsState()
 
     // 整卷压缩：任务状态、候选与生效版都来自 F1 / F5 数据层，UI 不自行猜测
     val compressionVm = appViewModel(key = "compression-$bookId") {
@@ -302,7 +303,7 @@ fun BookDetailScreen(
                     volumes = volumes,
                     chapters = chapters,
                     desc = desc,
-                    lastChapterId = book?.lastChapterId,
+                    lastChapterId = lastOpenedChapterId,
                     onOpenChapter = onOpenChapter,
                     onNewChapter = { vid -> vm.createChapter(vid) },
                     onDeleteChapter = { vm.deleteChapter(it) },
@@ -403,10 +404,12 @@ private fun CatalogTab(
     compressionLabel: (Long) -> String,
     onCompressVolume: (Volume) -> Unit
 ) {
-    // 默认只展开「上次最新编辑章节」所属的分卷，其他分卷收起；
-    // 用户手动展开 / 收起后记入 collapsedOverride，之后不再随数据变化重置
+    // 默认只展开「上次在编辑页打开的章节」所属的分卷，其他分卷收起；
+    // 还没有记录时展开第一章所在分卷。用户手动展开 / 收起后记入 collapsedOverride，不再随数据变化重置
     val defaultCollapsed = remember(volumes, chapters, lastChapterId) {
-        val lastId = lastChapterId ?: chapters.maxByOrNull { it.updatedAt }?.id
+        val lastId = lastChapterId
+            ?: chapters.minByOrNull { it.sortOrder }?.id
+            ?: chapters.firstOrNull()?.id
         val lastVolumeId = chapters.firstOrNull { it.id == lastId }?.volumeId
         volumes.map { it.id }.filter { it != lastVolumeId }.toSet()
     }

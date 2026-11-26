@@ -95,6 +95,10 @@ class Prefs(private val context: Context) {
         val lastBookId = longPreferencesKey("last_book_id")
         val lastChapterId = longPreferencesKey("last_chapter_id")
 
+        // 书籍详情页「上次打开章节」：只由章节编辑页写入，与阅读进度相互独立
+        val detailLastBookId = longPreferencesKey("detail_last_book_id")
+        val detailLastChapterId = longPreferencesKey("detail_last_chapter_id")
+
         // 文风档案详情：分析结果是否收起（跨会话保持）
         val styleAnalysisCollapsed = booleanPreferencesKey("style_analysis_collapsed")
 
@@ -169,7 +173,8 @@ class Prefs(private val context: Context) {
 
         // AI 对话分组中「用户手动展开」的分组 key 集合（默认全部收起，下次进入沿用上次的展开状态）
         val chatExpandedGroups = stringSetPreferencesKey("chat_expanded_groups")
-
+        // 模型与供应商页中「用户手动展开」的供应商 id 集合（默认全部收起），用逗号拼接存字符串
+        val providerExpandedIds = stringPreferencesKey("provider_expanded_ids_csv")
         // 长期记忆（书本向量化）：向量化工具（互斥）、默认开启、自动续跑、默认勾选检索
         val memoryToolMode = stringPreferencesKey("memory_tool_mode")
         val memoryEmbeddingBaseUrl = stringPreferencesKey("memory_embedding_base_url")
@@ -244,6 +249,12 @@ class Prefs(private val context: Context) {
     val activeModelId: Flow<Long> = context.dataStore.data.map { it[K.activeModelId] ?: 0L }
     val lastBookId: Flow<Long> = context.dataStore.data.map { it[K.lastBookId] ?: 0L }
     val lastChapterId: Flow<Long> = context.dataStore.data.map { it[K.lastChapterId] ?: 0L }
+
+    /** 详情页「上次打开章节」所属书籍；0 表示尚未记录 */
+    val detailLastBookId: Flow<Long> = context.dataStore.data.map { it[K.detailLastBookId] ?: 0L }
+
+    /** 详情页「上次打开章节」id；0 表示尚未记录 */
+    val detailLastChapterId: Flow<Long> = context.dataStore.data.map { it[K.detailLastChapterId] ?: 0L }
 
     /** 文风档案详情：分析结果是否收起（默认展开） */
     val styleAnalysisCollapsed: Flow<Boolean> =
@@ -375,6 +386,14 @@ class Prefs(private val context: Context) {
      */
     val chatExpandedGroups: Flow<Set<String>> =
         context.dataStore.data.map { it[K.chatExpandedGroups] ?: emptySet() }
+
+    /** 供应商卡片的展开状态（默认全部收起） */
+    val expandedProviderIds: Flow<Set<Long>> = context.dataStore.data.map { prefs ->
+        prefs[K.providerExpandedIds].orEmpty()
+            .split(',')
+            .mapNotNull { it.trim().toLongOrNull() }
+            .toSet()
+    }
 
     /** 向量化工具（互斥）：api = 厂商 Embedding API；local = 本地 GGUF 工具；off = 关闭 */
     val memoryToolMode: Flow<String> =
@@ -576,6 +595,15 @@ class Prefs(private val context: Context) {
         val cur = it[K.chatExpandedGroups] ?: emptySet()
         it[K.chatExpandedGroups] = if (expanded) cur + key else cur - key
     }
+
+    suspend fun setProviderExpanded(id: Long, expanded: Boolean) = writePrefs {
+        val cur = it[K.providerExpandedIds].orEmpty()
+            .split(',')
+            .mapNotNull { s -> s.trim().toLongOrNull() }
+            .toMutableSet()
+        if (expanded) cur.add(id) else cur.remove(id)
+        it[K.providerExpandedIds] = cur.joinToString(",")
+    }
     suspend fun setMemoryToolMode(v: String) = writePrefs { it[K.memoryToolMode] = v }
     suspend fun setMemoryEmbeddingBaseUrl(v: String) = writePrefs { it[K.memoryEmbeddingBaseUrl] = v }
     suspend fun setMemoryEmbeddingApiKey(v: String) = writePrefs { it[K.memoryEmbeddingApiKey] = v }
@@ -602,6 +630,12 @@ class Prefs(private val context: Context) {
     suspend fun setLastOpened(bookId: Long, chapterId: Long) = writePrefs {
         it[K.lastBookId] = bookId
         it[K.lastChapterId] = chapterId
+    }
+
+    /** 记录详情页默认展开用的「上次打开章节」；仅章节编辑页调用 */
+    suspend fun markDetailOpened(bookId: Long, chapterId: Long) = writePrefs {
+        it[K.detailLastBookId] = bookId
+        it[K.detailLastChapterId] = chapterId
     }
 
     suspend fun updateFormat(block: (com.lianwenqi.app.util.FormatSettings) -> com.lianwenqi.app.util.FormatSettings) {

@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -34,6 +35,12 @@ class BookDetailViewModel(
 
     val outline: StateFlow<List<OutlineItem>> =
         outlineRepository.observeOutline(bookId).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    /** 上次在章节编辑页打开的章节（仅本书有效）；用于目录默认展开该章所属分卷 */
+    val lastOpenedChapterId: StateFlow<Long?> =
+        combine(container.prefs.detailLastBookId, container.prefs.detailLastChapterId) { b, c ->
+            if (b == bookId && c > 0) c else null
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
     fun createVolume() = viewModelScope.launch { bookRepository.createVolume(bookId) }
 

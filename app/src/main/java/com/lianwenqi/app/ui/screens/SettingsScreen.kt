@@ -7,12 +7,19 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.outlined.Chat
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Error
+import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.outlined.Article
 import androidx.compose.material.icons.outlined.Bolt
 import androidx.compose.material.icons.outlined.CloudDownload
@@ -38,6 +45,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -54,9 +62,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
@@ -72,8 +84,10 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
@@ -89,10 +103,16 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -100,6 +120,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lianwenqi.app.AppContainer
+import com.lianwenqi.app.R
 import com.lianwenqi.app.ai.AiError
 import com.lianwenqi.app.ai.AiException
 import com.lianwenqi.app.ai.AiResult
@@ -145,6 +166,12 @@ class SettingsViewModel(private val container: AppContainer) : ViewModel() {
         prefs.nightMode.stateIn(viewModelScope, SharingStarted.Eagerly, false)
     val activeModelId: StateFlow<Long> =
         prefs.activeModelId.stateIn(viewModelScope, SharingStarted.Eagerly, 0L)
+    /** 供应商卡片展开状态（默认全部收起） */
+    val expandedProviderIds: StateFlow<Set<Long>> =
+        prefs.expandedProviderIds.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptySet())
+
+    fun setProviderExpanded(id: Long, expanded: Boolean) =
+        viewModelScope.launch { prefs.setProviderExpanded(id, expanded) }
 
     fun saveProvider(provider: Provider) = viewModelScope.launch { configRepository.saveProvider(provider) }
     fun deleteProvider(id: Long) = viewModelScope.launch { configRepository.deleteProvider(id) }
@@ -186,7 +213,7 @@ class SettingsViewModel(private val container: AppContainer) : ViewModel() {
     fun testChat(provider: Provider, key: ProviderKey, model: AiModel?, onResult: (Boolean, String) -> Unit) =
         viewModelScope.launch {
             if (model == null) {
-                onResult(false, "该密钥下还没有模型：请先点「读取模型」添加模型")
+                onResult(false, "该密钥下还没有模型：请先点「添加模型」添加模型")
                 return@launch
             }
             val url = container.aiClient.chatUrl(provider.baseUrl, provider.apiType)
@@ -290,6 +317,7 @@ fun SettingsScreen(
     val prompts by vm.prompts.collectAsState()
     val modelPrompts by vm.modelPrompts.collectAsState()
     val activeModelId by vm.activeModelId.collectAsState()
+    val expandedProviderIds by vm.expandedProviderIds.collectAsState()
 
     // 默认停在「通用」页：点击底部「设置」以及从 AI 工具 / 前缀词管理 / 检查更新等子页面返回时，
     // 都会回到该页（返回时本页重新组合，记住的 tab 复位为默认值 2）
@@ -299,7 +327,6 @@ fun SettingsScreen(
     // 密钥弹窗：addKeyFor 非空表示「添加」；editKey 非空表示「编辑」
     var addKeyFor by remember { mutableStateOf<Provider?>(null) }
     var editKey by remember { mutableStateOf<ProviderKey?>(null) }
-    var deleteKeyTarget by remember { mutableStateOf<ProviderKey?>(null) }
     var addModelFor by remember { mutableStateOf<Pair<Provider, ProviderKey>?>(null) }
     var editModel by remember { mutableStateOf<AiModel?>(null) }
     var editPrompt by remember { mutableStateOf<Prompt?>(null) }
@@ -422,12 +449,14 @@ fun SettingsScreen(
                         providerKeys = providerKeys,
                         models = models,
                         activeModelId = activeModelId,
+                        expandedProviderIds = expandedProviderIds,
+                        onToggleProvider = { id, expanded -> vm.setProviderExpanded(id, expanded) },
                         onAddProvider = { editProvider = null; showProviderDialog = true },
                         onEditProvider = { editProvider = it; showProviderDialog = true },
                         onDeleteProvider = { vm.deleteProvider(it.id) },
                         onAddKey = { addKeyFor = it },
                         onEditKey = { editKey = it },
-                        onDeleteKey = { deleteKeyTarget = it },
+                        onDeleteKey = { vm.deleteProviderKey(it.id) },
                         onToggleKey = { key, enabled -> vm.saveProviderKey(key.copy(enabled = enabled)) {} },
                         onAddModel = { p, k -> addModelFor = p to k },
                         onEditModel = { editModel = it },
@@ -732,27 +761,6 @@ fun SettingsScreen(
             }
         }
 
-        deleteKeyTarget?.let { key ->
-            val count = models.count { it.providerKeyId == key.id }
-            AlertDialog(
-                onDismissRequest = { deleteKeyTarget = null },
-                title = { Text("删除 API 密钥") },
-                text = {
-                    Text(
-                        if (count > 0) "该密钥下还有 $count 个模型，删除密钥会同时删除这些模型。是否继续？"
-                        else "确定删除密钥「${key.name}」吗？"
-                    )
-                },
-                confirmButton = {
-                    TextButton(onClick = {
-                        vm.deleteProviderKey(key.id)
-                        deleteKeyTarget = null
-                    }) { Text("删除", color = MaterialTheme.colorScheme.error) }
-                },
-                dismissButton = { TextButton(onClick = { deleteKeyTarget = null }) { Text("取消") } }
-            )
-        }
-
         addModelFor?.let { (provider, key) ->
             AddModelDialog(
                 provider = provider,
@@ -995,6 +1003,8 @@ private fun ProvidersTab(
     providerKeys: List<ProviderKey>,
     models: List<AiModel>,
     activeModelId: Long,
+    expandedProviderIds: Set<Long>,
+    onToggleProvider: (Long, Boolean) -> Unit,
     onAddProvider: () -> Unit,
     onEditProvider: (Provider) -> Unit,
     onDeleteProvider: (Provider) -> Unit,
@@ -1015,6 +1025,8 @@ private fun ProvidersTab(
     var testingChatKeyId by remember { mutableStateOf<Long?>(null) }
     val testResults = remember { mutableStateMapOf<Long, String>() }
     val testOk = remember { mutableStateMapOf<Long, Boolean>() }
+    // 二次确认删除：值为 "m<模型id>" 或 "k<密钥id>"，点其他任意操作都会清空
+    var pendingDelete by remember { mutableStateOf<String?>(null) }
     val scheme = MaterialTheme.colorScheme
     val activeModel = models.firstOrNull { it.id == activeModelId }
 
@@ -1026,16 +1038,23 @@ private fun ProvidersTab(
         item {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("模型供应商", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    // 第一行：供应商与密钥总数，加粗突出
                     Text(
-                        if (activeModel != null) "当前使用：${activeModel.displayName}"
-                        else "共 ${providers.size} 个供应商 · ${models.size} 个模型",
+                        "共 ${providers.size} 个供应商 · 共 ${providerKeys.size} 个密钥",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    // 第二行：当前使用的模型
+                    Text(
+                        "当前使用：${activeModel?.displayName ?: "未选择模型"}",
                         style = MaterialTheme.typography.bodySmall,
                         color = scheme.onSurfaceVariant,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                 }
+                Spacer(Modifier.width(8.dp))
                 FilledTonalButton(onClick = onAddProvider, contentPadding = PaddingValues(horizontal = 14.dp)) {
                     Icon(Icons.Filled.Add, null, Modifier.size(18.dp))
                     Spacer(Modifier.width(4.dp))
@@ -1070,15 +1089,30 @@ private fun ProvidersTab(
             val keys = providerKeys.filter { it.providerId == p.id }
             val providerModels = models.filter { it.providerId == p.id }
             val orphans = providerModels.filter { m -> keys.none { it.id == m.providerKeyId } }
+            val expanded = p.id in expandedProviderIds
             Card(
                 Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(16.dp),
                 colors = CardDefaults.cardColors(containerColor = scheme.surface),
                 border = BorderStroke(1.dp, scheme.outlineVariant)
             ) {
-                Column(Modifier.padding(14.dp)) {
-                    // ---------- 供应商头部 ----------
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(
+                    Modifier
+                        .padding(14.dp)
+                        // 点击卡片空白处：取消「待确认删除」状态
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null
+                        ) { pendingDelete = null }
+                ) {
+                    // ---------- 供应商头部（点击整行收起 / 展开） ----------
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable { pendingDelete = null; onToggleProvider(p.id, !expanded) },
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                         Box(
                             Modifier.size(42.dp).clip(RoundedCornerShape(12.dp)).background(scheme.primaryContainer),
                             contentAlignment = Alignment.Center
@@ -1107,12 +1141,32 @@ private fun ProvidersTab(
                             Spacer(Modifier.height(3.dp))
                             StatusPill(p.apiType.label, scheme.secondaryContainer, scheme.onSecondaryContainer)
                         }
-                        IconButton(onClick = { onEditProvider(p) }) {
-                            Icon(Icons.Outlined.Edit, "编辑", Modifier.size(20.dp), tint = scheme.onSurfaceVariant)
+                        IconButton(onClick = { onEditProvider(p) }, modifier = Modifier.size(36.dp)) {
+                            Icon(Icons.Outlined.Edit, "编辑", Modifier.size(18.dp), tint = scheme.onSurfaceVariant)
                         }
-                        IconButton(onClick = { onDeleteProvider(p) }) {
-                            Icon(Icons.Outlined.Delete, "删除", Modifier.size(20.dp), tint = scheme.onSurfaceVariant)
+                        IconButton(
+                            onClick = {
+                                if (pendingDelete == "p${p.id}") {
+                                    pendingDelete = null
+                                    onDeleteProvider(p)
+                                } else {
+                                    pendingDelete = "p${p.id}"
+                                }
+                            },
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            if (pendingDelete == "p${p.id}") {
+                                Icon(Icons.Filled.Check, "确认删除供应商", Modifier.size(18.dp), tint = scheme.error)
+                            } else {
+                                Icon(Icons.Outlined.Delete, "删除", Modifier.size(18.dp), tint = scheme.onSurfaceVariant)
+                            }
                         }
+                        Icon(
+                            if (expanded) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
+                            contentDescription = if (expanded) "收起供应商" else "展开供应商",
+                            modifier = Modifier.size(22.dp),
+                            tint = scheme.onSurfaceVariant
+                        )
                     }
                     Spacer(Modifier.height(8.dp))
                     Text(
@@ -1129,6 +1183,7 @@ private fun ProvidersTab(
                         overflow = TextOverflow.Ellipsis
                     )
 
+                    if (expanded) {
                     // ---------- 密钥列表 ----------
                     Spacer(Modifier.height(14.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1141,7 +1196,7 @@ private fun ProvidersTab(
                             modifier = Modifier.weight(1f)
                         )
                         TextButton(
-                            onClick = { onAddKey(p) },
+                            onClick = { pendingDelete = null; onAddKey(p) },
                             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
                             modifier = Modifier.heightIn(min = 32.dp)
                         ) {
@@ -1152,7 +1207,7 @@ private fun ProvidersTab(
                     }
                     if (keys.isEmpty()) {
                         Text(
-                            "还没有 API 密钥，请先添加密钥，再为密钥读取模型",
+                            "还没有 API 密钥，请先添加密钥，再为密钥添加模型",
                             Modifier
                                 .fillMaxWidth()
                                 .padding(top = 6.dp)
@@ -1170,7 +1225,14 @@ private fun ProvidersTab(
                             shape = RoundedCornerShape(12.dp),
                             color = scheme.surfaceVariant.copy(alpha = if (key.enabled) 0.45f else 0.25f)
                         ) {
-                            Column(Modifier.padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = 10.dp)) {
+                            Column(
+                                Modifier
+                                    .padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = 10.dp)
+                                    .clickable(
+                                        interactionSource = remember { MutableInteractionSource() },
+                                        indication = null
+                                    ) { pendingDelete = null }
+                            ) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Column(Modifier.weight(1f)) {
                                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1199,14 +1261,31 @@ private fun ProvidersTab(
                                     }
                                     Switch(
                                         checked = key.enabled,
-                                        onCheckedChange = { onToggleKey(key, it) },
+                                        onCheckedChange = { pendingDelete = null; onToggleKey(key, it) },
                                         modifier = Modifier.scale(0.8f)
                                     )
-                                    IconButton(onClick = { onEditKey(key) }, modifier = Modifier.size(36.dp)) {
+                                    IconButton(
+                                        onClick = { pendingDelete = null; onEditKey(key) },
+                                        modifier = Modifier.size(36.dp)
+                                    ) {
                                         Icon(Icons.Outlined.Edit, "编辑密钥", Modifier.size(18.dp), tint = scheme.onSurfaceVariant)
                                     }
-                                    IconButton(onClick = { onDeleteKey(key) }, modifier = Modifier.size(36.dp)) {
-                                        Icon(Icons.Outlined.Delete, "删除密钥", Modifier.size(18.dp), tint = scheme.onSurfaceVariant)
+                                    IconButton(
+                                        onClick = {
+                                            if (pendingDelete == "k${key.id}") {
+                                                pendingDelete = null
+                                                onDeleteKey(key)
+                                            } else {
+                                                pendingDelete = "k${key.id}"
+                                            }
+                                        },
+                                        modifier = Modifier.size(36.dp)
+                                    ) {
+                                        if (pendingDelete == "k${key.id}") {
+                                            Icon(Icons.Filled.Check, "确认删除密钥", Modifier.size(18.dp), tint = scheme.error)
+                                        } else {
+                                            Icon(Icons.Outlined.Delete, "删除密钥", Modifier.size(18.dp), tint = scheme.onSurfaceVariant)
+                                        }
                                     }
                                 }
                                 if (keyModels.isNotEmpty()) {
@@ -1219,9 +1298,11 @@ private fun ProvidersTab(
                                             ModelRowItem(
                                                 model = m,
                                                 active = m.id == activeModelId,
-                                                onEdit = { onEditModel(m) },
-                                                onDelete = { onDeleteModel(m) },
-                                                onSetActive = { onSetActive(m) }
+                                                confirmDelete = pendingDelete == "m${m.id}",
+                                                onEdit = { pendingDelete = null; onEditModel(m) },
+                                                onSetActive = { pendingDelete = null; onSetActive(m) },
+                                                onRequestDelete = { pendingDelete = "m${m.id}" },
+                                                onDelete = { pendingDelete = null; onDeleteModel(m) }
                                             )
                                         }
                                     }
@@ -1232,12 +1313,12 @@ private fun ProvidersTab(
                                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
                                     KeyActionButton(
-                                        text = "读取模型",
+                                        text = "添加模型",
                                         icon = Icons.Outlined.CloudDownload,
                                         primary = true,
                                         enabled = true,
                                         modifier = Modifier.weight(1f)
-                                    ) { onAddModel(p, key) }
+                                    ) { pendingDelete = null; onAddModel(p, key) }
                                     KeyActionButton(
                                         text = if (testingKeyId == key.id) "测试中…" else "测试读取",
                                         icon = Icons.Outlined.NetworkCheck,
@@ -1328,12 +1409,15 @@ private fun ProvidersTab(
                                 ModelRowItem(
                                     model = m,
                                     active = m.id == activeModelId,
-                                    onEdit = { onEditModel(m) },
-                                    onDelete = { onDeleteModel(m) },
-                                    onSetActive = { onSetActive(m) }
+                                    confirmDelete = pendingDelete == "m${m.id}",
+                                    onEdit = { pendingDelete = null; onEditModel(m) },
+                                    onSetActive = { pendingDelete = null; onSetActive(m) },
+                                    onRequestDelete = { pendingDelete = "m${m.id}" },
+                                    onDelete = { pendingDelete = null; onDeleteModel(m) }
                                 )
                             }
                         }
+                    }
                     }
                 }
             }
@@ -1398,9 +1482,11 @@ private fun KeyActionButton(
 private fun ModelRowItem(
     model: AiModel,
     active: Boolean,
+    confirmDelete: Boolean,
     onEdit: () -> Unit,
-    onDelete: () -> Unit,
-    onSetActive: () -> Unit
+    onSetActive: () -> Unit,
+    onRequestDelete: () -> Unit,
+    onDelete: () -> Unit
 ) {
     val scheme = MaterialTheme.colorScheme
     Row(
@@ -1453,8 +1539,12 @@ private fun ModelRowItem(
                 Text("使用", style = MaterialTheme.typography.labelMedium)
             }
         }
-        IconButton(onClick = onDelete, modifier = Modifier.size(36.dp)) {
-            Icon(Icons.Outlined.Delete, "删除", Modifier.size(17.dp), tint = scheme.onSurfaceVariant)
+        IconButton(onClick = if (confirmDelete) onDelete else onRequestDelete, modifier = Modifier.size(36.dp)) {
+            if (confirmDelete) {
+                Icon(Icons.Filled.Check, "确认删除", Modifier.size(18.dp), tint = scheme.error)
+            } else {
+                Icon(Icons.Outlined.Delete, "删除", Modifier.size(17.dp), tint = scheme.onSurfaceVariant)
+            }
         }
     }
 }
@@ -1682,129 +1772,330 @@ private val vendorPresets = listOf(
     VendorPreset("Google Gemini（OpenAI 兼容）", "https://generativelanguage.googleapis.com/v1beta/openai", ApiType.CHAT_COMPLETIONS)
 )
 
+private const val CustomVendorLabel = "自定义（手动填写）"
+
 @Composable
 private fun ProviderDialog(
     initial: Provider?,
     onDismiss: () -> Unit,
     onSave: (Provider, ProviderKey?) -> Unit
 ) {
+    val editing = initial != null
     var name by remember { mutableStateOf(initial?.name ?: "") }
-    var baseUrl by remember { mutableStateOf(initial?.baseUrl ?: "https://api.openai.com/v1") }
+    var baseUrl by remember { mutableStateOf(initial?.baseUrl ?: "") }
     var apiType by remember { mutableStateOf(initial?.apiType ?: ApiType.CHAT_COMPLETIONS) }
-    var showTypeMenu by remember { mutableStateOf(false) }
     // 新建供应商时可选同时添加第一个密钥（编辑供应商不涉及密钥）
     var firstKeyName by remember { mutableStateOf("") }
     var firstKeyApiKey by remember { mutableStateOf("") }
-    // 选了哪个供应商预设（仅作展示，选中即回填 baseUrl / 接口类型）
-    var vendorLabel by remember { mutableStateOf("自定义") }
-    var showVendorMenu by remember { mutableStateOf(false) }
+    // 内置供应商：默认按 baseUrl 反查，匹配不到即视为自定义
+    var vendorLabel by remember {
+        mutableStateOf(
+            initial?.let { p -> vendorPresets.firstOrNull { it.baseUrl == p.baseUrl }?.label }
+                ?: if (initial == null) "" else CustomVendorLabel
+        )
+    }
+    var presetOpen by remember { mutableStateOf(false) }
+    var typeOpen by remember { mutableStateOf(false) }
 
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(if (initial == null) "添加供应商" else "编辑供应商") },
-        text = {
-            Column(Modifier.verticalScroll(rememberScrollState())) {
-                OutlinedTextField(value = name, onValueChange = { name = it },
-                    label = { Text("名称") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                Spacer(Modifier.height(8.dp))
-                Column {
-                    OutlinedButton(onClick = { showVendorMenu = true }, modifier = Modifier.fillMaxWidth()) {
-                        Text("供应商：$vendorLabel", maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    }
-                    DropdownMenu(expanded = showVendorMenu, onDismissRequest = { showVendorMenu = false }) {
-                        vendorPresets.forEach { v ->
-                            DropdownMenuItem(
-                                text = {
-                                    Column {
-                                        Text(v.label)
-                                        Text(
-                                            v.baseUrl,
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
-                                },
-                                onClick = {
-                                    vendorLabel = v.label
-                                    baseUrl = v.baseUrl
-                                    apiType = v.apiType
-                                    if (name.isBlank()) name = v.label
-                                    showVendorMenu = false
-                                }
-                            )
-                        }
-                        DropdownMenuItem(
-                            text = { Text("自定义") },
-                            onClick = { vendorLabel = "自定义"; showVendorMenu = false }
+    fun chooseVendor(preset: VendorPreset?) {
+        presetOpen = false
+        if (preset == null) {
+            vendorLabel = CustomVendorLabel
+            return
+        }
+        vendorLabel = preset.label
+        baseUrl = preset.baseUrl
+        apiType = preset.apiType
+        if (name.isBlank()) name = preset.label
+    }
+
+    val canSave = name.isNotBlank() && baseUrl.isNotBlank()
+    fun doSave() {
+        if (!canSave) return
+        val provider = (initial ?: Provider(name = name, baseUrl = baseUrl))
+            .copy(name = name.trim(), baseUrl = baseUrl.trim(), apiType = apiType)
+        val firstKey = if (!editing && firstKeyApiKey.isNotBlank()) {
+            ProviderKey(
+                providerId = provider.id,
+                name = firstKeyName.trim().ifBlank { "默认密钥" },
+                apiKey = firstKeyApiKey.trim()
+            )
+        } else null
+        onSave(provider, firstKey)
+    }
+
+    BackHandler(onBack = onDismiss)
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.32f))
+            .imePadding()
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null
+            ) { onDismiss() },
+        contentAlignment = Alignment.Center
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .fillMaxHeight(0.94f)
+                .padding(horizontal = 14.dp, vertical = 16.dp)
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null
+                ) { },
+            shape = RoundedCornerShape(14.dp),
+            color = Color.White,
+            border = BorderStroke(1.dp, Color(0xFFEBEEF4)),
+            shadowElevation = 16.dp
+        ) {
+            Column(Modifier.fillMaxSize()) {
+                // ---------- 头部：渐变四角星 + 标题 + 副标题 ----------
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(start = 16.dp, end = 6.dp, top = 16.dp, bottom = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Image(
+                        painter = painterResource(R.drawable.ic_provider_star),
+                        contentDescription = null,
+                        modifier = Modifier.size(44.dp)
+                    )
+                    Spacer(Modifier.width(14.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            if (editing) "编辑供应商" else "添加供应商",
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.Black
                         )
+                        Text("配置api服务供应商", fontSize = 10.sp, color = Color(0xFF8B93A5))
+                    }
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Filled.Close, "关闭", Modifier.size(18.dp), tint = Color(0xFF9AA1AF))
                     }
                 }
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(value = baseUrl, onValueChange = { baseUrl = it },
-                    label = { Text("baseUrl") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                Spacer(Modifier.height(8.dp))
-                Column {
-                    OutlinedButton(onClick = { showTypeMenu = true }, modifier = Modifier.fillMaxWidth()) {
-                        Text("接口：${apiType.label}")
+                HorizontalDivider(color = Color(0xFFEBEEF4))
+
+                // ---------- 内容区 ----------
+                Column(
+                    Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalArrangement = Arrangement.spacedBy(18.dp)
+                ) {
+                    // 供应商信息
+                    Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                        DialogSectionTitle("供应商信息")
+                        DialogFieldLabel("内置供应商")
+                        DialogDropdownField(
+                            value = vendorLabel,
+                            placeholder = "请选择供应商",
+                            expanded = presetOpen,
+                            onToggle = { presetOpen = !presetOpen }
+                        )
+                        if (presetOpen) {
+                            Column(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(max = 260.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(Color.White)
+                                    .border(1.dp, DialogFieldBorder, RoundedCornerShape(10.dp))
+                                    .verticalScroll(rememberScrollState())
+                            ) {
+                                vendorPresets.forEachIndexed { index, v ->
+                                    if (index > 0) HorizontalDivider(color = Color(0xFFEFF1F6))
+                                    ProviderPresetRow(
+                                        label = v.label,
+                                        baseUrl = v.baseUrl,
+                                        selected = vendorLabel == v.label
+                                    ) { chooseVendor(v) }
+                                }
+                                HorizontalDivider(color = Color(0xFFEFF1F6))
+                                ProviderPresetRow(
+                                    label = CustomVendorLabel,
+                                    baseUrl = "手动填写名称与 BaseURL",
+                                    selected = vendorLabel == CustomVendorLabel
+                                ) { chooseVendor(null) }
+                            }
+                        }
+                        DialogFieldLabel("供应商名称")
+                        DialogField(
+                            value = name,
+                            onValueChange = { name = it },
+                            placeholder = "例如：DeepSeek"
+                        )
+                        DialogFieldLabel("BaseURL")
+                        DialogField(
+                            value = baseUrl,
+                            onValueChange = { baseUrl = it },
+                            placeholder = "https://api.example.com/v1",
+                            keyboardType = KeyboardType.Uri
+                        )
+                        // 自定义供应商才需要手动指定接口协议
+                        if (vendorLabel == CustomVendorLabel) {
+                            DialogFieldLabel("接口协议")
+                            DialogDropdownField(
+                                value = apiType.label,
+                                placeholder = "请选择接口协议",
+                                expanded = typeOpen,
+                                onToggle = { typeOpen = !typeOpen }
+                            )
+                            if (typeOpen) {
+                                Column(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(Color.White)
+                                        .border(1.dp, DialogFieldBorder, RoundedCornerShape(10.dp))
+                                ) {
+                                    ApiType.entries.forEachIndexed { index, t ->
+                                        if (index > 0) HorizontalDivider(color = Color(0xFFEFF1F6))
+                                        Row(
+                                            Modifier
+                                                .fillMaxWidth()
+                                                .clickable { apiType = t; typeOpen = false }
+                                                .padding(horizontal = 12.dp, vertical = 11.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                t.label,
+                                                Modifier.weight(1f),
+                                                fontSize = 12.sp,
+                                                color = if (apiType == t) DialogPurple else DialogInkTitle,
+                                                fontWeight = if (apiType == t) FontWeight.Medium else FontWeight.Normal
+                                            )
+                                            if (apiType == t) {
+                                                Icon(
+                                                    Icons.Filled.Check,
+                                                    "已选择",
+                                                    Modifier.size(14.dp),
+                                                    tint = DialogPurple
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
-                    DropdownMenu(expanded = showTypeMenu, onDismissRequest = { showTypeMenu = false }) {
-                        ApiType.entries.forEach { t ->
-                            DropdownMenuItem(
-                                text = { Text(t.label) },
-                                onClick = { apiType = t; showTypeMenu = false }
+
+                    // 首个 API 密钥（仅新建时提供，可留空）
+                    if (!editing) {
+                        Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                            DialogSectionTitle("首个api秘钥（可稍后添加）")
+                            DialogFieldLabel("秘钥备注")
+                            DialogField(
+                                value = firstKeyName,
+                                onValueChange = { firstKeyName = it },
+                                placeholder = "例如：自动化使用"
+                            )
+                            DialogFieldLabel("API Key")
+                            DialogField(
+                                value = firstKeyApiKey,
+                                onValueChange = { firstKeyApiKey = it },
+                                placeholder = "粘贴你的API Key",
+                                password = true
                             )
                         }
                     }
                 }
-                if (initial == null) {
-                    Spacer(Modifier.height(12.dp))
-                    HorizontalDivider()
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        "第一个 API 密钥（可选，也可保存后再添加）",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    OutlinedTextField(
-                        value = firstKeyName,
-                        onValueChange = { firstKeyName = it },
-                        label = { Text("密钥备注名称") },
-                        placeholder = { Text("主账号 / 备用账号 / 中转站 A") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    OutlinedTextField(
-                        value = firstKeyApiKey,
-                        onValueChange = { firstKeyApiKey = it },
-                        label = { Text("API Key") },
-                        singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                        modifier = Modifier.fillMaxWidth()
-                    )
+
+                // ---------- 底部按钮 ----------
+                HorizontalDivider(color = Color(0xFFEBEEF4))
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 10.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedButton(
+                        onClick = onDismiss,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(44.dp),
+                        shape = RoundedCornerShape(13.dp),
+                        border = BorderStroke(1.dp, Color(0xFFE5E8EF)),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF70788A))
+                    ) { Text("取消", fontSize = 12.sp) }
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .height(44.dp)
+                            .clip(RoundedCornerShape(13.dp))
+                            .background(
+                                Brush.linearGradient(listOf(Color(0xFF6658E8), Color(0xFF8376F1)))
+                            )
+                            .then(
+                                if (canSave) Modifier.clickable { doSave() }
+                                else Modifier.clickable(enabled = false) { }
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                if (editing) "保存供应商" else "添加供应商",
+                                color = if (canSave) Color.White else Color.White.copy(alpha = 0.75f),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Icon(
+                                Icons.AutoMirrored.Filled.ArrowForward,
+                                null,
+                                Modifier.size(14.dp),
+                                tint = if (canSave) Color.White else Color.White.copy(alpha = 0.75f)
+                            )
+                        }
+                    }
                 }
             }
-        },
-        confirmButton = {
-            Button(
-                enabled = name.isNotBlank() && baseUrl.isNotBlank(),
-                onClick = {
-                    val provider = (initial ?: Provider(name = name, baseUrl = baseUrl))
-                        .copy(name = name.trim(), baseUrl = baseUrl.trim(), apiType = apiType)
-                    val firstKey = if (initial == null && firstKeyApiKey.isNotBlank()) {
-                        ProviderKey(
-                            providerId = provider.id,
-                            name = firstKeyName.trim().ifBlank { "默认密钥" },
-                            apiKey = firstKeyApiKey.trim()
-                        )
-                    } else null
-                    onSave(provider, firstKey)
-                }
-            ) { Text("保存供应商") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
-    )
+        }
+    }
+}
+
+/** 内置供应商下拉选项：名称 + BaseURL，选中显示紫色对勾 */
+@Composable
+private fun ProviderPresetRow(
+    label: String,
+    baseUrl: String,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable { onClick() }
+            .padding(horizontal = 12.dp, vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                label,
+                fontSize = 12.sp,
+                color = if (selected) DialogPurple else DialogInkTitle,
+                fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                baseUrl,
+                fontSize = 9.sp,
+                color = DialogInkHint,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        if (selected) {
+            Icon(Icons.Filled.Check, "已选择", Modifier.size(14.dp), tint = DialogPurple)
+        }
+    }
 }
 
 /**
@@ -1894,6 +2185,7 @@ private fun KeyDialog(
     )
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun AddModelDialog(
     provider: Provider,
@@ -1904,10 +2196,7 @@ private fun AddModelDialog(
     onFetch: ((List<RemoteModelInfo>, String?) -> Unit) -> Unit,
     onSaveList: (List<AiModel>) -> Unit
 ) {
-    var name by remember { mutableStateOf("") }
     var alias by remember { mutableStateOf("") }
-    // 是否通过「读取可选模型」从厂商列表中选择（厂商模型标识不可修改）
-    var fromRemote by remember { mutableStateOf(false) }
     var temperature by remember { mutableStateOf(0.8f) }
     var maxTokens by remember { mutableStateOf(8192) }
     var unlimited by remember { mutableStateOf(false) }
@@ -1921,10 +2210,12 @@ private fun AddModelDialog(
     var selected by remember { mutableStateOf<Set<String>>(emptySet()) }
     var error by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(false) }
+    // 「读取可选模型」下拉框是否展开
+    var dropdownOpen by remember { mutableStateOf(false) }
     // 当前密钥下已存在的模型标识：读取列表里标记「已添加」，但不影响同供应商其他密钥
     val existingNames = remember(existing) { existing.map { it.name }.toSet() }
 
-    fun buildModel(modelName: String, ctx: Int, remoteModel: Boolean): AiModel = AiModel(
+    fun buildModel(modelName: String, ctx: Int): AiModel = AiModel(
         providerId = provider.id,
         providerKeyId = key.id,
         name = modelName,
@@ -1937,152 +2228,637 @@ private fun AddModelDialog(
         reasoningEnabled = reasoningEnabled,
         reasoningLevel = reasoningLevel,
         webSearchEnabled = webSearchEnabled,
-        custom = !remoteModel
+        custom = false
     )
 
-    InputDialog(
-        title = "模型 · ${provider.name} / ${key.name}",
-        onDismiss = onDismiss,
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
-        confirmButton = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                if (selected.isNotEmpty()) {
-                    TextButton(onClick = {
-                        onSaveList(
-                            remote.filter { it.id in selected }
-                                .map { buildModel(it.id, it.contextWindow, remoteModel = true) }
-                        )
-                    }) { Text("添加选中 ${selected.size} 个") }
-                }
-                Spacer(Modifier.width(8.dp))
-                Button(
-                    enabled = name.isNotBlank(),
-                    onClick = { onSaveList(listOf(buildModel(name.trim(), contextWindow, fromRemote))) }
-                ) { Text("添加") }
-            }
+    fun doFetch() {
+        if (loading) return
+        loading = true
+        error = null
+        onFetch { list, err ->
+            loading = false
+            remote = list
+            error = err
+            selected = emptySet()
         }
+    }
+
+    fun doSave() {
+        if (selected.isEmpty()) return
+        onSaveList(
+            remote.filter { it.id in selected }
+                .map { buildModel(it.id, it.contextWindow) }
+        )
+    }
+
+    BackHandler(onBack = onDismiss)
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.32f))
+            .imePadding()
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null
+            ) { onDismiss() },
+        contentAlignment = Alignment.Center
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(
-                value = name, onValueChange = { name = it; fromRemote = false },
-                label = { Text("模型（接口名）") }, singleLine = true,
-                modifier = Modifier.weight(1f)
-            )
-            Spacer(Modifier.width(8.dp))
-            OutlinedButton(
-                enabled = !loading,
-                onClick = {
-                    loading = true
-                    error = null
-                    onFetch { list, err ->
-                        loading = false
-                        remote = list
-                        error = err
-                        selected = emptySet()
-                    }
-                }
-            ) { Text(if (loading) "读取中…" else "读取可选模型") }
-        }
-        error?.let { Text(it, color = MaterialTheme.colorScheme.error,
-            style = MaterialTheme.typography.labelSmall) }
-        if (remote.isNotEmpty()) {
-            Spacer(Modifier.height(8.dp))
-            Text(
-                "勾选要添加的模型，可多选后批量添加；「已添加」表示当前密钥下已有",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            remote.forEach { r ->
-                val already = r.id in existingNames
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .fillMaxHeight(0.92f)
+                .padding(horizontal = 14.dp, vertical = 16.dp)
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null
+                ) { },
+            shape = RoundedCornerShape(14.dp),
+            color = Color.White,
+            border = BorderStroke(1.dp, Color(0xFFEBEEF4)),
+            shadowElevation = 16.dp
+        ) {
+            Column(Modifier.fillMaxSize()) {
+                // ---------- 头部：图标 + 标题 + 厂商·密钥 ----------
                 Row(
                     Modifier
                         .fillMaxWidth()
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable(enabled = !already) {
-                            selected = if (r.id in selected) selected - r.id else selected + r.id
-                        }
-                        .padding(vertical = 2.dp),
+                        .padding(start = 16.dp, end = 6.dp, top = 16.dp, bottom = 14.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Checkbox(
-                        checked = r.id in selected,
-                        enabled = !already,
-                        onCheckedChange = {
-                            selected = if (it) selected + r.id else selected - r.id
-                        }
-                    )
+                    Box(
+                        Modifier
+                            .size(44.dp)
+                            .background(
+                                Brush.linearGradient(listOf(Color(0xFFEEE9FF), Color(0xFFE5E2FF))),
+                                RoundedCornerShape(14.dp)
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Filled.AutoAwesome, null, Modifier.size(22.dp), tint = DialogPurple)
+                    }
+                    Spacer(Modifier.width(14.dp))
                     Column(Modifier.weight(1f)) {
-                        Text(r.id, style = MaterialTheme.typography.bodySmall)
-                        if (r.contextWindow > 0) {
+                        Text("添加模型", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color.Black)
+                        Text(
+                            "${provider.name} · ${key.name}",
+                            fontSize = 10.sp,
+                            color = Color(0xFF8B93A5)
+                        )
+                    }
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Filled.Close, "关闭", Modifier.size(18.dp), tint = Color(0xFF9AA1AF))
+                    }
+                }
+                HorizontalDivider(color = Color(0xFFEBEEF4))
+
+                // ---------- 内容区 ----------
+                Column(
+                    Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalArrangement = Arrangement.spacedBy(18.dp)
+                ) {
+                    // 模型信息
+                    Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                        DialogSectionTitle("模型信息")
+                        DialogFieldLabel("读取可选模型")
+                        // 纯下拉框：点击展开可选模型列表（多选），不可手动输入
+                        DialogDropdownField(
+                            value = selected.sorted().joinToString("、"),
+                            placeholder = "请选择模型…",
+                            expanded = dropdownOpen,
+                            onToggle = {
+                                val next = !dropdownOpen
+                                dropdownOpen = next
+                                if (next && remote.isEmpty() && !loading) doFetch()
+                            }
+                        )
+                        if (dropdownOpen) {
+                            Column(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(max = 260.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(Color.White)
+                                    .border(1.dp, DialogFieldBorder, RoundedCornerShape(10.dp))
+                                    .verticalScroll(rememberScrollState())
+                            ) {
+                                when {
+                                    loading -> DropdownHintRow("正在读取可选模型…")
+                                    error != null -> DropdownHintRow(error!!, onClick = { doFetch() })
+                                    remote.isEmpty() -> DropdownHintRow("没有读取到模型，请检查密钥或稍后重试")
+                                    else -> remote.forEachIndexed { index, r ->
+                                        if (index > 0) HorizontalDivider(color = Color(0xFFEFF1F6))
+                                        DialogDropdownRow(
+                                            title = r.id,
+                                            contextWindow = r.contextWindow,
+                                            selected = r.id in selected,
+                                            already = r.id in existingNames,
+                                            // 已添加的模型也允许再次勾选，方便为同一个模型建多份不同参数的配置
+                                            onClick = {
+                                                selected = if (r.id in selected) selected - r.id else selected + r.id
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        DialogFieldLabel("显示名称")
+                        DialogField(
+                            value = alias,
+                            onValueChange = { alias = it },
+                            placeholder = "例如：DeepSeekV3.2（写作专用）"
+                        )
+                    }
+
+                    // 生成参数
+                    Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                        DialogSectionTitle("生成参数")
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("温度", fontSize = 11.sp, fontWeight = FontWeight.Medium, color = DialogInkLabel)
+                            Spacer(Modifier.weight(1f))
                             Text(
-                                "${r.contextWindow} token",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                "%.2f".format(temperature),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = DialogPurple
                             )
                         }
-                    }
-                    if (already) {
-                        Text(
-                            "已添加",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary
+                        Slider(
+                            value = temperature,
+                            onValueChange = { temperature = it },
+                            valueRange = 0f..2f,
+                            thumb = {
+                                Box(
+                                    Modifier
+                                        .size(14.dp)
+                                        .background(DialogPurple, CircleShape)
+                                )
+                            },
+                            colors = SliderDefaults.colors(
+                                thumbColor = DialogPurple,
+                                activeTrackColor = DialogPurple,
+                                inactiveTrackColor = Color(0xFFE8EAF1)
+                            )
                         )
+                        DialogFieldLabel("最大输出 token")
+                        DialogField(
+                            value = if (unlimited) "" else maxTokens.toString(),
+                            onValueChange = { text ->
+                                maxTokens = text.filter { it.isDigit() }.take(6).toIntOrNull() ?: 0
+                            },
+                            keyboardType = KeyboardType.Number,
+                            placeholder = if (unlimited) "不限" else "8192",
+                            trailing = { DialogUnlimitedToggle(unlimited) { unlimited = it } }
+                        )
+                        DialogFieldLabel("最大上下文条数")
+                        DialogField(
+                            value = if (maxContext <= 0) "" else maxContext.toString(),
+                            onValueChange = { text ->
+                                maxContext = text.filter { it.isDigit() }.take(3).toIntOrNull() ?: 0
+                            },
+                            keyboardType = KeyboardType.Number,
+                            placeholder = if (maxContext <= 0) "不限" else "20",
+                            trailing = {
+                                DialogUnlimitedToggle(maxContext <= 0) { on ->
+                                    maxContext = if (on) 0 else 20
+                                }
+                            }
+                        )
+                        DialogFieldLabel("模型最大上下文（tokens）")
+                        DialogField(
+                            value = if (contextWindow > 0) contextWindow.toString() else "",
+                            onValueChange = { text ->
+                                contextWindow = text.filter { it.isDigit() }.take(9).toIntOrNull() ?: 0
+                            },
+                            keyboardType = KeyboardType.Number,
+                            placeholder = "例如：114514（留空自动读取，若无则取默认值）"
+                        )
+                    }
+
+                    // 模型能力
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        DialogSectionTitle("模型能力")
+                        DialogToggleRow(
+                            title = "思考模式",
+                            desc = "启用模型的推理/思考能力",
+                            checked = reasoningEnabled,
+                            onCheckedChange = { reasoningEnabled = it }
+                        )
+                        if (reasoningEnabled) {
+                            Text("思考强度", fontSize = 12.sp, fontWeight = FontWeight.Medium, color = DialogInkTitle)
+                            DialogEffortSegments(ReasoningLevel.normalize(reasoningLevel)) {
+                                reasoningLevel = it.storage
+                            }
+                        }
+                        HorizontalDivider(color = Color(0xFFE8EAF1))
+                        DialogToggleRow(
+                            title = "联网搜索",
+                            desc = "是否开启模型的联网搜索能力",
+                            checked = webSearchEnabled,
+                            onCheckedChange = { webSearchEnabled = it }
+                        )
+                    }
+
+                    // 预设提示词
+                    DialogSystemPrompt(
+                        value = systemPrompt,
+                        prompts = modelPrompts,
+                        onValueChange = { systemPrompt = it }
+                    )
+                }
+
+                // ---------- 底部按钮 ----------
+                HorizontalDivider(color = Color(0xFFEBEEF4))
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 10.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedButton(
+                        onClick = onDismiss,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(44.dp),
+                        shape = RoundedCornerShape(13.dp),
+                        border = BorderStroke(1.dp, Color(0xFFE5E8EF)),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF70788A))
+                    ) { Text("取消", fontSize = 12.sp) }
+                    val canSave = selected.isNotEmpty()
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .height(44.dp)
+                            .clip(RoundedCornerShape(13.dp))
+                            .background(
+                                Brush.linearGradient(listOf(Color(0xFF6658E8), Color(0xFF8376F1)))
+                            )
+                            .then(
+                                if (canSave) Modifier.clickable { doSave() }
+                                else Modifier.clickable(enabled = false) { }
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                if (selected.isNotEmpty()) "添加选中 ${selected.size} 个" else "添加模型",
+                                color = if (canSave) Color.White else Color.White.copy(alpha = 0.75f),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Icon(
+                                Icons.AutoMirrored.Filled.ArrowForward,
+                                null,
+                                Modifier.size(14.dp),
+                                tint = if (canSave) Color.White else Color.White.copy(alpha = 0.75f)
+                            )
+                        }
                     }
                 }
             }
         }
-        Spacer(Modifier.height(8.dp))
-        OutlinedTextField(
-            value = alias, onValueChange = { alias = it },
-            label = { Text("显示名称（可选）") },
-            placeholder = { Text("用于区分同类模型，如「写作-正文」") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth()
+    }
+}
+
+// ---------------- 「添加模型」弹窗配套样式组件（对齐设计稿） ----------------
+
+private val DialogPurple = Color(0xFF6658E8)
+private val DialogPurpleSoft = Color(0xFFF0EFFF)
+private val DialogPurpleLine = Color(0xFFC8C2FF)
+private val DialogInkTitle = Color(0xFF24283A)
+private val DialogInkLabel = Color(0xFF70798C)
+private val DialogInkHint = Color(0xFFA1A8B6)
+private val DialogFieldBorder = Color(0xFFE6E9F0)
+
+/** 分组标题：紫色小竖条 + 标题 */
+@Composable
+private fun DialogSectionTitle(text: String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            Modifier
+                .size(width = 3.dp, height = 12.dp)
+                .background(DialogPurple, RoundedCornerShape(2.dp))
         )
-        Spacer(Modifier.height(8.dp))
-        Text("温度：${"%.2f".format(temperature)}")
-        Slider(value = temperature, onValueChange = { temperature = it }, valueRange = 0f..2f)
-        MaxTokensSetting(
-            maxTokens = maxTokens,
-            unlimited = unlimited,
-            onTokensChange = { maxTokens = it },
-            onUnlimitedChange = { unlimited = it }
+        Spacer(Modifier.width(6.dp))
+        Text(text, fontSize = 13.sp, fontWeight = FontWeight.Medium, color = DialogInkTitle)
+    }
+}
+
+@Composable
+private fun DialogFieldLabel(text: String) {
+    Text(text, fontSize = 11.sp, fontWeight = FontWeight.Medium, color = DialogInkLabel)
+}
+
+/** 设计稿风格的输入框：白底、10 圆角、1dp 描边，聚焦无额外描边 */
+@Composable
+private fun DialogField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    placeholder: String,
+    modifier: Modifier = Modifier,
+    singleLine: Boolean = true,
+    readOnly: Boolean = false,
+    keyboardType: KeyboardType = KeyboardType.Text,
+    password: Boolean = false,
+    trailing: (@Composable () -> Unit)? = null
+) {
+    BasicTextField(
+        value = value,
+        onValueChange = onValueChange,
+        singleLine = singleLine,
+        readOnly = readOnly,
+        textStyle = TextStyle(fontSize = 12.sp, color = DialogInkTitle),
+        cursorBrush = SolidColor(DialogPurple),
+        visualTransformation = if (password) PasswordVisualTransformation() else VisualTransformation.None,
+        keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
+        modifier = modifier,
+        decorationBox = { inner ->
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .then(if (singleLine) Modifier.height(39.dp) else Modifier.heightIn(min = 120.dp))
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Color.White)
+                    .border(1.dp, DialogFieldBorder, RoundedCornerShape(10.dp))
+                    .padding(horizontal = 12.dp, vertical = if (singleLine) 0.dp else 10.dp),
+                verticalAlignment = if (singleLine) Alignment.CenterVertically else Alignment.Top
+            ) {
+                Box(
+                    Modifier.weight(1f),
+                    // 单行时让文字/光标与外层行同高居中；多行保持顶部对齐
+                    contentAlignment = if (singleLine) Alignment.CenterStart else Alignment.TopStart
+                ) {
+                    if (value.isEmpty()) {
+                        Text(
+                            placeholder,
+                            fontSize = 11.sp,
+                            color = DialogInkHint,
+                            // 显式行高：避免继承 Material 默认的 24sp 行高导致占位文字撑高容器、光标贴顶
+                            lineHeight = 16.sp,
+                            maxLines = if (singleLine) 1 else 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    inner()
+                }
+                trailing?.invoke()
+            }
+        }
+    )
+}
+
+/** 纯下拉框：只展示当前选择，整行点击展开 / 收起列表，不可输入文字 */
+@Composable
+private fun DialogDropdownField(
+    value: String,
+    placeholder: String,
+    expanded: Boolean,
+    onToggle: () -> Unit
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .height(39.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(Color.White)
+            .border(1.dp, DialogFieldBorder, RoundedCornerShape(10.dp))
+            .clickable { onToggle() }
+            .padding(start = 12.dp, end = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = value.ifEmpty { placeholder },
+            modifier = Modifier.weight(1f),
+            fontSize = if (value.isEmpty()) 11.sp else 12.sp,
+            color = if (value.isEmpty()) DialogInkHint else DialogInkTitle,
+            lineHeight = 16.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
         )
-        MaxContextSetting(maxContext = maxContext, onContextChange = { maxContext = it })
-        Spacer(Modifier.height(8.dp))
-        OutlinedTextField(
-            value = if (contextWindow > 0) contextWindow.toString() else "",
-            onValueChange = { text ->
-                contextWindow = text.filter { it.isDigit() }.take(9).toIntOrNull() ?: 0
-            },
-            label = { Text("上下文窗口（token，留空=未知）") },
-            placeholder = { Text("从供应商模型列表自动读取，也可手动填写") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth()
+        Icon(
+            if (expanded) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
+            if (expanded) "收起列表" else "展开列表",
+            Modifier.size(20.dp),
+            tint = DialogPurple
         )
-        Spacer(Modifier.height(12.dp))
-        ReasoningSetting(
-            enabled = reasoningEnabled,
-            level = reasoningLevel,
-            onEnabledChange = { reasoningEnabled = it },
-            onLevelChange = { reasoningLevel = it }
+    }
+}
+
+/** 下拉框内的一行模型：名称 + token + 已添加标签 + 勾选状态 */
+@Composable
+private fun DialogDropdownRow(
+    title: String,
+    contextWindow: Int,
+    selected: Boolean,
+    already: Boolean,
+    onClick: () -> Unit
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable { onClick() }
+            .padding(horizontal = 12.dp, vertical = 11.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            title,
+            Modifier.weight(1f),
+            fontSize = 12.sp,
+            color = if (selected) DialogPurple else DialogInkTitle,
+            fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
         )
-        Spacer(Modifier.height(8.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Checkbox(
-                checked = webSearchEnabled,
-                onCheckedChange = { webSearchEnabled = it }
-            )
+        if (contextWindow > 0) {
+            Text("${contextWindow} token", fontSize = 9.sp, color = DialogInkHint)
+            Spacer(Modifier.width(6.dp))
+        }
+        if (already) {
             Text(
-                "支持内置联网搜索（勾选后聊天工具条出现联网搜索按钮）",
-                style = MaterialTheme.typography.bodySmall
+                "已添加",
+                fontSize = 9.sp,
+                color = DialogPurple,
+                modifier = Modifier
+                    .background(DialogPurpleSoft, RoundedCornerShape(6.dp))
+                    .padding(horizontal = 6.dp, vertical = 2.dp)
+            )
+            Spacer(Modifier.width(6.dp))
+        }
+        if (selected) {
+            Icon(Icons.Filled.Check, "已选择", Modifier.size(14.dp), tint = DialogPurple)
+        }
+    }
+}
+
+/** 下拉框内的提示行（加载中 / 失败可重试 / 空列表） */
+@Composable
+private fun DropdownHintRow(text: String, onClick: (() -> Unit)? = null) {
+    Text(
+        text,
+        Modifier
+            .fillMaxWidth()
+            .then(if (onClick != null) Modifier.clickable { onClick() } else Modifier)
+            .padding(horizontal = 12.dp, vertical = 12.dp),
+        fontSize = 11.sp,
+        color = DialogInkHint
+    )
+}
+
+/** 「不限」小开关：圆圈图标 + 紫色文字 */
+@Composable
+private fun DialogUnlimitedToggle(on: Boolean, onChange: (Boolean) -> Unit) {
+    Row(
+        Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .clickable { onChange(!on) }
+            .padding(2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            if (on) Icons.Filled.CheckCircle else Icons.Filled.RadioButtonUnchecked,
+            null,
+            Modifier.size(14.dp),
+            tint = DialogPurple
+        )
+        Spacer(Modifier.width(4.dp))
+        Text("不限", fontSize = 11.sp, fontWeight = FontWeight.Medium, color = DialogPurple)
+    }
+}
+
+/** 开关行：左侧标题 + 说明，右侧紫色开关 */
+@Composable
+private fun DialogToggleRow(
+    title: String,
+    desc: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(title, fontSize = 12.sp, fontWeight = FontWeight.Medium, color = DialogInkTitle)
+            Text(desc, fontSize = 10.sp, color = DialogInkHint)
+        }
+        DialogSwitchBox(checked = checked, onCheckedChange = onCheckedChange)
+    }
+}
+
+/** 设计稿风格开关：40×25 圆角轨道 + 白色圆点 */
+@Composable
+private fun DialogSwitchBox(checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+    Box(
+        Modifier
+            .size(width = 40.dp, height = 25.dp)
+            .clip(RoundedCornerShape(20.dp))
+            .background(if (checked) DialogPurple else Color(0xFFDFE3EB))
+            .clickable { onCheckedChange(!checked) }
+            .padding(horizontal = 4.dp),
+        contentAlignment = if (checked) Alignment.CenterEnd else Alignment.CenterStart
+    ) {
+        Box(Modifier.size(17.dp).background(Color.White, CircleShape))
+    }
+}
+
+/** 思考强度分段：低 / 中 / 高 / 极 */
+@Composable
+private fun DialogEffortSegments(current: ReasoningLevel, onPick: (ReasoningLevel) -> Unit) {
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        ReasoningLevel.ordered.forEach { lv ->
+            val selected = lv == current
+            Box(
+                Modifier
+                    .weight(1f)
+                    .height(33.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(if (selected) DialogPurpleSoft else Color.White)
+                    .border(
+                        1.dp,
+                        if (selected) DialogPurpleLine else Color(0xFFE8EAF1),
+                        RoundedCornerShape(10.dp)
+                    )
+                    .clickable { onPick(lv) },
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    lv.label,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = if (selected) DialogPurple else DialogInkHint
+                )
+            }
+        }
+    }
+}
+
+/** 预设提示词：标题行 + 提示词库入口 + 多行输入；逻辑与 SystemPromptEditor 一致 */
+@Composable
+private fun DialogSystemPrompt(
+    value: String,
+    prompts: List<Prompt>,
+    onValueChange: (String) -> Unit
+) {
+    var showPicker by remember { mutableStateOf(false) }
+    var pendingTemplate by remember { mutableStateOf<Prompt?>(null) }
+
+    Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+        DialogSectionTitle("预设提示词")
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("从提示词库中选填", fontSize = 11.sp, color = DialogInkHint)
+            Spacer(Modifier.weight(1f))
+            Text(
+                "浏览提示词库",
+                fontSize = 11.sp,
+                color = DialogPurple,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .clickable { showPicker = true }
+                    .padding(vertical = 2.dp)
             )
         }
-        Spacer(Modifier.height(12.dp))
-        SystemPromptEditor(
-            value = systemPrompt,
-            prompts = modelPrompts,
-            onValueChange = { systemPrompt = it }
+        DialogField(
+            value = value,
+            onValueChange = onValueChange,
+            placeholder = "留空则不注入系统提示词",
+            singleLine = false
+        )
+    }
+
+    if (showPicker) {
+        PromptPickerDialog(
+            prompts = prompts,
+            onDismiss = { showPicker = false },
+            onPick = { picked ->
+                showPicker = false
+                if (value.isBlank()) onValueChange(picked.content) else pendingTemplate = picked
+            }
+        )
+    }
+
+    pendingTemplate?.let { picked ->
+        AlertDialog(
+            onDismissRequest = { pendingTemplate = null },
+            title = { Text("已有预设提示词") },
+            text = { Text("当前已填写 ${value.length} 个字，请选择如何处理「${picked.title}」：") },
+            confirmButton = {
+                Button(onClick = {
+                    onValueChange(picked.content)
+                    pendingTemplate = null
+                }) { Text("替换") }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(onClick = { pendingTemplate = null }) { Text("取消") }
+                    TextButton(onClick = {
+                        // 用空行分隔，避免原内容与模板直接粘连
+                        onValueChange(value.trimEnd() + "\n\n" + picked.content)
+                        pendingTemplate = null
+                    }) { Text("追加") }
+                }
+            }
         )
     }
 }

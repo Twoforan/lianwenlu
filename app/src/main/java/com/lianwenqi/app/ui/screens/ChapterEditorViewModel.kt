@@ -84,6 +84,11 @@ class ChapterEditorViewModel(
         currentChapterId = id
     }
 
+    /** 记录书籍详情页默认展开用的「上次打开章节」（仅编辑页调用） */
+    fun markOpened(chapterId: Long) = viewModelScope.launch {
+        prefs.markDetailOpened(bookId, chapterId)
+    }
+
     suspend fun loadChapter(id: Long = currentChapterId): Chapter? {
         // 先只查长度：超长章节直接返回空，避免整章读取抛 SQLiteBlobTooBigException 闪退
         if (bookRepository.chapterContentLength(id) > MAX_CHAPTER_CONTENT_CHARS) {

@@ -581,7 +581,12 @@ private fun NormalAiChatScreen(
 
             // 「查看日志」：分「预设 / 上下文 / 本轮」三部分回显本轮发送时的提示词（默认收起，逐层展开）
             logTarget?.let { msg ->
-                PromptLogDialog(log = PromptLog.decode(msg.promptLog), onClose = { logTarget = null })
+                PromptLogDialog(
+                    log = PromptLog.decode(msg.promptLog),
+                    promptTokens = msg.promptTokens,
+                    contextWindow = models.firstOrNull { it.id == activeModelId }?.contextWindow ?: 0,
+                    onClose = { logTarget = null }
+                )
             }
             // 「查看本轮提示词」：回显本轮实际发送的完整提示词
             promptTarget?.let { msg ->
@@ -2111,7 +2116,12 @@ private fun AiAssistantPanel(
 
     // 「查看日志」：分「预设 / 上下文 / 本轮」三部分回显本轮发送时的提示词（默认收起，逐层展开）
     logTarget?.let { msg ->
-        PromptLogDialog(log = PromptLog.decode(msg.promptLog), onClose = { logTarget = null })
+        PromptLogDialog(
+            log = PromptLog.decode(msg.promptLog),
+            promptTokens = msg.promptTokens,
+            contextWindow = models.firstOrNull { it.id == activeModelId }?.contextWindow ?: 0,
+            onClose = { logTarget = null }
+        )
     }
     // 「查看本轮提示词」：回显本轮实际发送的完整提示词
     promptTarget?.let { msg ->
@@ -3591,15 +3601,40 @@ private fun splitHistoryChapterNodes(text: String, label: String): List<Pair<Str
     }
 }
 
+/** 提交日志标题下的上下文窗口用量说明；模型窗口或输入 token 未知时显示「未知」 */
+private fun contextUsageSummary(promptTokens: Int, contextWindow: Int): String {
+    val used = if (promptTokens >= 0) "%,d".format(promptTokens) else "未知"
+    val remain = if (promptTokens >= 0 && contextWindow > 0) {
+        "%,d".format((contextWindow - promptTokens).coerceAtLeast(0))
+    } else {
+        "未知"
+    }
+    return "上下文窗口占用：$used · 剩余：$remain"
+}
+
 /**
  * 「查看日志」弹窗（标题「提交日志」）：按「预设日志 → 上下文日志 → 本轮提示词日志」
  * 三层回显本轮发送时的提示词，所有节点默认收起、逐层展开。
  */
 @Composable
-private fun PromptLogDialog(log: PromptLog?, onClose: () -> Unit) {
+private fun PromptLogDialog(
+    log: PromptLog?,
+    promptTokens: Int,
+    contextWindow: Int,
+    onClose: () -> Unit
+) {
     AlertDialog(
         onDismissRequest = onClose,
-        title = { Text("提交日志") },
+        title = {
+            Column {
+                Text("提交日志")
+                Text(
+                    contextUsageSummary(promptTokens, contextWindow),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
         text = {
             if (log == null) {
                 Text("本轮没有记录提示词日志（旧消息或未发送成功）")

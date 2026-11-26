@@ -30,6 +30,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LocalMinimumInteractiveComponentSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
@@ -37,6 +38,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -55,6 +57,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
@@ -70,7 +73,8 @@ import com.lianwenqi.app.util.StyleSettings
 import com.lianwenqi.app.util.importedName
 import com.lianwenqi.app.util.readerBackgroundModel
 
-/** 底部三个主入口（目录 / 设置 / 样式），再次点击当前入口即收起 */
+/** 底部三个主入口（进度 / 设置 / 样式），再次点击当前入口即收起 */
+const val READER_PANEL_PROGRESS = "progress"
 const val READER_PANEL_CATALOG = "catalog"
 const val READER_PANEL_SETTINGS = "settings"
 const val READER_PANEL_STYLE = "style"
@@ -138,9 +142,9 @@ fun ReaderBottomBar(
                 }
                 ReaderBottomEntry(
                     modifier = Modifier.weight(1f),
-                    label = "目录",
-                    selected = panel == READER_PANEL_CATALOG,
-                    onClick = { onEntry(READER_PANEL_CATALOG) }
+                    label = "进度",
+                    selected = panel == READER_PANEL_PROGRESS,
+                    onClick = { onEntry(READER_PANEL_PROGRESS) }
                 )
                 ReaderBottomEntry(
                     modifier = Modifier.weight(1f),
@@ -157,6 +161,89 @@ fun ReaderBottomBar(
                 TextButton(onClick = onNextChapter, enabled = hasNext) {
                     Text("下一章", style = MaterialTheme.typography.labelMedium, maxLines = 1)
                 }
+            }
+        }
+    }
+}
+
+/**
+ * 进度面板：显示当前分卷与章节，拖动进度条可在本章内快速跳页。
+ * 与设置 / 样式面板共用底部弹窗的展示方式。
+ */
+@Composable
+fun ReaderProgressPanel(
+    volumeTitle: String,
+    chapterTitle: String,
+    chapterPosition: String,
+    progress: Float,
+    onSeek: (Float) -> Unit
+) {
+    // 拖动中的本地值：避免阅读器实时回传的进度把滑块拉回去造成抖动
+    var draggingValue by remember { mutableStateOf<Float?>(null) }
+    val shown = (draggingValue ?: progress).coerceIn(0f, 1f)
+    Surface(tonalElevation = 3.dp) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 12.dp)
+        ) {
+            Text(
+                volumeTitle,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(Modifier.height(4.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    chapterTitle.ifBlank { "未命名章节" },
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.titleSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    chapterPosition,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1
+                )
+            }
+            Spacer(Modifier.height(10.dp))
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "本章进度",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1
+                )
+                Spacer(Modifier.weight(1f))
+                Text(
+                    "${(shown * 100).toInt()}%",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1
+                )
+            }
+            CompositionLocalProvider(
+                LocalMinimumInteractiveComponentSize provides Dp.Unspecified
+            ) {
+                Slider(
+                    value = shown,
+                    onValueChange = {
+                        draggingValue = it
+                        onSeek(it)
+                    },
+                    onValueChangeFinished = { draggingValue = null },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(32.dp)
+                )
             }
         }
     }

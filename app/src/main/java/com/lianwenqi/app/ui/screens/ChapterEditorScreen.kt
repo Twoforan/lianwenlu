@@ -1,10 +1,16 @@
 package com.lianwenqi.app.ui.screens
 
+import android.os.SystemClock
 import android.view.HapticFeedbackConstants
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -40,6 +46,7 @@ import androidx.compose.material.icons.filled.Brush
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.Handyman
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Visibility
@@ -71,9 +78,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.focus.FocusRequester
@@ -87,6 +98,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextRange
@@ -98,12 +110,16 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import com.lianwenqi.app.data.entity.Chapter
 import com.lianwenqi.app.ui.appViewModel
 import com.lianwenqi.app.util.ExportUtil
 import com.lianwenqi.app.util.NameGenerator
 import com.lianwenqi.app.util.TextTool
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -147,7 +163,6 @@ fun ChapterEditorScreen(
 
     var panel by remember { mutableStateOf<String?>(null) }
     var findVisible by remember { mutableStateOf(false) }
-    var msg by remember { mutableStateOf<String?>(null) }
     var summaryExpanded by remember(currentId) { mutableStateOf(false) }
     var editingTitle by remember { mutableStateOf(false) }
     val summaryFocus = remember { FocusRequester() }
@@ -165,9 +180,37 @@ fun ChapterEditorScreen(
 
     // 正文滚动状态：输入法弹出压缩可视区时，把光标行「顶」到键盘上方
     val editorScroll = rememberScrollState()
+    // 快速滑动时右侧浮现的滚动条：平时隐藏，拖动可定位正文
+    var fastScrollVisible by remember { mutableStateOf(false) }
+    var fastScrollDragging by remember { mutableStateOf(false) }
+    var fastScrollHideJob by remember { mutableStateOf<Job?>(null) }
     var editorLayout by remember { mutableStateOf<TextLayoutResult?>(null) }
     var editorFieldTop by remember { mutableStateOf(0f) }
     val density = LocalDensity.current
+
+    // 检测正文快速滑动：速度超过阈值时显示右侧滚动条，停止后延时隐藏
+    LaunchedEffect(editorScroll) {
+        var lastValue = editorScroll.value
+        var lastTime = SystemClock.uptimeMillis()
+        snapshotFlow { editorScroll.value }.collect { v ->
+            val now = SystemClock.uptimeMillis()
+            val dt = (now - lastTime).coerceAtLeast(1L)
+            val speed = abs(v - lastValue).toFloat() * 1000f / dt
+            lastValue = v
+            lastTime = now
+            if (editorScroll.maxValue <= 0) return@collect
+            if (speed > with(density) { 600.dp.toPx() }) {
+                fastScrollVisible = true
+                fastScrollHideJob?.cancel()
+            } else if (!fastScrollDragging && fastScrollVisible) {
+                fastScrollHideJob?.cancel()
+                fastScrollHideJob = scope.launch {
+                    delay(900)
+                    fastScrollVisible = false
+                }
+            }
+        }
+    }
 
     // 输入法弹出会把下方工具栏顶起、同时压缩正文可视区，此时光标若落在可视区下方就会被键盘遮住。
     // 这里只做「顶起」：向上滚动到光标行正好贴在键盘上方（留一点余量），而不是把光标居中——
@@ -236,6 +279,8 @@ fun ChapterEditorScreen(
 
     LaunchedEffect(currentId) {
         vm.switchChapter(currentId)
+        // 书籍详情页据此默认展开上次在编辑页打开的章节
+        vm.markOpened(currentId)
         val c = vm.loadChapter(currentId)
         if (c != null) {
             title = c.title
@@ -467,9 +512,10 @@ fun ChapterEditorScreen(
                             Icon(Icons.Filled.Visibility, contentDescription = "预览")
                         }
                         IconButton(onClick = {
-                            vm.saveNow(title, summary, content.text, content.selection.start)
-                            msg = "已保存"
-                        }) { Icon(Icons.Filled.Done, contentDescription = "保存") }
+                            scope.launch { editorScroll.animateScrollTo(0) }
+                        }) {
+                            Icon(Icons.Filled.KeyboardArrowUp, contentDescription = "回到顶部")
+                        }
                         IconButton(onClick = {
                             focusManager.clearFocus()
                             keyboard?.hide()
@@ -725,6 +771,43 @@ fun ChapterEditorScreen(
                 if (id == currentId) title = name
             }
         )
+
+        // 快速滑动进度条：仅在快速滚动或拖动时浮现
+        AnimatedVisibility(
+            visible = fastScrollVisible || fastScrollDragging,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .padding(end = 2.dp)
+                .zIndex(2f)
+        ) {
+            FastScrollBar(
+                progress = if (editorScroll.maxValue > 0) {
+                    editorScroll.value.toFloat() / editorScroll.maxValue
+                } else {
+                    0f
+                },
+                onDragStart = {
+                    fastScrollDragging = true
+                    fastScrollVisible = true
+                    fastScrollHideJob?.cancel()
+                },
+                onDrag = { fraction ->
+                    scope.launch {
+                        editorScroll.scrollTo((fraction * editorScroll.maxValue).toInt())
+                    }
+                },
+                onDragEnd = {
+                    fastScrollDragging = false
+                    fastScrollHideJob?.cancel()
+                    fastScrollHideJob = scope.launch {
+                        delay(900)
+                        fastScrollVisible = false
+                    }
+                }
+            )
+        }
     }
 
     // 本章已有正文时，写入前先确认覆盖
@@ -798,14 +881,54 @@ fun ChapterEditorScreen(
             TextButton(onClick = onBack) { Text("返回") }
         }
     }
+}
 
-    msg?.let {
-        AlertDialog(
-            onDismissRequest = { msg = null },
-            title = { Text("提示") },
-            text = { Text(it) },
-            confirmButton = { TextButton(onClick = { msg = null }) { Text("好的") } }
-        )
+/** 正文快速滑动时右侧浮现的竖向进度条；拖动按比例定位到正文位置 */
+@Composable
+private fun FastScrollBar(
+    progress: Float,
+    onDragStart: () -> Unit,
+    onDrag: (Float) -> Unit,
+    onDragEnd: () -> Unit
+) {
+    val trackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.22f)
+    val thumbColor = MaterialTheme.colorScheme.primary
+    Box(
+        Modifier
+            .width(34.dp)
+            .height(220.dp)
+            .padding(horizontal = 7.dp)
+            .pointerInput(Unit) {
+                detectVerticalDragGestures(
+                    onDragStart = { onDragStart() },
+                    onDragEnd = { onDragEnd() },
+                    onDragCancel = { onDragEnd() },
+                    onVerticalDrag = { change, _ ->
+                        change.consume()
+                        val fraction =
+                            (change.position.y / size.height.toFloat()).coerceIn(0f, 1f)
+                        onDrag(fraction)
+                    }
+                )
+            }
+    ) {
+        Canvas(Modifier.fillMaxSize()) {
+            val p = progress.coerceIn(0f, 1f)
+            val trackWidth = 4.dp.toPx()
+            val radius = 7.dp.toPx()
+            drawRoundRect(
+                color = trackColor,
+                topLeft = Offset((size.width - trackWidth) / 2f, radius),
+                size = Size(trackWidth, (size.height - radius * 2f).coerceAtLeast(1f)),
+                cornerRadius = CornerRadius(trackWidth / 2f)
+            )
+            val centerY = radius + (size.height - radius * 2f) * p
+            drawCircle(
+                color = thumbColor,
+                radius = radius,
+                center = Offset(size.width / 2f, centerY)
+            )
+        }
     }
 }
 

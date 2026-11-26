@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 添加供应商图标：淡紫渐变圆角底 + 紫色四角星描边（与 sijiaoxing.svg 一致） -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="44dp"
+    android:height="44dp"
+    android:viewportWidth="44"
+    android:viewportHeight="44">
+    <path android:pathData="M15,0 H29 A15,15 0 0 1 44,15 V29 A15,15 0 0 1 29,44 H15 A15,15 0 0 1 0,29 V15 A15,15 0 0 1 15,0 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="6"
+                android:startY="2"
+                android:endX="40"
+                android:endY="42">
+                <item android:offset="0" android:color="#FFEEEAFF" />
+                <item android:offset="1" android:color="#FFE5E2FF" />
+            </gradient>
+        </aapt:attr>
+    </path>
+    <group
+        android:translateX="11.5"
+        android:translateY="11.5"
+        android:scaleX="0.875"
+        android:scaleY="0.875">
+        <path
+            android:pathData="M18,3 a3,3 0 0 0 -3,3 v12 a3,3 0 0 0 3,3 a3,3 0 0 0 3,-3 a3,3 0 0 0 -3,-3 H6 a3,3 0 0 0 -3,3 a3,3 0 0 0 3,3 a3,3 0 0 0 3,-3 V6 a3,3 0 0 0 -3,-3 a3,3 0 0 0 -3,3 a3,3 0 0 0 3,3 h12 a3,3 0 0 0 3,-3 a3,3 0 0 0 -3,-3 z"
+            android:fillColor="#00000000"
+            android:strokeColor="#FF6658E8"
+            android:strokeWidth="2"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round" />
+    </group>
+</vector>
