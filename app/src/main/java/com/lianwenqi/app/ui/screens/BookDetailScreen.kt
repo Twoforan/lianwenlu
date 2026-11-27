@@ -121,6 +121,7 @@ import com.lianwenqi.app.data.entity.outlineCategoryLabel
 import com.lianwenqi.app.data.volume.hasOpenSuggestions
 import com.lianwenqi.app.ui.appViewModel
 import com.lianwenqi.app.ui.components.BookCover
+import com.lianwenqi.app.ui.components.DeleteConfirmDialog
 import com.lianwenqi.app.util.ExportUtil
 import com.lianwenqi.app.util.TextTool
 import kotlinx.coroutines.launch
@@ -250,7 +251,12 @@ fun BookDetailScreen(
         Column(Modifier.fillMaxSize().padding(padding)) {
             book?.let { b ->
                 Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                    BookCover(book = b, modifier = Modifier.size(width = 64.dp, height = 88.dp))
+                    BookCover(
+                        book = b,
+                        modifier = Modifier.size(width = 64.dp, height = 88.dp),
+                        cornerRadius = 7.dp,
+                        titleSize = 9
+                    )
                     Spacer(Modifier.width(12.dp))
                     Column(Modifier.weight(1f)) {
                         Text(b.title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
@@ -560,19 +566,27 @@ private fun CatalogTab(
 
     // 删除确认
     deleteChapterTarget?.let { c ->
-        ConfirmDialog(
-            title = "删除章节「${c.title}」？",
-            message = "删除后该章节的正文与梗概将无法恢复。",
-            onConfirm = { onDeleteChapter(c.id) },
+        DeleteConfirmDialog(
+            type = "章节",
+            name = c.title,
+            note = "删除后该章节的正文与梗概将无法恢复。",
+            onConfirm = {
+                onDeleteChapter(c.id)
+                deleteChapterTarget = null
+            },
             onDismiss = { deleteChapterTarget = null }
         )
     }
     deleteVolumeTarget?.let { v ->
         val count = chapters.count { it.volumeId == v.id }
-        ConfirmDialog(
-            title = "删除分卷「${v.title}」？",
-            message = if (count > 0) "该分卷下的 $count 个章节也会被一并删除。" else "该分卷下暂无章节。",
-            onConfirm = { onDeleteVolume(v.id) },
+        DeleteConfirmDialog(
+            type = "分卷",
+            name = v.title,
+            note = if (count > 0) "该分卷下的 $count 个章节也会被一并删除。" else "该分卷下暂无章节。",
+            onConfirm = {
+                onDeleteVolume(v.id)
+                deleteVolumeTarget = null
+            },
             onDismiss = { deleteVolumeTarget = null }
         )
     }
@@ -764,19 +778,27 @@ private fun OutlineTab(
 
     labelToDelete?.let { key ->
         val count = outline.count { it.category == key }
-        ConfirmDialog(
-            title = "删除标签「${outlineCategoryLabel(key)}」？",
-            message = if (count > 0) "该标签下的 $count 条内容也会被一并删除。" else "该标签下暂无内容。",
-            onConfirm = { onDeleteCategory(key) },
+        DeleteConfirmDialog(
+            type = "标签",
+            name = outlineCategoryLabel(key),
+            note = if (count > 0) "该标签下的 $count 条内容也会被一并删除。" else "该标签下暂无内容。",
+            onConfirm = {
+                onDeleteCategory(key)
+                labelToDelete = null
+            },
             onDismiss = { labelToDelete = null }
         )
     }
 
     itemToDelete?.let { item ->
-        ConfirmDialog(
-            title = "删除「${item.title.ifBlank { "该条目" }}」？",
-            message = "删除后无法恢复。",
-            onConfirm = { onDelete(item.id) },
+        DeleteConfirmDialog(
+            type = "大纲条目",
+            name = item.title.ifBlank { "该条目" },
+            note = "删除后无法恢复。",
+            onConfirm = {
+                onDelete(item.id)
+                itemToDelete = null
+            },
             onDismiss = { itemToDelete = null }
         )
     }
@@ -1353,10 +1375,14 @@ internal fun OutlineEditorDialog(
     )
 
     deleteIndex?.let { index ->
-        ConfirmDialog(
-            title = "删除「${fields.getOrNull(index)?.name.orEmpty()}」项？",
-            message = "该项将从当前表格中移除。",
-            onConfirm = { fields = fields.filterIndexed { i, _ -> i != index } },
+        DeleteConfirmDialog(
+            type = "字段",
+            name = fields.getOrNull(index)?.name.orEmpty(),
+            note = "该项将从当前表格中移除。",
+            onConfirm = {
+                fields = fields.filterIndexed { i, _ -> i != index }
+                deleteIndex = null
+            },
             onDismiss = { deleteIndex = null }
         )
     }
@@ -1763,10 +1789,14 @@ private fun BatchManagePage(
 
     if (confirmDelete) {
         val count = selectedIds.size
-        ConfirmDialog(
-            title = "删除已选的 $count 个章节？",
-            message = "所选章节的正文与梗概将无法恢复。",
-            onConfirm = { onDelete(selectedIds) },
+        DeleteConfirmDialog(
+            type = "章节",
+            name = "已选的 $count 个章节",
+            note = "所选章节的正文与梗概将无法恢复。",
+            onConfirm = {
+                onDelete(selectedIds)
+                confirmDelete = false
+            },
             onDismiss = { confirmDelete = false }
         )
     }

@@ -1,12 +1,15 @@
 package com.lianwenqi.app.ui.navigation
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.ime
@@ -16,11 +19,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.MenuBook
-import androidx.compose.material.icons.automirrored.filled.Chat
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.Icon
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -30,12 +28,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.lianwenqi.app.R
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -54,6 +55,7 @@ import com.lianwenqi.app.ui.screens.CheckUpdateScreen
 import com.lianwenqi.app.ui.screens.ManualGuideScreen
 import com.lianwenqi.app.ui.screens.MemoryProgressScreen
 import com.lianwenqi.app.ui.screens.MemorySettingsScreen
+import com.lianwenqi.app.ui.screens.PersonalizationSettingsScreen
 import com.lianwenqi.app.ui.screens.PrefixManageScreen
 import com.lianwenqi.app.ui.screens.ReaderScreen
 import com.lianwenqi.app.ui.screens.SettingsScreen
@@ -70,7 +72,7 @@ object Routes {
     const val SHELL = "shell"
     const val BOOK = "book/{bookId}"
     const val EDITOR = "editor/{bookId}/{chapterId}"
-    const val READER = "reader/{bookId}/{chapterId}"
+    const val READER = "reader/{bookId}/{chapterId}?resume={resume}"
     const val BOOK_SEARCH = "booksearch/{bookId}"
     const val AI_TOOLS = "aitools"
     const val PREFIX_MANAGE = "prefix"
@@ -96,10 +98,13 @@ object Routes {
     const val MANUAL = "manual"
     /** 分卷压缩全局默认设置 */
     const val COMPRESSION_SETTINGS = "compression"
+    /** 个性化设置：书架背景图等外观配置 */
+    const val PERSONALIZATION = "personalization"
 
     fun book(id: Long) = "book/$id"
     fun editor(bookId: Long, chapterId: Long) = "editor/$bookId/$chapterId"
-    fun reader(bookId: Long, chapterId: Long) = "reader/$bookId/$chapterId"
+    fun reader(bookId: Long, chapterId: Long, resume: Boolean = false) =
+        "reader/$bookId/$chapterId?resume=$resume"
     fun bookSearch(bookId: Long) = "booksearch/$bookId"
     fun styleProfile(profileId: Long) = "style/$profileId"
     fun styleProfileTags(profileId: Long) = "styletags/$profileId"
@@ -109,12 +114,18 @@ object Routes {
     fun styleSampleStyle(sampleId: Long) = "stylesample/$sampleId"
 }
 
-private data class TabItem(val route: String, val label: String, val icon: ImageVector)
+private data class TabItem(
+    val route: String,
+    val label: String,
+    val iconRes: Int,
+    val iconWidth: Dp,
+    val iconHeight: Dp
+)
 
 private val tabs = listOf(
-    TabItem("bookshelf", "书架", Icons.AutoMirrored.Filled.MenuBook),
-    TabItem("ai", "AI 聊天", Icons.AutoMirrored.Filled.Chat),
-    TabItem("settings", "设置", Icons.Filled.Settings)
+    TabItem("bookshelf", "书架", R.drawable.ic_nav_shelf, 18.dp, 19.dp),
+    TabItem("ai", "AI聊天", R.drawable.ic_nav_chat, 22.dp, 22.dp),
+    TabItem("settings", "设置", R.drawable.ic_nav_settings, 23.dp, 23.dp)
 )
 
 @Composable
@@ -254,6 +265,10 @@ fun RootNavHost() {
             VolumeCompressionSettingsScreen(onBack = { rootNav.popBackStack() })
         }
 
+        composable(Routes.PERSONALIZATION) {
+            PersonalizationSettingsScreen(onBack = { rootNav.popBackStack() })
+        }
+
         composable(
             Routes.BOOK,
             arguments = listOf(navArgument("bookId") { type = NavType.LongType })
@@ -298,12 +313,17 @@ fun RootNavHost() {
             Routes.READER,
             arguments = listOf(
                 navArgument("bookId") { type = NavType.LongType },
-                navArgument("chapterId") { type = NavType.LongType }
+                navArgument("chapterId") { type = NavType.LongType },
+                navArgument("resume") {
+                    type = NavType.BoolType
+                    defaultValue = false
+                }
             )
         ) { entry ->
             ReaderScreen(
                 bookId = entry.arguments?.getLong("bookId") ?: 0L,
                 chapterId = entry.arguments?.getLong("chapterId") ?: 0L,
+                resume = entry.arguments?.getBoolean("resume") ?: false,
                 onBack = { rootNav.popBackStack() }
             )
         }
@@ -346,7 +366,10 @@ private fun MainShell(rootNav: NavHostController) {
             composable("bookshelf") {
                 BookshelfScreen(
                     onOpenBook = { rootNav.navigate(Routes.book(it)) },
-                    onPreviewBook = { bId, cId -> rootNav.navigate(Routes.reader(bId, cId)) },
+                    onPreviewBook = { bId, cId ->
+                        // 全书预览：恢复上次阅读进度
+                        rootNav.navigate(Routes.reader(bId, cId, resume = true))
+                    },
                     onOpenAi = {
                         tabNav.navigate("ai") {
                             popUpTo(tabNav.graph.startDestinationId) { saveState = true }
@@ -364,7 +387,8 @@ private fun MainShell(rootNav: NavHostController) {
                     onOpenStyle = { rootNav.navigate(Routes.STYLE) },
                     onOpenManual = { rootNav.navigate(Routes.MANUAL) },
                     onOpenUpdate = { rootNav.navigate(Routes.UPDATE) },
-                    onOpenCompression = { rootNav.navigate(Routes.COMPRESSION_SETTINGS) }
+                    onOpenCompression = { rootNav.navigate(Routes.COMPRESSION_SETTINGS) },
+                    onOpenPersonalization = { rootNav.navigate(Routes.PERSONALIZATION) }
                 )
             }
         }
@@ -372,8 +396,8 @@ private fun MainShell(rootNav: NavHostController) {
 }
 
 /**
- * 底部导航：按参考稿实现 75dp 高、淡紫底、选中项胶囊高亮、半粗标签。
- * 夜间模式使用对应的深色底与文字色，避免浅色底刺眼。
+ * 底部导航：白底 + 顶部分割线，图标在上、11sp 标签在下；
+ * 选中项使用设计稿紫色 #6658E8，未选中为灰蓝色 #959DAF。
  */
 @Composable
 private fun ShelfBottomBar(
@@ -381,54 +405,51 @@ private fun ShelfBottomBar(
     night: Boolean,
     onSelect: (String) -> Unit
 ) {
-    val background = if (night) Color(0xFF211F2A) else Color(0xFFF5EFF8)
-    val selectedPill = if (night) Color(0xFF352F48) else Color(0xFFE9E1F6)
-    val selectedText = if (night) Color(0xFFE9E5F2) else Color(0xFF21182B)
-    val normalText = if (night) Color(0xFFB7B2C1) else Color(0xFF4C4852)
+    val background = if (night) Color(0xFF17161C) else Color.White
+    val borderColor = if (night) Color(0xFF2C2A34) else Color(0xFFEAECF2)
+    val selectedColor = if (night) Color(0xFF9F94FF) else Color(0xFF6658E8)
+    val normalColor = if (night) Color(0xFF8C8899) else Color(0xFF959DAF)
 
-    Row(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
             .background(background)
             .windowInsetsPadding(WindowInsets.navigationBars)
-            .height(75.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceEvenly
     ) {
-        tabs.forEach { tab ->
-            val selected = currentRoute == tab.route
-            Column(
-                modifier = Modifier
-                    .width(90.dp)
-                    .clip(RoundedCornerShape(18.dp))
-                    .clickable { onSelect(tab.route) }
-                    .padding(vertical = 4.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
-            ) {
-                Box(
+        Box(Modifier.fillMaxWidth().height(1.dp).background(borderColor))
+        Row(
+            modifier = Modifier.fillMaxWidth().height(69.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceEvenly
+        ) {
+            tabs.forEach { tab ->
+                val selected = currentRoute == tab.route
+                val color = if (selected) selectedColor else normalColor
+                Column(
                     modifier = Modifier
-                        .clip(RoundedCornerShape(22.dp))
-                        .background(if (selected) selectedPill else Color.Transparent)
-                        .padding(
-                            horizontal = if (selected) 24.dp else 12.dp,
-                            vertical = 3.dp
-                        ),
-                    contentAlignment = Alignment.Center
+                        .width(90.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable { onSelect(tab.route) }
+                        .padding(vertical = 4.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Icon(
-                        tab.icon,
-                        contentDescription = tab.label,
-                        tint = if (selected) selectedText else normalText,
-                        modifier = Modifier.size(23.dp)
+                    Box(Modifier.height(22.dp), contentAlignment = Alignment.Center) {
+                        Image(
+                            painter = painterResource(tab.iconRes),
+                            contentDescription = tab.label,
+                            colorFilter = ColorFilter.tint(color),
+                            modifier = Modifier.size(width = tab.iconWidth, height = tab.iconHeight)
+                        )
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        tab.label,
+                        color = color,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1
                     )
                 }
-                Text(
-                    tab.label,
-                    color = if (selected) selectedText else normalText,
-                    fontSize = 12.sp,
-                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
-                )
             }
         }
     }

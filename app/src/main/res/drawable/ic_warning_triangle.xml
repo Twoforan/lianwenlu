@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 删除确认弹窗：警告三角（jinggao.svg） -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="14dp"
+    android:height="12dp"
+    android:viewportWidth="14"
+    android:viewportHeight="12">
+    <path
+        android:pathData="M2,11 L7,2 L12,11 L2,11 Z M14,12 L7,0 L0,12 L14,12 Z M6.5,8 L6.5,4 L7.5,4 L7.5,8 L6.5,8 Z M6.5,10 L6.5,9 L7.5,9 L7.5,10 L6.5,10 Z"
+        android:fillColor="#FFE08278" />
+</vector>

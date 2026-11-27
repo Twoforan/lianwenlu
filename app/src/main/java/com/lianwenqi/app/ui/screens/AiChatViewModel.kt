@@ -69,6 +69,7 @@ import com.lianwenqi.app.data.entity.decodeContextSnapshot
 import com.lianwenqi.app.data.entity.outlineCategoryLabel
 import com.lianwenqi.app.data.entity.defaultOutlineKeys
 import com.lianwenqi.app.data.entity.Prompt
+import com.lianwenqi.app.data.entity.PromptType
 import com.lianwenqi.app.data.entity.Provider
 import com.lianwenqi.app.data.entity.StyleTag
 import com.lianwenqi.app.data.entity.Volume
@@ -160,8 +161,10 @@ class AiChatViewModel(
     /** 「发送消息」用例：组装上下文 → 流式请求 → 写回助手消息 → 解析工具区块 */
     private val sendChatMessage = SendChatMessageUseCase(chatRepository, configRepository)
 
+    // 聊天输入栏只展示快捷提示词，模型提示词仅用于模型配置
     val prompts: StateFlow<List<Prompt>> =
-        configRepository.observePrompts().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        configRepository.observePrompts(PromptType.QUICK)
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val models: StateFlow<List<AiModel>> =
         configRepository.observeModels().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())

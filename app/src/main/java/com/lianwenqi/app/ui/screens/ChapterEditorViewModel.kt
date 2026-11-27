@@ -12,6 +12,7 @@ import com.lianwenqi.app.data.entity.ChatRole
 import com.lianwenqi.app.data.entity.OutlineCategory
 import com.lianwenqi.app.data.entity.OutlineItem
 import com.lianwenqi.app.data.entity.Prompt
+import com.lianwenqi.app.data.entity.PromptType
 import com.lianwenqi.app.data.entity.StyleTag
 import com.lianwenqi.app.data.entity.Volume
 import com.lianwenqi.app.data.style.SummarySentence
@@ -62,8 +63,10 @@ class ChapterEditorViewModel(
         outlineRepository.observeOutline(bookId)
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    // 编辑页侧边 AI 的输入栏只展示快捷提示词
     val prompts: StateFlow<List<Prompt>> =
-        configRepository.observePrompts().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        configRepository.observePrompts(PromptType.QUICK)
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val format: StateFlow<FormatSettings> =
         prefs.format.stateIn(viewModelScope, SharingStarted.Eagerly, FormatSettings())

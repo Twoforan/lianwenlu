@@ -62,6 +62,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import com.lianwenqi.app.ui.components.DeleteConfirmDialog
 import com.lianwenqi.app.util.FormatSettings
 import com.lianwenqi.app.util.IMPORTED_FONT_PREFIX
 import com.lianwenqi.app.util.IMPORTED_IMAGE_PREFIX
@@ -582,19 +583,15 @@ fun ReaderStylePanel(
         )
     }
     pendingDelete?.let { spec ->
-        AlertDialog(
-            onDismissRequest = { pendingDelete = null },
-            title = { Text("删除背景图片") },
-            text = { Text("确定要删除「${importedName(spec)}」吗？删除后无法恢复。") },
-            confirmButton = {
-                TextButton(onClick = {
-                    onDeleteImage(spec)
-                    pendingDelete = null
-                }) { Text("删除") }
+        DeleteConfirmDialog(
+            type = "背景图",
+            name = importedName(spec),
+            note = "删除后无法恢复。",
+            onConfirm = {
+                onDeleteImage(spec)
+                pendingDelete = null
             },
-            dismissButton = {
-                TextButton(onClick = { pendingDelete = null }) { Text("取消") }
-            }
+            onDismiss = { pendingDelete = null }
         )
     }
 }

@@ -53,6 +53,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lianwenqi.app.AppContainer
 import com.lianwenqi.app.data.entity.StyleProfile
+import com.lianwenqi.app.ui.components.DeleteConfirmDialog
+import androidx.compose.ui.graphics.Color
 import com.lianwenqi.app.data.style.StyleAnalysis
 import com.lianwenqi.app.data.style.StyleAnalysisCodec
 import com.lianwenqi.app.data.style.StyleAnalysisEditor
@@ -865,41 +867,24 @@ private fun StyleProfileDeleteDialog(
     onConfirm: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    AlertDialog(
-        onDismissRequest = { if (!deleting) onDismiss() },
-        title = { Text("删除文风档案") },
-        text = {
-            Column {
-                Text("确定删除「$profileName」？删除后无法恢复。")
-                if (boundBookCount > 0) {
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        "有 $boundBookCount 本书绑定了该档案，删除后将一并解除绑定（不会删除书籍或改动其他数据）。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                if (error != null) {
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        error,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error
-                    )
-                }
-            }
+    DeleteConfirmDialog(
+        type = "文风档案",
+        name = profileName,
+        onDismiss = { if (!deleting) onDismiss() },
+        onConfirm = onConfirm,
+        note = when {
+            error != null -> error
+            boundBookCount > 0 ->
+                "删除后不可恢复。有 $boundBookCount 本书绑定了该档案，删除后将一并解除绑定（不会删除书籍或改动其他数据）。"
+            else -> "删除后不可恢复。"
         },
-        confirmButton = {
-            TextButton(onClick = onConfirm, enabled = !deleting) {
-                Text(
-                    if (deleting) "正在删除…" else "删除",
-                    color = MaterialTheme.colorScheme.error
-                )
-            }
+        noteColor = if (error != null) {
+            MaterialTheme.colorScheme.error
+        } else {
+            Color(0xFF737C90)
         },
-        dismissButton = {
-            TextButton(onClick = onDismiss, enabled = !deleting) { Text("取消") }
-        }
+        confirmLabel = if (deleting) "正在删除…" else "删除",
+        confirmEnabled = !deleting
     )
 }
 

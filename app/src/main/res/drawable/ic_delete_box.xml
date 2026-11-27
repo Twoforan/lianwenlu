@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 删除确认弹窗：垃圾桶图标（shanchu.svg，裁切到图形本身，避免等比缩放后过小） -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="26dp"
+    android:height="23dp"
+    android:viewportWidth="26"
+    android:viewportHeight="23">
+    <path
+        android:pathData="M0,3 L6,3 L6,5 L5,5 L6,21 L19,21 L20,5 L19,5 L19,3 L26,3 L26,5 L22.5,5 L21,23 L4,23 L3,5 L0,5 Z"
+        android:fillColor="#FFE6535B" />
+    <path
+        android:pathData="M6,0 L19,0 L19,5 L17,5 L17,2 L8,2 L8,3 L17,3 L17,5 L6,5 Z"
+        android:fillColor="#FFE6535B" />
+    <path
+        android:pathData="M9,10 L11,10 L11,17 L9,17 Z"
+        android:fillColor="#FFE6535B" />
+    <path
+        android:pathData="M14,10 L16,10 L16,17 L14,17 Z"
+        android:fillColor="#FFE6535B" />
+</vector>

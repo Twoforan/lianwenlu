@@ -88,6 +88,7 @@ import com.lianwenqi.app.data.style.SummaryTagValidity
 import com.lianwenqi.app.data.style.SummarySentenceSegmenter
 import com.lianwenqi.app.data.style.SummarySentenceSplitter
 import com.lianwenqi.app.ui.appViewModel
+import com.lianwenqi.app.ui.components.DeleteConfirmDialog
 import com.lianwenqi.app.util.shortHash
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -330,15 +331,15 @@ fun StyleTagLibraryScreen(
     }
 
     deletingTag?.let { tag ->
-        ConfirmDialog(
-            title = "删除标签",
-            text = "删除「${tag.name}」？只解除片段与该标签的关联，样本文本和向量不会被删除。",
-            confirmLabel = "删除",
-            onDismiss = { deletingTag = null },
+        DeleteConfirmDialog(
+            type = "标签",
+            name = tag.name,
+            note = "只解除片段与该标签的关联，样本文本和向量不会被删除。",
             onConfirm = {
                 deletingTag = null
                 vm.deleteTagForScope(tag.id)
-            }
+            },
+            onDismiss = { deletingTag = null }
         )
     }
 
@@ -903,15 +904,15 @@ fun StyleSampleManageScreen(
     }
 
     deleting?.let { sample ->
-        ConfirmDialog(
-            title = "删除样本",
-            text = "删除「${sample.fileName}」及其片段与标签关联？此操作不可恢复；不影响文风档案和其他样本。",
-            confirmLabel = "删除",
-            onDismiss = { deleting = null },
+        DeleteConfirmDialog(
+            type = "样本",
+            name = sample.fileName,
+            note = "删除其片段与标签关联，此操作不可恢复；不影响文风档案和其他样本。",
             onConfirm = {
                 deleting = null
                 vm.delete(sample.id)
-            }
+            },
+            onDismiss = { deleting = null }
         )
     }
 

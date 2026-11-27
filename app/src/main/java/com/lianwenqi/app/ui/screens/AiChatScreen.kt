@@ -3844,6 +3844,9 @@ private fun ChatMessageItem(
             val generating = pendingReplyToId == msg.id
             // 单条消息的「小收起」：只折叠这一条气泡，不影响所属章节分组
             var collapsed by remember(msg.id) { mutableStateOf(false) }
+            // 本条用户消息对应的 AI 回复；用户行与回答行共用同一个收起状态
+            val activeReply = entry.variants.getOrNull(entry.activeIndex)
+            var replyCollapsed by remember(activeReply?.id) { mutableStateOf(false) }
             // 「用户气泡 → 文件清单 → AI 回答」收进同一条块，块内间距收紧；
             // 外层 14dp 的分组间距只负责分隔不同轮次，避免清单与回答之间被撑出大片空白
             Column(
@@ -3873,6 +3876,16 @@ private fun ChatMessageItem(
                         ) {
                             ui.pendingDeleteId = null
                             collapsed = !collapsed
+                        }
+                        // 快捷收起本条用户消息对应的 AI 回复，免去滚动到回答操作栏
+                        if (activeReply != null && !generating) {
+                            AiReplyCollapseAction(
+                                collapsed = replyCollapsed,
+                                onClick = {
+                                    ui.pendingDeleteId = null
+                                    replyCollapsed = !replyCollapsed
+                                }
+                            )
                         }
                         Spacer(Modifier.weight(1f))
                         // 生成中把翻页器翻到“新的一页”，生成完成后即可在历史版本间回看
@@ -3961,6 +3974,8 @@ private fun ChatMessageItem(
                             modelName = modelName,
                             sending = sending,
                             ui = ui,
+                            collapsed = replyCollapsed,
+                            onToggleCollapsed = { replyCollapsed = !replyCollapsed },
                             onRegenerate = onRegenerate,
                             onCopy = onCopy,
                             onDelete = onDelete,
@@ -3977,23 +3992,28 @@ private fun ChatMessageItem(
             }
         }
 
-        is ChatEntry.Assistant -> AssistantBlock(
-            msg = entry.msg,
-            userMessageId = entry.replyToUserId,
-            modelName = modelName,
-            sending = sending,
-            ui = ui,
-            onRegenerate = onRegenerate,
-            onCopy = onCopy,
-            onDelete = onDelete,
-            onSaveEdit = onSaveEdit,
-            onSaveAndSend = onSaveAndSend,
-            onViewLog = onViewLog,
-            onViewPrompt = onViewPrompt,
-            onWriteToChapter = onWriteToChapter,
-            onWriteSummary = onWriteSummary,
-            onManualImport = onManualImport
-        )
+        is ChatEntry.Assistant -> {
+            var collapsed by remember(entry.msg.id) { mutableStateOf(false) }
+            AssistantBlock(
+                msg = entry.msg,
+                userMessageId = entry.replyToUserId,
+                modelName = modelName,
+                sending = sending,
+                ui = ui,
+                collapsed = collapsed,
+                onToggleCollapsed = { collapsed = !collapsed },
+                onRegenerate = onRegenerate,
+                onCopy = onCopy,
+                onDelete = onDelete,
+                onSaveEdit = onSaveEdit,
+                onSaveAndSend = onSaveAndSend,
+                onViewLog = onViewLog,
+                onViewPrompt = onViewPrompt,
+                onWriteToChapter = onWriteToChapter,
+                onWriteSummary = onWriteSummary,
+                onManualImport = onManualImport
+            )
+        }
     }
 }
 
@@ -4005,6 +4025,8 @@ private fun AssistantBlock(
     modelName: String,
     sending: Boolean,
     ui: MessageUiState,
+    collapsed: Boolean,
+    onToggleCollapsed: () -> Unit,
     onRegenerate: (Long) -> Unit,
     onCopy: (String) -> Unit,
     onDelete: (Long) -> Unit,
@@ -4018,8 +4040,7 @@ private fun AssistantBlock(
     /** 导航栏 AI 专属：模型不支持工具调用时的降级入口（回答操作栏「导入」）；为空则不显示 */
     onManualImport: ((ChatMessage) -> Unit)? = null
 ) {
-    // 单条回答的「小收起」：只折叠这一条回答，不影响所属章节分组
-    var collapsed by remember(msg.id) { mutableStateOf(false) }
+    // 单条回答的「小收起」：状态由父级传入，用户消息操作栏也能操作同一条回答
     if (ui.editingId == msg.id) {
         MessageCard(
             ai = true,
@@ -4103,7 +4124,7 @@ private fun AssistantBlock(
                     if (collapsed) "展开" else "收起"
                 ) {
                     ui.pendingDeleteId = null
-                    collapsed = !collapsed
+                    onToggleCollapsed()
                 }
             }
         ) {
@@ -4357,6 +4378,32 @@ private fun MessageAction(
             modifier = Modifier.size(16.dp),
             tint = if (enabled) MaterialTheme.colorScheme.primary
             else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+        )
+    }
+}
+
+/** AI 回复专用收起按钮：「AI」字母 + 箭头，与普通用户消息的收起图标区分 */
+@Composable
+private fun AiReplyCollapseAction(collapsed: Boolean, onClick: () -> Unit) {
+    val tint = MaterialTheme.colorScheme.primary
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(6.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 5.dp, vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            "AI",
+            style = MaterialTheme.typography.labelSmall,
+            color = tint,
+            fontWeight = FontWeight.Bold
+        )
+        Icon(
+            if (collapsed) Icons.Filled.KeyboardArrowDown else Icons.Filled.KeyboardArrowUp,
+            contentDescription = if (collapsed) "展开AI回复" else "收起AI回复",
+            modifier = Modifier.size(16.dp),
+            tint = tint
         )
     }
 }

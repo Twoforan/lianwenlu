@@ -28,6 +28,7 @@ import androidx.compose.material.icons.outlined.Dns
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Key
 import androidx.compose.material.icons.outlined.NetworkCheck
+import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.ui.draw.scale
@@ -114,6 +115,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -121,6 +123,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lianwenqi.app.AppContainer
 import com.lianwenqi.app.R
+import com.lianwenqi.app.ui.components.DeleteConfirmDialog
 import com.lianwenqi.app.ai.AiError
 import com.lianwenqi.app.ai.AiException
 import com.lianwenqi.app.ai.AiResult
@@ -308,7 +311,8 @@ fun SettingsScreen(
     onOpenStyle: () -> Unit = {},
     onOpenManual: () -> Unit = {},
     onOpenUpdate: () -> Unit = {},
-    onOpenCompression: () -> Unit = {}
+    onOpenCompression: () -> Unit = {},
+    onOpenPersonalization: () -> Unit = {}
 ) {
     val vm = appViewModel { SettingsViewModel(it) }
     val providers by vm.providers.collectAsState()
@@ -478,6 +482,38 @@ fun SettingsScreen(
                             .verticalScroll(rememberScrollState())
                             .padding(16.dp)
                     ) {
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable(onClick = onOpenPersonalization)
+                                .padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Outlined.Palette,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text("个性化设置")
+                                Text(
+                                    "自定义应用外观",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Icon(
+                                Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Spacer(Modifier.height(12.dp))
+                        HorizontalDivider()
+                        Spacer(Modifier.height(12.dp))
                         Row(
                             Modifier
                                 .fillMaxWidth()
@@ -794,20 +830,13 @@ fun SettingsScreen(
         }
 
         deletePromptTarget?.let { target ->
-            AlertDialog(
-                onDismissRequest = { deletePromptTarget = null },
-                title = { Text("删除提示词") },
-                text = { Text("确定删除「${target.title}」吗？删除后不可恢复。") },
-                confirmButton = {
-                    TextButton(
-                        onClick = {
-                            vm.deletePrompt(target.id)
-                            deletePromptTarget = null
-                        }
-                    ) { Text("删除", color = MaterialTheme.colorScheme.error) }
-                },
-                dismissButton = {
-                    TextButton(onClick = { deletePromptTarget = null }) { Text("取消") }
+            DeleteConfirmDialog(
+                type = "提示词",
+                name = target.title,
+                onDismiss = { deletePromptTarget = null },
+                onConfirm = {
+                    vm.deletePrompt(target.id)
+                    deletePromptTarget = null
                 }
             )
         }
@@ -1027,6 +1056,7 @@ private fun ProvidersTab(
     val testOk = remember { mutableStateMapOf<Long, Boolean>() }
     // 二次确认删除：值为 "m<模型id>" 或 "k<密钥id>"，点其他任意操作都会清空
     var pendingDelete by remember { mutableStateOf<String?>(null) }
+    var deleteTarget by remember { mutableStateOf<DeleteTarget?>(null) }
     val scheme = MaterialTheme.colorScheme
     val activeModel = models.firstOrNull { it.id == activeModelId }
 
@@ -1146,20 +1176,11 @@ private fun ProvidersTab(
                         }
                         IconButton(
                             onClick = {
-                                if (pendingDelete == "p${p.id}") {
-                                    pendingDelete = null
-                                    onDeleteProvider(p)
-                                } else {
-                                    pendingDelete = "p${p.id}"
-                                }
+                                deleteTarget = DeleteTarget("供应商", p.name) { onDeleteProvider(p) }
                             },
                             modifier = Modifier.size(36.dp)
                         ) {
-                            if (pendingDelete == "p${p.id}") {
-                                Icon(Icons.Filled.Check, "确认删除供应商", Modifier.size(18.dp), tint = scheme.error)
-                            } else {
-                                Icon(Icons.Outlined.Delete, "删除", Modifier.size(18.dp), tint = scheme.onSurfaceVariant)
-                            }
+                            Icon(Icons.Outlined.Delete, "删除", Modifier.size(18.dp), tint = scheme.onSurfaceVariant)
                         }
                         Icon(
                             if (expanded) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
@@ -1272,20 +1293,14 @@ private fun ProvidersTab(
                                     }
                                     IconButton(
                                         onClick = {
-                                            if (pendingDelete == "k${key.id}") {
-                                                pendingDelete = null
-                                                onDeleteKey(key)
-                                            } else {
-                                                pendingDelete = "k${key.id}"
-                                            }
+                                            deleteTarget = DeleteTarget(
+                                                "API 秘钥",
+                                                key.name.ifBlank { key.maskedKey }
+                                            ) { onDeleteKey(key) }
                                         },
                                         modifier = Modifier.size(36.dp)
                                     ) {
-                                        if (pendingDelete == "k${key.id}") {
-                                            Icon(Icons.Filled.Check, "确认删除密钥", Modifier.size(18.dp), tint = scheme.error)
-                                        } else {
-                                            Icon(Icons.Outlined.Delete, "删除密钥", Modifier.size(18.dp), tint = scheme.onSurfaceVariant)
-                                        }
+                                        Icon(Icons.Outlined.Delete, "删除密钥", Modifier.size(18.dp), tint = scheme.onSurfaceVariant)
                                     }
                                 }
                                 if (keyModels.isNotEmpty()) {
@@ -1298,11 +1313,17 @@ private fun ProvidersTab(
                                             ModelRowItem(
                                                 model = m,
                                                 active = m.id == activeModelId,
-                                                confirmDelete = pendingDelete == "m${m.id}",
+                                                confirmDelete = false,
                                                 onEdit = { pendingDelete = null; onEditModel(m) },
                                                 onSetActive = { pendingDelete = null; onSetActive(m) },
-                                                onRequestDelete = { pendingDelete = "m${m.id}" },
-                                                onDelete = { pendingDelete = null; onDeleteModel(m) }
+                                                onRequestDelete = {
+                                                    pendingDelete = null
+                                                    deleteTarget = DeleteTarget(
+                                                        "模型",
+                                                        m.displayName.ifBlank { m.name }
+                                                    ) { onDeleteModel(m) }
+                                                },
+                                                onDelete = { pendingDelete = null }
                                             )
                                         }
                                     }
@@ -1409,11 +1430,17 @@ private fun ProvidersTab(
                                 ModelRowItem(
                                     model = m,
                                     active = m.id == activeModelId,
-                                    confirmDelete = pendingDelete == "m${m.id}",
+                                    confirmDelete = false,
                                     onEdit = { pendingDelete = null; onEditModel(m) },
                                     onSetActive = { pendingDelete = null; onSetActive(m) },
-                                    onRequestDelete = { pendingDelete = "m${m.id}" },
-                                    onDelete = { pendingDelete = null; onDeleteModel(m) }
+                                    onRequestDelete = {
+                                        pendingDelete = null
+                                        deleteTarget = DeleteTarget(
+                                            "模型",
+                                            m.displayName.ifBlank { m.name }
+                                        ) { onDeleteModel(m) }
+                                    },
+                                    onDelete = { pendingDelete = null }
                                 )
                             }
                         }
@@ -1423,7 +1450,26 @@ private fun ProvidersTab(
             }
         }
     }
+    // 统一删除确认弹窗
+    deleteTarget?.let { target ->
+        DeleteConfirmDialog(
+            type = target.type,
+            name = target.name,
+            onDismiss = { deleteTarget = null },
+            onConfirm = {
+                deleteTarget = null
+                target.confirm()
+            }
+        )
+    }
 }
+
+/** 删除确认弹窗的目标描述 */
+private data class DeleteTarget(
+    val type: String,
+    val name: String,
+    val confirm: () -> Unit
+)
 
 /** 小圆角状态标签 */
 @Composable
@@ -1839,7 +1885,8 @@ private fun ProviderDialog(
         Surface(
             modifier = Modifier
                 .fillMaxWidth()
-                .fillMaxHeight(0.94f)
+                // 编辑时内容较少，按内容自适应高度；新建时保留较高的固定高度
+                .then(if (editing) Modifier else Modifier.fillMaxHeight(0.94f))
                 .padding(horizontal = 14.dp, vertical = 16.dp)
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
@@ -1850,7 +1897,7 @@ private fun ProviderDialog(
             border = BorderStroke(1.dp, Color(0xFFEBEEF4)),
             shadowElevation = 16.dp
         ) {
-            Column(Modifier.fillMaxSize()) {
+            Column(Modifier.fillMaxWidth().then(if (editing) Modifier else Modifier.fillMaxSize())) {
                 // ---------- 头部：渐变四角星 + 标题 + 副标题 ----------
                 Row(
                     Modifier
@@ -1882,7 +1929,7 @@ private fun ProviderDialog(
                 // ---------- 内容区 ----------
                 Column(
                     Modifier
-                        .weight(1f)
+                        .then(if (editing) Modifier else Modifier.weight(1f))
                         .fillMaxWidth()
                         .verticalScroll(rememberScrollState())
                         .padding(horizontal = 16.dp, vertical = 14.dp),
@@ -2116,73 +2163,196 @@ private fun KeyDialog(
     var enabled by remember { mutableStateOf(initial?.enabled ?: true) }
     var error by remember { mutableStateOf<String?>(null) }
     var saving by remember { mutableStateOf(false) }
+    val canSave = apiKey.isNotBlank() && !saving
 
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = {
-            Text(if (initial == null) "添加 API 密钥 · ${provider.name}" else "编辑 API 密钥")
-        },
-        text = {
-            Column(Modifier.verticalScroll(rememberScrollState())) {
-                OutlinedTextField(
-                    value = name,
-                    onValueChange = { name = it },
-                    label = { Text("备注名称") },
-                    placeholder = { Text("主账号 / 备用账号 / 中转站 A / 测试密钥") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = apiKey,
-                    onValueChange = { apiKey = it },
-                    label = { Text("API Key") },
-                    singleLine = true,
-                    visualTransformation = PasswordVisualTransformation(),
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Spacer(Modifier.height(8.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(checked = enabled, onCheckedChange = { enabled = it })
-                    Text("启用该密钥", style = MaterialTheme.typography.bodySmall)
-                }
-                if (initial != null) {
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        "修改 API Key 后，建议重新测试该密钥并重新读取模型",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+    fun doSave() {
+        if (!canSave) return
+        saving = true
+        error = null
+        onSave(
+            (initial ?: ProviderKey(providerId = provider.id)).copy(
+                providerId = provider.id,
+                name = name,
+                apiKey = apiKey,
+                enabled = enabled
+            )
+        ) { msg ->
+            saving = false
+            error = msg
+        }
+    }
+
+    BackHandler(onBack = onDismiss)
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.32f))
+            .imePadding()
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null
+            ) { onDismiss() },
+        contentAlignment = Alignment.Center
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp)
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null
+                ) { },
+            shape = RoundedCornerShape(14.dp),
+            color = Color.White,
+            border = BorderStroke(1.dp, Color(0xFFEBEEF4)),
+            shadowElevation = 16.dp
+        ) {
+            Column {
+                // 头部：钥匙图标 + 标题 + 供应商
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(start = 15.dp, end = 6.dp, top = 16.dp, bottom = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Image(
+                        painterResource(R.drawable.ic_key_svg),
+                        contentDescription = null,
+                        modifier = Modifier.size(48.dp)
                     )
-                }
-                error?.let {
-                    Spacer(Modifier.height(6.dp))
-                    Text(it, color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.labelSmall)
-                }
-            }
-        },
-        confirmButton = {
-            Button(
-                enabled = apiKey.isNotBlank() && !saving,
-                onClick = {
-                    saving = true
-                    error = null
-                    onSave(
-                        (initial ?: ProviderKey(providerId = provider.id)).copy(
-                            providerId = provider.id,
-                            name = name,
-                            apiKey = apiKey,
-                            enabled = enabled
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            if (initial == null) "添加API秘钥" else "编辑API秘钥",
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = DialogInkTitle
                         )
-                    ) { msg ->
-                        saving = false
-                        error = msg
+                        Text(
+                            provider.name,
+                            fontSize = 10.sp,
+                            color = Color(0xFF8B93A5),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Filled.Close, "关闭", Modifier.size(18.dp), tint = Color(0xFF9AA1AF))
                     }
                 }
-            ) { Text("保存") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
-    )
+                HorizontalDivider(color = Color(0xFFEBEEF4))
+
+                // 内容区
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    DialogSectionTitle("秘钥信息")
+                    Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                        DialogFieldLabel("API备注名称")
+                        DialogField(
+                            value = name,
+                            onValueChange = { name = it },
+                            placeholder = "例如：个人主秘钥，备用秘钥"
+                        )
+                    }
+                    Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                        DialogFieldLabel("API Key")
+                        DialogField(
+                            value = apiKey,
+                            onValueChange = { apiKey = it },
+                            placeholder = "粘贴你的API Key",
+                            password = true
+                        )
+                    }
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color.White)
+                            .border(1.dp, DialogFieldBorder, RoundedCornerShape(10.dp))
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                "启用该秘钥",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = DialogInkTitle
+                            )
+                            Text(
+                                "启用后，该秘钥可用于API请求",
+                                fontSize = 10.sp,
+                                color = DialogInkHint
+                            )
+                        }
+                        DialogSwitchBox(checked = enabled, onCheckedChange = { enabled = it })
+                    }
+                    if (initial != null) {
+                        Text(
+                            "修改 API Key 后，建议重新测试该密钥并重新读取模型",
+                            fontSize = 10.sp,
+                            color = DialogInkHint
+                        )
+                    }
+                    error?.let {
+                        Text(it, fontSize = 11.sp, color = Color(0xFFE5484D))
+                    }
+                }
+
+                // 底部按钮
+                HorizontalDivider(color = Color(0xFFEBEEF4))
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 10.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedButton(
+                        onClick = onDismiss,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(44.dp),
+                        shape = RoundedCornerShape(13.dp),
+                        border = BorderStroke(1.dp, Color(0xFFE5E8EF)),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF70788A))
+                    ) { Text("取消", fontSize = 12.sp) }
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .height(44.dp)
+                            .clip(RoundedCornerShape(13.dp))
+                            .background(
+                                Brush.linearGradient(listOf(Color(0xFF6658E8), Color(0xFF8376F1)))
+                            )
+                            .clickable(enabled = canSave) { doSave() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                if (initial == null) "添加秘钥" else "保存",
+                                color = if (canSave) Color.White else Color.White.copy(alpha = 0.75f),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Icon(
+                                Icons.AutoMirrored.Filled.ArrowForward,
+                                null,
+                                Modifier.size(14.dp),
+                                tint = if (canSave) Color.White else Color.White.copy(alpha = 0.75f)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -2565,6 +2735,7 @@ private fun DialogField(
     readOnly: Boolean = false,
     keyboardType: KeyboardType = KeyboardType.Text,
     password: Boolean = false,
+    multilineMinHeight: Dp = 120.dp,
     trailing: (@Composable () -> Unit)? = null
 ) {
     BasicTextField(
@@ -2581,7 +2752,7 @@ private fun DialogField(
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .then(if (singleLine) Modifier.height(39.dp) else Modifier.heightIn(min = 120.dp))
+                    .then(if (singleLine) Modifier.height(39.dp) else Modifier.heightIn(min = multilineMinHeight))
                     .clip(RoundedCornerShape(10.dp))
                     .background(Color.White)
                     .border(1.dp, DialogFieldBorder, RoundedCornerShape(10.dp))
@@ -2863,7 +3034,8 @@ private fun DialogSystemPrompt(
     }
 }
 
-/** 模型详情：可修改模型标识（厂商模型只读）、显示名称、温度、最大 token 与预设提示词 */
+/** 模型详情：布局与「添加模型」保持一致，可修改显示名称、生成参数、能力与预设提示词 */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ModelDetailDialog(
     model: AiModel,
@@ -2883,102 +3055,276 @@ private fun ModelDetailDialog(
     var reasoningEnabled by remember { mutableStateOf(model.reasoningEnabled) }
     var reasoningLevel by remember { mutableStateOf(model.reasoningLevel) }
     var webSearchEnabled by remember { mutableStateOf(model.webSearchEnabled) }
+    val canSave = name.isNotBlank()
 
-    InputDialog(
-        title = "模型设置",
-        onDismiss = onDismiss,
-        dismissButton = {
-            Row {
-                TextButton(onClick = onDelete) {
-                    Text("删除", color = MaterialTheme.colorScheme.error)
-                }
-                TextButton(onClick = onDismiss) { Text("取消") }
-            }
-        },
-        confirmButton = {
-            Button(
-                enabled = name.isNotBlank(),
-                onClick = {
-                    onSave(
-                        model.copy(
-                            name = name.trim(),
-                            alias = alias.trim(),
-                            temperature = temperature,
-                            maxTokens = if (unlimited) 0 else maxTokens,
-                            maxContext = maxContext,
-                            contextWindow = contextWindow,
-                            systemPrompt = systemPrompt,
-                            reasoningEnabled = reasoningEnabled,
-                            reasoningLevel = reasoningLevel,
-                            webSearchEnabled = webSearchEnabled
+    fun doSave() {
+        if (!canSave) return
+        onSave(
+            model.copy(
+                name = name.trim(),
+                alias = alias.trim(),
+                temperature = temperature,
+                maxTokens = if (unlimited) 0 else maxTokens,
+                maxContext = maxContext,
+                contextWindow = contextWindow,
+                systemPrompt = systemPrompt,
+                reasoningEnabled = reasoningEnabled,
+                reasoningLevel = reasoningLevel,
+                webSearchEnabled = webSearchEnabled
+            )
+        )
+    }
+
+    BackHandler(onBack = onDismiss)
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.32f))
+            .imePadding()
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null
+            ) { onDismiss() },
+        contentAlignment = Alignment.Center
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .fillMaxHeight(0.92f)
+                .padding(horizontal = 14.dp, vertical = 16.dp)
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null
+                ) { },
+            shape = RoundedCornerShape(14.dp),
+            color = Color.White,
+            border = BorderStroke(1.dp, Color(0xFFEBEEF4)),
+            shadowElevation = 16.dp
+        ) {
+            Column(Modifier.fillMaxSize()) {
+                // 头部：与「添加模型」一致的图标 + 标题 + 副标题
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(start = 16.dp, end = 6.dp, top = 16.dp, bottom = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        Modifier
+                            .size(44.dp)
+                            .background(
+                                Brush.linearGradient(listOf(Color(0xFFEEE9FF), Color(0xFFE5E2FF))),
+                                RoundedCornerShape(14.dp)
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Filled.AutoAwesome, null, Modifier.size(22.dp), tint = DialogPurple)
+                    }
+                    Spacer(Modifier.width(14.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("模型设置", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color.Black)
+                        Text(
+                            "${model.name} · ${if (model.custom) "自定义模型" else "厂商模型"}",
+                            fontSize = 10.sp,
+                            color = Color(0xFF8B93A5),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
+                    }
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Filled.Close, "关闭", Modifier.size(18.dp), tint = Color(0xFF9AA1AF))
+                    }
+                }
+                HorizontalDivider(color = Color(0xFFEBEEF4))
+
+                // 内容区
+                Column(
+                    Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalArrangement = Arrangement.spacedBy(18.dp)
+                ) {
+                    // 模型信息
+                    Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                        DialogSectionTitle("模型信息")
+                        DialogFieldLabel(if (model.custom) "模型（接口名）" else "模型（厂商提供，不可修改）")
+                        DialogField(
+                            value = name,
+                            onValueChange = { name = it },
+                            placeholder = "模型接口名",
+                            readOnly = !model.custom
+                        )
+                        DialogFieldLabel("显示名称")
+                        DialogField(
+                            value = alias,
+                            onValueChange = { alias = it },
+                            placeholder = "用于区分同类模型"
+                        )
+                    }
+
+                    // 生成参数
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        DialogSectionTitle("生成参数")
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                "输出温度",
+                                Modifier.weight(1f),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = DialogInkLabel
+                            )
+                            Text(
+                                "%.2f".format(temperature),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = DialogPurple
+                            )
+                        }
+                        Slider(
+                            value = temperature,
+                            onValueChange = { temperature = it },
+                            valueRange = 0f..2f,
+                            thumb = {
+                                Box(
+                                    Modifier
+                                        .size(14.dp)
+                                        .background(DialogPurple, CircleShape)
+                                )
+                            },
+                            colors = SliderDefaults.colors(
+                                thumbColor = DialogPurple,
+                                activeTrackColor = DialogPurple,
+                                inactiveTrackColor = Color(0xFFE8EAF1)
+                            )
+                        )
+                        DialogFieldLabel("最大输出 token")
+                        DialogField(
+                            value = if (unlimited) "" else maxTokens.toString(),
+                            onValueChange = { text ->
+                                maxTokens = text.filter { it.isDigit() }.take(6).toIntOrNull() ?: 0
+                            },
+                            keyboardType = KeyboardType.Number,
+                            placeholder = if (unlimited) "不限" else "8192",
+                            trailing = { DialogUnlimitedToggle(unlimited) { unlimited = it } }
+                        )
+                        DialogFieldLabel("最大上下文条数")
+                        DialogField(
+                            value = if (maxContext <= 0) "" else maxContext.toString(),
+                            onValueChange = { text ->
+                                maxContext = text.filter { it.isDigit() }.take(3).toIntOrNull() ?: 0
+                            },
+                            keyboardType = KeyboardType.Number,
+                            placeholder = if (maxContext <= 0) "不限" else "20",
+                            trailing = {
+                                DialogUnlimitedToggle(maxContext <= 0) { on ->
+                                    maxContext = if (on) 0 else 20
+                                }
+                            }
+                        )
+                        DialogFieldLabel("模型最大上下文（tokens）")
+                        DialogField(
+                            value = if (contextWindow > 0) contextWindow.toString() else "",
+                            onValueChange = { text ->
+                                contextWindow = text.filter { it.isDigit() }.take(9).toIntOrNull() ?: 0
+                            },
+                            keyboardType = KeyboardType.Number,
+                            placeholder = "例如：114514（留空自动读取，若无则取默认值）"
+                        )
+                    }
+
+                    // 模型能力
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        DialogSectionTitle("模型能力")
+                        DialogToggleRow(
+                            title = "思考模式",
+                            desc = "启用模型的推理/思考能力",
+                            checked = reasoningEnabled,
+                            onCheckedChange = { reasoningEnabled = it }
+                        )
+                        if (reasoningEnabled) {
+                            Text("思考强度", fontSize = 12.sp, fontWeight = FontWeight.Medium, color = DialogInkTitle)
+                            DialogEffortSegments(ReasoningLevel.normalize(reasoningLevel)) {
+                                reasoningLevel = it.storage
+                            }
+                        }
+                        HorizontalDivider(color = Color(0xFFE8EAF1))
+                        DialogToggleRow(
+                            title = "联网搜索",
+                            desc = "是否开启模型的联网搜索能力",
+                            checked = webSearchEnabled,
+                            onCheckedChange = { webSearchEnabled = it }
+                        )
+                    }
+
+                    // 预设提示词
+                    DialogSystemPrompt(
+                        value = systemPrompt,
+                        prompts = modelPrompts,
+                        onValueChange = { systemPrompt = it }
                     )
                 }
-            ) { Text("保存") }
+
+                // 底部按钮
+                HorizontalDivider(color = Color(0xFFEBEEF4))
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 10.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedButton(
+                        onClick = onDelete,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(44.dp),
+                        shape = RoundedCornerShape(13.dp),
+                        border = BorderStroke(1.dp, Color(0xFFE5E8EF)),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error
+                        )
+                    ) { Text("删除", fontSize = 12.sp, color = MaterialTheme.colorScheme.error) }
+                    OutlinedButton(
+                        onClick = onDismiss,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(44.dp),
+                        shape = RoundedCornerShape(13.dp),
+                        border = BorderStroke(1.dp, Color(0xFFE5E8EF)),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF70788A))
+                    ) { Text("取消", fontSize = 12.sp) }
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .height(44.dp)
+                            .clip(RoundedCornerShape(13.dp))
+                            .background(
+                                Brush.linearGradient(listOf(Color(0xFF6658E8), Color(0xFF8376F1)))
+                            )
+                            .clickable(enabled = canSave) { doSave() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                "保存",
+                                color = if (canSave) Color.White else Color.White.copy(alpha = 0.75f),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Icon(
+                                Icons.AutoMirrored.Filled.ArrowForward,
+                                null,
+                                Modifier.size(14.dp),
+                                tint = if (canSave) Color.White else Color.White.copy(alpha = 0.75f)
+                            )
+                        }
+                    }
+                }
+            }
         }
-    ) {
-        OutlinedTextField(
-            value = name,
-            onValueChange = { name = it },
-            enabled = model.custom,
-            label = { Text(if (model.custom) "模型（接口名）" else "模型（厂商提供，不可修改）") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth()
-        )
-        Spacer(Modifier.height(8.dp))
-        OutlinedTextField(
-            value = alias,
-            onValueChange = { alias = it },
-            label = { Text("显示名称") },
-            placeholder = { Text("用于区分同类模型") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth()
-        )
-        Spacer(Modifier.height(8.dp))
-        Text("输出温度：${"%.2f".format(temperature)}")
-        Slider(value = temperature, onValueChange = { temperature = it }, valueRange = 0f..2f)
-        MaxTokensSetting(
-            maxTokens = maxTokens,
-            unlimited = unlimited,
-            onTokensChange = { maxTokens = it },
-            onUnlimitedChange = { unlimited = it }
-        )
-        MaxContextSetting(maxContext = maxContext, onContextChange = { maxContext = it })
-        Spacer(Modifier.height(8.dp))
-        OutlinedTextField(
-            value = if (contextWindow > 0) contextWindow.toString() else "",
-            onValueChange = { text ->
-                contextWindow = text.filter { it.isDigit() }.take(9).toIntOrNull() ?: 0
-            },
-            label = { Text("上下文窗口（token，留空=未知）") },
-            placeholder = { Text("从供应商模型列表自动读取，也可手动填写") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth()
-        )
-        Spacer(Modifier.height(12.dp))
-        ReasoningSetting(
-            enabled = reasoningEnabled,
-            level = reasoningLevel,
-            onEnabledChange = { reasoningEnabled = it },
-            onLevelChange = { reasoningLevel = it }
-        )
-        Spacer(Modifier.height(8.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Checkbox(
-                checked = webSearchEnabled,
-                onCheckedChange = { webSearchEnabled = it }
-            )
-            Text(
-                "支持内置联网搜索（勾选后聊天工具条出现联网搜索按钮）",
-                style = MaterialTheme.typography.bodySmall
-            )
-        }
-        Spacer(Modifier.height(12.dp))
-        SystemPromptEditor(
-            value = systemPrompt,
-            prompts = modelPrompts,
-            onValueChange = { systemPrompt = it }
-        )
     }
 }
 
@@ -3136,27 +3482,150 @@ private fun PromptDialog(
     var title by remember { mutableStateOf(initial?.title ?: "") }
     var content by remember { mutableStateOf(initial?.content ?: "") }
     val typeLabel = if (type == PromptType.MODEL) "模型提示词" else "快捷提示词"
+    val canSave = title.isNotBlank() && content.isNotBlank()
 
-    InputDialog(
-        title = if (initial == null) "新建$typeLabel" else "编辑$typeLabel",
-        onDismiss = onDismiss,
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
-        confirmButton = {
-            Button(
-                enabled = title.isNotBlank() && content.isNotBlank(),
-                onClick = {
-                    // 新建按当前分类落类型；编辑沿用原记录的类型，绝不因入口变化而改类型
-                    onSave((initial ?: Prompt(title = title, content = content, type = type))
-                        .copy(title = title.trim(), content = content))
-                }
-            ) { Text("保存") }
-        }
+    fun doSave() {
+        if (!canSave) return
+        // 新建按当前分类落类型；编辑沿用原记录的类型，绝不因入口变化而改类型
+        onSave(
+            (initial ?: Prompt(title = title, content = content, type = type))
+                .copy(title = title.trim(), content = content)
+        )
+    }
+
+    BackHandler(onBack = onDismiss)
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.32f))
+            .imePadding()
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null
+            ) { onDismiss() },
+        contentAlignment = Alignment.Center
     ) {
-        OutlinedTextField(value = title, onValueChange = { title = it },
-            label = { Text("提示词标题") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-        Spacer(Modifier.height(8.dp))
-        OutlinedTextField(value = content, onValueChange = { content = it },
-            label = { Text("提示词内容") }, minLines = 5, modifier = Modifier.fillMaxWidth())
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp)
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null
+                ) { },
+            shape = RoundedCornerShape(14.dp),
+            color = Color.White,
+            border = BorderStroke(1.dp, Color(0xFFEBEEF4)),
+            shadowElevation = 16.dp
+        ) {
+            Column {
+                // 头部：提示词图标 + 标题 + 说明
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(start = 15.dp, end = 16.dp, top = 16.dp, bottom = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Image(
+                        painterResource(R.drawable.ic_prompt_pen),
+                        contentDescription = null,
+                        modifier = Modifier.size(48.dp)
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            if (initial == null) "新建$typeLabel" else "编辑$typeLabel",
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = DialogInkTitle
+                        )
+                        Text(
+                            if (initial == null) "创建一条可重复使用的提示词内容" else "修改这条提示词的标题与内容",
+                            fontSize = 10.sp,
+                            color = Color(0xFF8B93A5)
+                        )
+                    }
+                }
+                HorizontalDivider(color = Color(0xFFEBEEF4))
+
+                // 内容区
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 17.dp, vertical = 14.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    // 设计稿中的分组标题：紫色竖条 +「提示词内容」
+                    DialogSectionTitle("提示词内容")
+                    Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                        DialogFieldLabel("提示词标题")
+                        DialogField(
+                            value = title,
+                            onValueChange = { title = it },
+                            placeholder = "例如：心理描写"
+                        )
+                    }
+                    Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                        DialogFieldLabel("提示词内容")
+                        DialogField(
+                            value = content,
+                            onValueChange = { content = it },
+                            placeholder = "例如：要求仔细描写人物心理与动作",
+                            singleLine = false,
+                            multilineMinHeight = 193.dp
+                        )
+                    }
+                }
+
+                // 底部按钮
+                HorizontalDivider(color = Color(0xFFEBEEF4))
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 10.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedButton(
+                        onClick = onDismiss,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(44.dp),
+                        shape = RoundedCornerShape(13.dp),
+                        border = BorderStroke(1.dp, Color(0xFFE5E8EF)),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF70788A))
+                    ) { Text("取消", fontSize = 12.sp) }
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .height(44.dp)
+                            .clip(RoundedCornerShape(13.dp))
+                            .background(
+                                Brush.linearGradient(listOf(Color(0xFF6658E8), Color(0xFF8376F1)))
+                            )
+                            .clickable(enabled = canSave) { doSave() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                if (initial == null) "添加提示词" else "保存",
+                                color = if (canSave) Color.White else Color.White.copy(alpha = 0.75f),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Icon(
+                                Icons.AutoMirrored.Filled.ArrowForward,
+                                null,
+                                Modifier.size(14.dp),
+                                tint = if (canSave) Color.White else Color.White.copy(alpha = 0.75f)
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

@@ -26,6 +26,7 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import java.io.File
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class BookshelfViewModel(private val container: AppContainer) : ViewModel() {
@@ -76,6 +77,12 @@ class BookshelfViewModel(private val container: AppContainer) : ViewModel() {
 
     val nightMode: StateFlow<Boolean> =
         prefs.nightMode.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    /** 书架背景图路径；文件不存在时视为未设置，使用默认背景 */
+    val shelfBackground: StateFlow<String?> = prefs.shelfBackgroundImage
+        .map { path -> path?.takeIf { File(it).isFile && File(it).length() > 0 } }
+        .flowOn(Dispatchers.IO)
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     val listMode: StateFlow<Boolean> =
         prefs.listMode.stateIn(viewModelScope, SharingStarted.Eagerly, true)

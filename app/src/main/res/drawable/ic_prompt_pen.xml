@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 添加提示词弹窗图标：淡紫圆角底 + 紫色笔形（与 tishici.svg 一致） -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <path
+        android:pathData="M15,0 H33 A15,15 0 0 1 48,15 V33 A15,15 0 0 1 33,48 H15 A15,15 0 0 1 0,33 V15 A15,15 0 0 1 15,0 Z"
+        android:fillColor="#FFE9E6FF" />
+    <path
+        android:pathData="M17.6754,13.0034 C18.8679,13.0499 19.9932,13.5683 20.8036,14.4445 L17.5,17.5 L14.1964,20.5555 C13.386,19.6794 12.9569,18.5172 13.0034,17.3246 C13.0499,16.132 13.5682,15.0068 14.4445,14.1964 C15.3207,13.386 16.4828,12.9569 17.6754,13.0034 Z M22.3806,16 L32.9293,26.8901 L26.6897,32.934 L16.141,22.044 L22.3806,16 Z M34.6692,34.7747 L30.2783,33.7266 L33.9308,30.3212 L34.6692,34.7747 Z"
+        android:fillColor="#FF6658E8" />
+</vector>

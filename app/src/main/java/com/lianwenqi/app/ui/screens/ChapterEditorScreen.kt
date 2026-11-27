@@ -72,6 +72,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -184,25 +185,38 @@ fun ChapterEditorScreen(
     var fastScrollVisible by remember { mutableStateOf(false) }
     var fastScrollDragging by remember { mutableStateOf(false) }
     var fastScrollHideJob by remember { mutableStateOf<Job?>(null) }
+    // 只在用户真实按住拖动后的短时间内允许浮现，避免进入页面时的程序化滚动触发
+    var fastScrollReadyAt by remember { mutableLongStateOf(0L) }
     var editorLayout by remember { mutableStateOf<TextLayoutResult?>(null) }
     var editorFieldTop by remember { mutableStateOf(0f) }
     val density = LocalDensity.current
 
-    // 检测正文快速滑动：速度超过阈值时显示右侧滚动条，停止后延时隐藏
+    // 进入新章节 / 打开侧边栏或功能面板时，立即隐藏滚动条
+    LaunchedEffect(currentId, aiOpen, panel) {
+        if (aiOpen || panel != null) {
+            fastScrollHideJob?.cancel()
+            fastScrollVisible = false
+            fastScrollDragging = false
+        }
+    }
+    LaunchedEffect(currentId) {
+        fastScrollHideJob?.cancel()
+        fastScrollVisible = false
+        fastScrollDragging = false
+        fastScrollReadyAt = 0L
+        // 忽略进入页面时的定位滚动，稍后才允许滚动条出现
+        delay(700)
+        fastScrollReadyAt = SystemClock.uptimeMillis()
+    }
+
+    // 滚动进行中显示滚动条，停止后延时隐藏；进入页面后的定位滚动由 fastScrollReadyAt 过滤
     LaunchedEffect(editorScroll) {
-        var lastValue = editorScroll.value
-        var lastTime = SystemClock.uptimeMillis()
-        snapshotFlow { editorScroll.value }.collect { v ->
+        snapshotFlow { editorScroll.isScrollInProgress }.collect { scrolling ->
             val now = SystemClock.uptimeMillis()
-            val dt = (now - lastTime).coerceAtLeast(1L)
-            val speed = abs(v - lastValue).toFloat() * 1000f / dt
-            lastValue = v
-            lastTime = now
-            if (editorScroll.maxValue <= 0) return@collect
-            if (speed > with(density) { 600.dp.toPx() }) {
+            if (scrolling && now >= fastScrollReadyAt && editorScroll.maxValue > 0) {
                 fastScrollVisible = true
                 fastScrollHideJob?.cancel()
-            } else if (!fastScrollDragging && fastScrollVisible) {
+            } else if (!scrolling && !fastScrollDragging) {
                 fastScrollHideJob?.cancel()
                 fastScrollHideJob = scope.launch {
                     delay(900)

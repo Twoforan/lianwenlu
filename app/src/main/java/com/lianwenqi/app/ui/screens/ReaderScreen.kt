@@ -108,6 +108,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lianwenqi.app.AppContainer
+import com.lianwenqi.app.data.ReaderProgress
 import com.lianwenqi.app.data.entity.Book
 import com.lianwenqi.app.data.entity.Chapter
 import com.lianwenqi.app.data.entity.Volume
@@ -127,6 +128,7 @@ import com.lianwenqi.app.util.volumeKeyNavDirection
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
@@ -170,6 +172,23 @@ internal fun readerVolumeGroups(chapters: List<Chapter>, volumes: List<Volume>):
     }
     val orphans = chapters.filter { it.volumeId == null || it.volumeId !in known }
     return if (orphans.isEmpty()) grouped else listOf(ReaderVolumeGroup(null, "未分卷", orphans)) + grouped
+}
+
+/**
+ * 阅读器内部使用的全书顺序：先未分卷章节，再按分卷顺序、卷内按 sortOrder。
+ * 章节在分卷间移动后，数据库的全局 sortOrder 可能与分卷展示顺序不一致，
+ * 直接用它翻页会出现「读完本卷第 2 章跳到下一卷」的问题。
+ */
+internal fun readerOrderedChapters(chapters: List<Chapter>, volumes: List<Volume>): List<Chapter> {
+    if (volumes.isEmpty()) return chapters
+    val known = volumes.map { it.id }.toSet()
+    val byVolume = chapters.groupBy { it.volumeId }
+    val result = ArrayList<Chapter>(chapters.size)
+    chapters.filter { it.volumeId == null || it.volumeId !in known }.forEach { result.add(it) }
+    volumes.sortedBy { it.sortOrder }.forEach { v ->
+        byVolume[v.id]?.sortedBy { it.sortOrder }?.let { result.addAll(it) }
+    }
+    return result
 }
 
 /**
@@ -229,15 +248,26 @@ class ReaderViewModel(container: AppContainer, private val bookId: Long) : ViewM
     fun rememberProgress(chapterId: Long) = viewModelScope.launch {
         prefs.setLastOpened(bookId, chapterId)
     }
+
+    /** 全书预览的阅读位置（章节 + 章内比例） */
+    fun readerProgress(): Flow<ReaderProgress?> = prefs.readerProgress(bookId)
+
+    fun saveReaderProgress(chapterId: Long, fraction: Float) = viewModelScope.launch {
+        if (chapterId > 0L) prefs.setReaderProgress(bookId, chapterId, fraction)
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ReaderScreen(bookId: Long, chapterId: Long, onBack: () -> Unit) {
+fun ReaderScreen(bookId: Long, chapterId: Long, resume: Boolean = false, onBack: () -> Unit) {
     val vm = appViewModel(key = "reader-$bookId") { ReaderViewModel(it, bookId) }
     val book by vm.book.collectAsState()
-    val chapters by vm.chapters.collectAsState()
+    val rawChapters by vm.chapters.collectAsState()
     val volumes by vm.volumes.collectAsState()
+    // 阅读顺序按「分卷顺序 + 卷内顺序」重排，避免章节跨卷移动后翻页跳到错误的卷
+    val chapters = remember(rawChapters, volumes) {
+        readerOrderedChapters(rawChapters, volumes)
+    }
     val rawStyle by vm.style.collectAsState()
     val format by vm.format.collectAsState()
     val settings by vm.settings.collectAsState()
@@ -262,6 +292,19 @@ fun ReaderScreen(bookId: Long, chapterId: Long, onBack: () -> Unit) {
     // 底部进度条拖动跳页：seekTick 变化时由阅读器执行章内定位
     var seekProgress by remember { mutableFloatStateOf(0f) }
     var seekTick by remember { mutableIntStateOf(0) }
+    // 全书预览的进度恢复：只在 resume=true 时读取上次章节与章内比例
+    var savedProgress by remember(bookId) { mutableStateOf<ReaderProgress?>(null) }
+    var savedLoaded by remember(bookId) { mutableStateOf(false) }
+    var startChapterId by remember { mutableStateOf(chapterId) }
+    var startProgress by remember { mutableFloatStateOf(0f) }
+    var progressRestored by remember { mutableStateOf(false) }
+    var initialSeekApplied by remember { mutableStateOf(false) }
+    LaunchedEffect(bookId) {
+        vm.readerProgress().collect {
+            savedProgress = it
+            savedLoaded = true
+        }
+    }
     // 连续滚动模式下的外部跳转请求（上一章 / 下一章 / 目录）
     var jumpIndex by remember { mutableIntStateOf(0) }
     var jumpTick by remember { mutableIntStateOf(0) }
@@ -272,8 +315,8 @@ fun ReaderScreen(bookId: Long, chapterId: Long, onBack: () -> Unit) {
 
     val chapter = chapters.firstOrNull { it.id == currentId }
     val index = chapters.indexOfFirst { it.id == currentId }
-    // 进入阅读器时要定位到的章节
-    val initialIndex = chapters.indexOfFirst { it.id == chapterId }
+    // 进入阅读器时要定位到的章节（全书预览时优先恢复上次章节）
+    val initialIndex = chapters.indexOfFirst { it.id == startChapterId }
 
     // 进度面板展示的当前分卷 / 章节位置
     val progressGroups = remember(chapters, volumes) { readerVolumeGroups(chapters, volumes) }
@@ -302,6 +345,17 @@ fun ReaderScreen(bookId: Long, chapterId: Long, onBack: () -> Unit) {
         vm.rememberProgress(currentId)
     }
 
+    // 全书预览：章节数据就绪后恢复上次阅读的章节
+    LaunchedEffect(savedProgress, chapters, resume) {
+        if (!resume || progressRestored) return@LaunchedEffect
+        val saved = savedProgress ?: return@LaunchedEffect
+        if (chapters.none { it.id == saved.chapterId }) return@LaunchedEffect
+        progressRestored = true
+        startChapterId = saved.chapterId
+        startProgress = saved.fraction
+        currentId = saved.chapterId
+    }
+
     // 菜单 / 面板开合后重新拿回按键焦点，保证音量键翻页一直可用
     LaunchedEffect(menuVisible, panel) { focusRequester.requestFocus() }
 
@@ -316,6 +370,7 @@ fun ReaderScreen(bookId: Long, chapterId: Long, onBack: () -> Unit) {
     /** 跳转到指定章节：更新当前章节并请求滚动列表定位 */
     fun jumpTo(target: Int) {
         if (target in chapters.indices) {
+            if (resume && currentId > 0L) vm.saveReaderProgress(currentId, chapterProgress)
             jumpIndex = target
             jumpTick++
             currentId = chapters[target].id
@@ -340,6 +395,21 @@ fun ReaderScreen(bookId: Long, chapterId: Long, onBack: () -> Unit) {
         chapterProgress = f
         seekProgress = f
         seekTick++
+    }
+
+    // 全书预览：等阅读器完成首次布局后恢复到上次章内位置（只执行一次）
+    LaunchedEffect(startProgress, startChapterId, chapters, resume) {
+        if (!resume || startProgress <= 0.01f || initialSeekApplied) return@LaunchedEffect
+        initialSeekApplied = true
+        delay(600)
+        seekTo(startProgress)
+    }
+
+    // 全书预览：阅读位置变化后节流保存，退出前 0.7 秒内无变化即可落盘
+    LaunchedEffect(resume, savedLoaded, currentId, chapterProgress) {
+        if (!resume || !savedLoaded || currentId <= 0L) return@LaunchedEffect
+        delay(700)
+        vm.saveReaderProgress(currentId, chapterProgress)
     }
 
     fun togglePanel(key: String) {

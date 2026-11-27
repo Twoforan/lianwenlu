@@ -45,6 +45,7 @@ import com.lianwenqi.app.data.entity.BookGroup
 import com.lianwenqi.app.data.entity.Chapter
 import com.lianwenqi.app.data.entity.OutlineItem
 import com.lianwenqi.app.data.entity.Prompt
+import com.lianwenqi.app.data.entity.PromptType
 import com.lianwenqi.app.data.entity.Provider
 import com.lianwenqi.app.data.entity.Volume
 import com.lianwenqi.app.data.entity.VolumeSummary
@@ -180,8 +181,8 @@ class AgentChatViewModel(private val container: AppContainer) : ViewModel() {
         _thinkingExpanded.value = !_thinkingExpanded.value
     }
 
-    /** 快捷提示词：与普通 AI 聊天共用同一份提示词库 */
-    val prompts: StateFlow<List<Prompt>> = configRepository.observePrompts()
+    /** 快捷提示词：与普通 AI 聊天共用同一份提示词库，只取快捷提示词 */
+    val prompts: StateFlow<List<Prompt>> = configRepository.observePrompts(PromptType.QUICK)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     /** Agent 已注册工具；执行时默认全部启用，因此 UI 一律显示为选中 */

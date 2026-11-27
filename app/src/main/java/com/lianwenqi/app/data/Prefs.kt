@@ -61,8 +61,10 @@ const val GEN_CONTENT_WORDS_MAX = 6000
 const val GEN_WORDS_HARD_MAX = 99_999
 
 /** 全局偏好设置：夜间模式、排序、排版、样式等 */
-class Prefs(private val context: Context) {
+/** 阅读器上次停下的位置；[fraction] 为章内比例 0..1 */
+data class ReaderProgress(val chapterId: Long, val fraction: Float)
 
+class Prefs(private val context: Context) {
     private object K {
         val nightMode = booleanPreferencesKey("night_mode")
         // 内置说明书的导入状态：上次导入时的 App 版本号 + 说明书书籍 id + 说明书内容签名
@@ -73,6 +75,9 @@ class Prefs(private val context: Context) {
         val sortAsc = booleanPreferencesKey("sort_asc")
         val listMode = booleanPreferencesKey("list_mode")
         val keepScreenOn = booleanPreferencesKey("keep_screen_on")
+
+        // 书架背景图：空表示使用默认背景；非空为应用私有目录中的图片绝对路径
+        val shelfBgImage = stringPreferencesKey("shelf_bg_image")
 
         val lineSpacing = floatPreferencesKey("fmt_line_spacing")
         val indent = intPreferencesKey("fmt_indent")
@@ -246,6 +251,11 @@ class Prefs(private val context: Context) {
     val sortAsc: Flow<Boolean> = context.dataStore.data.map { it[K.sortAsc] ?: false }
     val listMode: Flow<Boolean> = context.dataStore.data.map { it[K.listMode] ?: true }
     val keepScreenOn: Flow<Boolean> = context.dataStore.data.map { it[K.keepScreenOn] ?: false }
+
+    /** 书架背景图路径；null 表示使用默认背景 */
+    val shelfBackgroundImage: Flow<String?> = context.dataStore.data.map { prefs ->
+        prefs[K.shelfBgImage]?.takeIf { it.isNotBlank() }
+    }
     val activeModelId: Flow<Long> = context.dataStore.data.map { it[K.activeModelId] ?: 0L }
     val lastBookId: Flow<Long> = context.dataStore.data.map { it[K.lastBookId] ?: 0L }
     val lastChapterId: Flow<Long> = context.dataStore.data.map { it[K.lastChapterId] ?: 0L }
@@ -540,6 +550,11 @@ class Prefs(private val context: Context) {
     suspend fun setSortAsc(v: Boolean) = writePrefs { it[K.sortAsc] = v }
     suspend fun setListMode(v: Boolean) = writePrefs { it[K.listMode] = v }
     suspend fun setKeepScreenOn(v: Boolean) = writePrefs { it[K.keepScreenOn] = v }
+
+    /** 设置书架背景图路径；传 null 表示恢复默认背景 */
+    suspend fun setShelfBackgroundImage(path: String?) = writePrefs { prefs ->
+        if (path.isNullOrBlank()) prefs.remove(K.shelfBgImage) else prefs[K.shelfBgImage] = path
+    }
     suspend fun setActiveModelId(v: Long) = writePrefs { it[K.activeModelId] = v }
     suspend fun setReaderImmersive(v: Boolean) = writePrefs { it[K.readerImmersive] = v }
     suspend fun setAiOutlineFirstRound(v: Boolean) = writePrefs { it[K.aiOutlineFirstRound] = v }
@@ -636,6 +651,26 @@ class Prefs(private val context: Context) {
     suspend fun markDetailOpened(bookId: Long, chapterId: Long) = writePrefs {
         it[K.detailLastBookId] = bookId
         it[K.detailLastChapterId] = chapterId
+    }
+
+    /** 阅读器上次停下的章节与章内比例（按书保存，供全书预览恢复） */
+    fun readerProgress(bookId: Long): Flow<ReaderProgress?> {
+        val key = stringPreferencesKey("reader_progress_$bookId")
+        return context.dataStore.data.map { p ->
+            val raw = p[key] ?: return@map null
+            val parts = raw.split('|', limit = 2)
+            val chapterId = parts.getOrNull(0)?.toLongOrNull() ?: return@map null
+            if (chapterId <= 0L) return@map null
+            ReaderProgress(
+                chapterId = chapterId,
+                fraction = parts.getOrNull(1)?.toFloatOrNull()?.coerceIn(0f, 1f) ?: 0f
+            )
+        }
+    }
+
+    suspend fun setReaderProgress(bookId: Long, chapterId: Long, fraction: Float) = writePrefs {
+        it[stringPreferencesKey("reader_progress_$bookId")] =
+            "$chapterId|${fraction.coerceIn(0f, 1f)}"
     }
 
     suspend fun updateFormat(block: (com.lianwenqi.app.util.FormatSettings) -> com.lianwenqi.app.util.FormatSettings) {

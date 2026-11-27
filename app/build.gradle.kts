@@ -28,8 +28,8 @@ android {
         applicationId = "com.lianwenqi.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 100
-        versionName = "4.8.5"
+        versionCode = 101
+        versionName = "4.8.6"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

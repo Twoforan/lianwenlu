@@ -59,6 +59,7 @@ import com.lianwenqi.app.data.MemoryRepository
 import com.lianwenqi.app.data.ManualSeeder
 import com.lianwenqi.app.data.OutlineRepository
 import com.lianwenqi.app.data.Prefs
+import com.lianwenqi.app.data.ShelfBackgroundStore
 import com.lianwenqi.app.data.StyleRepository
 import com.lianwenqi.app.data.StyleTagRepository
 import com.lianwenqi.app.data.VolumeSummaryRepository
@@ -88,6 +89,8 @@ class AppContainer(val app: Application) {
     val processStartedAt: Long = System.currentTimeMillis()
     val aiClient: AiClient = AiClient()
     val prefs: Prefs = Prefs(app)
+    /** 书架背景图：私有目录持久化与替换删除 */
+    val shelfBackgroundStore: ShelfBackgroundStore = ShelfBackgroundStore(app)
     /** F7：唯一的应用级任务调度器；页面与恢复扫描都只能通过它安排执行 */
     val agentTaskScheduler: AgentTaskScheduler = WorkManagerAgentTaskScheduler(app)
 
