@@ -100,6 +100,7 @@ class AgentTaskPlanningRepositoryTest {
         val task = tasks.getTask(taskId)!!
         assertEquals("检查第三卷大纲并找出剧情冲突", task.userGoal)
         assertEquals(AgentTaskStatus.CREATED, task.status)
+        assertEquals(AgentWorkMode.AUTO, task.workMode)
         assertEquals(taskId, sessions.getSession(sessionId)!!.lastTaskId)
 
         val message = sessions.getMessages(sessionId).single()
@@ -331,8 +332,7 @@ class AgentTaskPlanningRepositoryTest {
         val sessionId = sessions.createSession()
         val parentId = tasks.createTaskWithUserMessage(
             sessionId = sessionId,
-            userGoal = "原目标",
-            workMode = AgentWorkMode.AUTO
+            userGoal = "原目标"
         ).first
         tasks.updateStatus(parentId, AgentTaskStatus.PLANNING)
         savePlan(parentId)
@@ -366,6 +366,38 @@ class AgentTaskPlanningRepositoryTest {
     }
 
     @Test
+    fun 旧计划任务派生的重发与重新生成分支固定为自动模式且不改写旧计划() = runBlocking {
+        val sessionId = sessions.createSession()
+        val parentId = newTask(sessionId = sessionId)
+        tasks.updateStatus(parentId, AgentTaskStatus.PLANNING)
+        savePlan(parentId)
+
+        val legacyParent = tasks.getTask(parentId)!!
+        db.agentTaskDao().updateTask(legacyParent.copy(workMode = AgentWorkMode.PLAN))
+
+        val (editedId, _) = tasks.createBranchTask(
+            parentTaskId = parentId,
+            userGoal = "修改后的目标",
+            branchSource = AgentBranchSource.USER_EDIT
+        )
+        val (regeneratedId, _) = tasks.createBranchTask(
+            parentTaskId = parentId,
+            userGoal = "原目标",
+            branchSource = AgentBranchSource.PLAN_REGENERATE
+        )
+
+        val unchangedParent = tasks.getTask(parentId)!!
+        assertEquals(AgentWorkMode.PLAN, unchangedParent.workMode)
+        assertEquals(planV1, unchangedParent.planJson)
+        listOf(editedId, regeneratedId).forEach { childId ->
+            val child = tasks.getTask(childId)!!
+            assertEquals(AgentWorkMode.AUTO, child.workMode)
+            assertEquals(AgentTaskStatus.CREATED, child.status)
+            assertEquals("{}", child.planJson)
+        }
+    }
+
+    @Test
     fun 修改计划创建等待确认分支且澄清问题可回答() = runBlocking {
         val sessionId = sessions.createSession()
         val parentId = tasks.createTaskWithUserMessage(sessionId, "原目标").first
@@ -383,6 +415,7 @@ class AgentTaskPlanningRepositoryTest {
 
         val child = tasks.getTask(childId)!!
         assertEquals(AgentTaskStatus.WAITING_CONFIRMATION, child.status)
+        assertEquals(AgentWorkMode.AUTO, child.workMode)
         assertEquals(planV2, child.planJson)
         assertTrue(
             events.eventsOfTask(childId).any { it.eventType == AgentEventType.TASK_PLAN_UPDATED }

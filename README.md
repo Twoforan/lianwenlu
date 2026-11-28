@@ -8,8 +8,8 @@
 - 兼容 OpenAI Chat Completions / Responses 两类接口，DeepSeek、Kimi、GPT、Claude 等均可接入
 - **长期记忆**：把本书已写正文向量化，写新章节时自动检索相关片段作为参考资料（支持厂商 Embedding API 或本地离线模型）
 - **内置《炼文炉 · 使用说明书》**：首次启动自动生成在书架上，覆盖全部功能，可阅读 / 导出，也可作为 AI 上下文书籍直接提问用法；随 App 版本自动更新
-- **自动化（Agent 模式）**：先出计划书再执行，工具调用全程可见；所有写入小说数据的操作都先生成预览，必须经确认后才会执行，支持后台执行与进程恢复
-- 当前版本：**v4.8.6**（versionCode 101，minSdk 26 / targetSdk 35），安装包见 [Releases](https://github.com/Twoforan/lianwenlu/releases/latest)
+- **自动化（Agent 模式）**：新任务、编辑重发与重新生成统一自动执行，按需调用工具并展示全过程；写入小说数据前仍按权限策略生成预览并确认，支持后台执行与进程恢复。旧计划和计划书库保留，打开历史计划不会自动执行
+- 当前版本：**v4.8.7**（versionCode 102，minSdk 26 / targetSdk 35），安装包见 [Releases](https://github.com/Twoforan/lianwenlu/releases/latest)
 
 ---
 

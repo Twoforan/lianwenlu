@@ -530,11 +530,10 @@ fun BookshelfScreen(
             }
         }
     }
-    }
 
     if (showCreate) {
         BookFormDialog(
-            dialogTitle = "新建书籍",
+            dialogTitle = "添加书籍",
             initial = null,
             groups = groups,
             styleLibrary = styleLibrary,
@@ -552,6 +551,9 @@ fun BookshelfScreen(
                     chapterPrefix = r.chapterPrefix,
                     groupId = r.groupId,
                     styleId = r.styleId,
+                    coverGlyph = r.coverGlyph,
+                    coverEnglish = r.coverEnglish,
+                    coverTitleMode = r.coverTitleMode,
                     onCreated = { id ->
                         showCreate = false
                         locateBookId = id
@@ -587,6 +589,9 @@ fun BookshelfScreen(
                     chapterPrefix = r.chapterPrefix,
                     groupId = r.groupId,
                     styleId = r.styleId,
+                    coverGlyph = r.coverGlyph,
+                    coverEnglish = r.coverEnglish,
+                    coverTitleMode = r.coverTitleMode,
                     onUpdated = {
                         editBookTarget = null
                         // 文风块在会话前缀里冻结：换绑 / 解绑只影响之后新建的对话
@@ -606,6 +611,7 @@ fun BookshelfScreen(
             },
             onDismiss = { editBookTarget = null }
         )
+    }
     }
 
     if (showCreateGroup) {

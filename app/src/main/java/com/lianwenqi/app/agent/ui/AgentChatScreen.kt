@@ -41,8 +41,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.ui.draw.clip
 import com.lianwenqi.app.agent.data.entity.AgentExecutionNode
 import com.lianwenqi.app.agent.data.entity.AgentClarification
 import com.lianwenqi.app.agent.data.entity.AgentNodeStatus
@@ -107,24 +105,24 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
-import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.PathParser
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.res.painterResource
+import com.lianwenqi.app.R
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
+import com.lianwenqi.app.agent.data.agentJson
+import com.lianwenqi.app.agent.planning.AgentPromptLog
 import com.lianwenqi.app.agent.data.entity.AgentMessage
 import com.lianwenqi.app.agent.data.entity.AgentMessageKind
 import com.lianwenqi.app.agent.data.entity.AgentMessageRole
@@ -142,10 +140,13 @@ import com.lianwenqi.app.data.entity.BookGroup
 import com.lianwenqi.app.data.entity.Provider
 import com.lianwenqi.app.data.entity.outlineCategoryLabel
 import com.lianwenqi.app.ui.appViewModel
+import com.lianwenqi.app.ui.components.ChatToolbar
+import com.lianwenqi.app.ui.components.ChatToolbarAction
+import com.lianwenqi.app.ui.components.ModelSetupReminder
 import com.lianwenqi.app.ui.screens.AttachmentPreviewDialog
 import com.lianwenqi.app.ui.screens.BookPickerDialog
 import com.lianwenqi.app.ui.screens.ChatComposer
-import com.lianwenqi.app.ui.screens.ContextPicker
+import com.lianwenqi.app.ui.screens.ChapterPickerDialog
 import com.lianwenqi.app.ui.screens.OutlinePicker
 import com.lianwenqi.app.ui.screens.TEXT_FILE_MIME_TYPES
 import com.lianwenqi.app.ui.screens.attachmentIcon
@@ -155,12 +156,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
-/**
- * AI 全权接管模式。
- *
- * F3：接收任务、调用独立 Agent 模型、生成并展示计划，等待用户审核。
- * 不执行计划、不调用工具、不修改小说数据。
- */
+/** 自动化对话：直接执行任务，保留历史计划书及受控写入记录。 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AgentChatScreen(
@@ -191,7 +187,6 @@ fun AgentChatScreen(
     val writeOperations by vm.writeOperations.collectAsState()
     val writePolicy by vm.writePolicy.collectAsState()
     val writeNotice by vm.writeNotice.collectAsState()
-    val workMode by vm.workMode.collectAsState()
     val pendingClarification by vm.pendingClarification.collectAsState()
     val input by vm.input.collectAsState()
     val collapsedMessageIds by vm.collapsedMessageIds.collectAsState()
@@ -225,8 +220,6 @@ fun AgentChatScreen(
     val contextModes by vm.contextModes.collectAsState()
     val historySelection by vm.historySelection.collectAsState()
     val savedHistoryIds by vm.savedHistoryIds.collectAsState()
-    val planLibrary by vm.planLibrary.collectAsState()
-    val planLibraryNotice by vm.planLibraryNotice.collectAsState()
     val selectedChapterCount =
         (selectedChapterSummaryIds + selectedChapterContentIds).size
     val scope = rememberCoroutineScope()
@@ -239,10 +232,8 @@ fun AgentChatScreen(
     var showChapterPicker by remember { mutableStateOf(false) }
     var showOutlinePicker by remember { mutableStateOf(false) }
     var showBookAgentHistory by remember { mutableStateOf(false) }
-    var showPlanLibrary by remember { mutableStateOf(false) }
     var showReferences by remember { mutableStateOf(false) }
     var showWritePolicy by remember { mutableStateOf(false) }
-    var showWorkMode by remember { mutableStateOf(false) }
     var showBatchConfirm by remember { mutableStateOf(false) }
     var previewWriteOperationId by remember { mutableStateOf<Long?>(null) }
     var renaming by remember { mutableStateOf<AgentSession?>(null) }
@@ -286,151 +277,61 @@ fun AgentChatScreen(
     }
 
     val session = currentSession
-    // 任务标题折叠后变成可拖动的悬浮圆球（位置按像素记录，随会话重置）
-    var headerExpanded by remember(session?.id) { mutableStateOf(true) }
-    var bubbleOffset by remember(session?.id) { mutableStateOf<Offset?>(null) }
-    var rootSize by remember { mutableStateOf(IntSize.Zero) }
     val selectedBookId = session?.bookId ?: filterBookId
     val selectedBookTitle = books.firstOrNull { it.id == selectedBookId }?.title
     val modelSelected = modelId > 0 && models.any { it.id == modelId }
     val executingCurrent = executingTaskId != null && executingTaskId == currentTask?.id
 
-    Box(Modifier.fillMaxSize().onSizeChanged { rootSize = it }) {
     Scaffold(
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
+        containerColor = AgentPageBackground,
         topBar = {
-            // 紧凑顶栏：44dp 高，保留全部入口，比默认 TopAppBar 更省纵向空间
-            Surface(color = Color(0xFFEDE7F6), contentColor = Color(0xFF1D1B20)) {
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .statusBarsPadding()
-                        .height(44.dp)
-                        .padding(start = 16.dp, end = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        "自动化",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.weight(1f)
-                    )
-                    // 模型统一在右上角「设置」里配置，标题栏不再放模型选择
-                    IconButton(onClick = { vm.newSession() }, modifier = Modifier.size(36.dp)) {
-                        Icon(
-                            Icons.Filled.Add,
-                            contentDescription = "新建 Agent 会话",
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-                    CompactTextAction("设置") { showAgentSettings = true }
-                    CompactTextAction("历史") { showHistory = true }
-                    // 机器人图标与开关固定在最右侧
-                    Icon(
-                        Icons.Filled.SmartToy,
-                        contentDescription = "自动化",
-                        modifier = Modifier.size(18.dp),
-                        tint = Color(0xFF5B4B8A)
-                    )
-                    Spacer(Modifier.width(4.dp))
-                    Switch(
-                        checked = true,
-                        onCheckedChange = { on ->
-                            if (!on) onModeChange(AgentChatMode.NORMAL)
-                        },
-                        modifier = Modifier.scale(0.7f)
-                    )
+            AgentPageHeader(
+                bookTitle = selectedBookTitle,
+                chapterCount = selectedChapterCount,
+                outlineCount = selectedOutlineIds.size,
+                hasBook = selectedBookId != null,
+                onSettings = { showAgentSettings = true },
+                onNewSession = { vm.newSession() },
+                onHistory = { showHistory = true },
+                onExitAgent = { onModeChange(AgentChatMode.NORMAL) },
+                onBook = { showBookPicker = true },
+                onChapters = { showChapterPicker = true },
+                onOutline = { showOutlinePicker = true },
+                onTaskHistory = {
+                    val bookSessionIds = sessions
+                        .filter { it.bookId == selectedBookId }
+                        .map { it.id }.toSet()
+                    vm.beginHistorySelection(bookSessionIds)
+                    showBookAgentHistory = true
                 }
-            }
+            )
         }
     ) { padding ->
         Column(
             Modifier
                 .fillMaxSize()
                 .padding(padding)
+                .background(Color.White)
                 .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime))
         ) {
-            // 绑定书籍：与普通 AI 聊天的书籍选择同位置（顶部标签行）
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
+
+            Box(
+                Modifier.weight(1f).fillMaxWidth().background(AgentPageBackground)
             ) {
-                AssistChip(
-                    onClick = { showBookPicker = true },
-                    label = {
-                        Text(
-                            selectedBookTitle ?: "绑定书籍",
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.widthIn(max = 140.dp)
-                        )
-                    }
-                )
-                AssistChip(
-                    onClick = { showChapterPicker = true },
-                    enabled = selectedBookId != null && chapters.isNotEmpty(),
-                    label = { Text("章节($selectedChapterCount)") }
-                )
-                AssistChip(
-                    onClick = { showOutlinePicker = true },
-                    enabled = selectedBookId != null && outline.isNotEmpty(),
-                    label = { Text("大纲(${selectedOutlineIds.size})") }
-                )
-                AssistChip(
-                    onClick = {
-                        val bookId = selectedBookId
-                        if (bookId != null) {
-                            vm.clearPlanLibraryNotice()
-                            vm.loadPlanLibrary(bookId)
-                            showPlanLibrary = true
-                        }
-                    },
-                    enabled = selectedBookId != null,
-                    label = { Text("计划书库") }
-                )
-                AssistChip(
-                    onClick = {
-                        val bookSessionIds = sessions
-                            .filter { it.bookId == selectedBookId }
-                            .map { it.id }
-                            .toSet()
-                        vm.beginHistorySelection(bookSessionIds)
-                        showBookAgentHistory = true
-                    },
-                    enabled = selectedBookId != null,
-                    label = { Text("历史 Agent") }
-                )
-            }
-            HorizontalDivider()
-
-            if (session == null) {
-                AgentEmptyState(
-                    hasHistory = sessions.isNotEmpty(),
-                    onNew = { vm.newSession() },
-                    onHistory = { showHistory = true },
-                    modifier = Modifier.weight(1f)
-                )
-            } else {
-                if (headerExpanded) {
-                    AgentSessionHeader(
-                        session = session,
-                        // 节点级执行状态不再作为对话消息展示，计数同步剔除
-                        messageCount = messages.count { message ->
-                            !(message.kind == AgentMessageKind.NOTICE &&
-                                isExecutionLifecycleNotice(message.content)) &&
-                                !(message.kind == AgentMessageKind.USER_INPUT &&
-                                    message.content.startsWith(CLARIFICATION_MESSAGE_PREFIX))
+                if (!modelSelected && messages.isEmpty()) {
+                    ModelSetupReminder(
+                        message = if (models.isEmpty()) {
+                            "还没有配置模型，没有办法开始喵"
+                        } else {
+                            "还没有选择任务模型，暂时没有办法开始喵"
                         },
-                        onRename = { renaming = session },
-                        onOpenReferences = { showReferences = true },
-                        onCollapse = { headerExpanded = false }
+                        modifier = Modifier.align(Alignment.Center)
+                            .padding(horizontal = 24.dp).widthIn(max = 320.dp)
+                            .fillMaxWidth()
                     )
-                    HorizontalDivider()
                 }
-
+                if (session != null) {
                 val task = currentTask
                 // 同一提问的多个版本：在消息操作栏用 < n/m > 切换，不再单独弹窗展示分支
                 val versionTasks = remember(tasks, task) {
@@ -447,8 +348,7 @@ fun AgentChatScreen(
 
                 Box(
                     Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
+                        .fillMaxSize()
                         .clickable(
                             interactionSource = remember { MutableInteractionSource() },
                             indication = null
@@ -659,7 +559,20 @@ fun AgentChatScreen(
                             onNextVersion = {
                                 versionTasks.getOrNull(versionIndex + 1)?.let { vm.openTask(it.id) }
                             },
-                            onViewLog = { logMessage = message }
+                            onViewLog = { logMessage = message },
+                            modelName = if (message.role == AgentMessageRole.ASSISTANT &&
+                                message.kind != AgentMessageKind.NOTICE
+                            ) {
+                                remember(message.promptLog, message.taskId, tasks, models) {
+                                    agentMessageModelName(
+                                        message,
+                                        tasks.firstOrNull { it.id == message.taskId },
+                                        models
+                                    )
+                                }
+                            } else {
+                                ""
+                            }
                         )
                         historyBlocks.first[index]?.let { item ->
                             key(item.task.id) { AgentHistoryTaskBlock(item) }
@@ -792,29 +705,16 @@ fun AgentChatScreen(
                         )
                     }
 
-                    if (visibleMessages.isEmpty() &&
-                        currentTask == null &&
-                        currentPlan == null &&
-                        !planning &&
-                        planError == null
-                    ) {
-                        Box(
-                            Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 48.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                if (workMode == AgentWorkMode.AUTO) {
-                                    "随便说点什么吧"
-                                } else {
-                                    "输入任务目标，Agent 将分析并生成执行计划。\n" +
-                                        "当前阶段不会执行计划或修改小说数据。"
-                                },
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
+                    if (!modelSelected && messages.isNotEmpty()) {
+                        ModelSetupReminder(
+                            message = if (models.isEmpty()) {
+                                "还没有配置模型，没有办法开始喵"
+                            } else {
+                                "还没有选择任务模型，暂时没有办法开始喵"
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                                .padding(horizontal = 24.dp, vertical = 24.dp)
+                        )
                     }
                     Spacer(Modifier.height(12.dp))
                 }
@@ -870,31 +770,25 @@ fun AgentChatScreen(
                         }
                     }
                 }
+                AgentTaskPanel(
+                    sessionId = session.id,
+                    title = session.title,
+                    onRename = { renaming = session },
+                    onOpenReferences = { showReferences = true }
+                )
+                }
                 }
             }
 
-            if (!modelSelected) {
-                Text(
-                    "请先在右上角「设置」中选择任务模型，再发送任务。",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.padding(horizontal = 16.dp)
-                )
-            }
-
-            // 输入栏工具条：左侧快捷功能可滚动，写入权限图标固定在最右侧
-            Row(
-                Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
+            // 两种聊天共用功能栏；Agent 额外提供固定在右侧的写入权限入口。
+            ChatToolbar(
+                trailingContent = {
+                    WritePermissionBadge(
+                        policy = writePolicy,
+                        onClick = { showWritePolicyMenu = true }
+                    )
+                }
             ) {
-                Row(
-                    Modifier
-                        .weight(1f)
-                        .horizontalScroll(rememberScrollState())
-                        .padding(start = 8.dp, top = 2.dp, bottom = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(2.dp)
-                ) {
                     // 弹窗被关闭后，保留重新打开的入口
                     pendingClarification
                         ?.takeIf { dismissedClarificationId == it.id }
@@ -910,71 +804,26 @@ fun AgentChatScreen(
                             label = { Text("${unresolvedWrites.size} 项待确认") }
                         )
                     }
-                    IconButton(
-                    onClick = {
+                    ChatToolbarAction(R.drawable.ic_chat_shortcut, "常用提示词", selected = showPrompts) {
                         focusManager.clearFocus()
                         keyboard?.hide()
                         showPrompts = !showPrompts
                     }
-                ) {
-                    Icon(
-                        Icons.Filled.Bolt,
-                        contentDescription = "常用提示词",
-                        tint = if (showPrompts) MaterialTheme.colorScheme.primary
-                        else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                // Agent 默认启用全部已注册工具，因此不加数字角标，图标保持选中色
-                IconButton(onClick = { showTools = true }) {
-                    Icon(
-                        Icons.Filled.Build,
-                        contentDescription = "Agent 工具（已全部启用）",
-                        tint = MaterialTheme.colorScheme.primary
-                    )
-                }
-                IconButton(
-                    onClick = {
+                    ChatToolbarAction(R.drawable.ic_chat_tools, "Agent 工具（已全部启用）") {
+                        showTools = true
+                    }
+                    ChatToolbarAction(R.drawable.ic_chat_image, "添加图片") {
                         imagePicker.launch(
                             PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                         )
                     }
-                ) {
-                    Icon(
-                        Icons.Filled.Image,
-                        contentDescription = "添加图片",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                IconButton(onClick = { filePicker.launch(TEXT_FILE_MIME_TYPES) }) {
-                    Icon(
-                        Icons.Filled.AttachFile,
-                        contentDescription = "添加文件",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                    IconButton(
-                        onClick = {
-                            linkInput = ""
-                            showLinkDialog = true
-                        }
-                    ) {
-                        Icon(
-                            Icons.Filled.Link,
-                            contentDescription = "添加链接",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                    ChatToolbarAction(R.drawable.ic_chat_file, "添加文件") {
+                        filePicker.launch(TEXT_FILE_MIME_TYPES)
                     }
-                }
-
-                // 工作模式 + 写入权限：固定在输入栏最右侧
-                WorkModeChip(
-                    mode = workMode,
-                    onClick = { showWorkMode = true }
-                )
-                WritePermissionBadge(
-                    policy = writePolicy,
-                    onClick = { showWritePolicyMenu = true }
-                )
+                    ChatToolbarAction(R.drawable.ic_chat_link, "添加链接") {
+                        linkInput = ""
+                        showLinkDialog = true
+                    }
             }
 
             // 快捷提示词面板
@@ -1112,8 +961,8 @@ fun AgentChatScreen(
             ChatComposer(
                 value = input,
                 onValueChange = vm::setInput,
-                placeholder = "向 Agent 下达任务目标…",
-                sendEnabled = !planning && !sendingTask && modelSelected &&
+                placeholder = "说点什么吧……",
+                sendEnabled = !planning && !sendingTask && !executingCurrent && modelSelected &&
                     (input.isNotBlank() || pendingAttachments.isNotEmpty()),
                 onSend = {
                     focusManager.clearFocus()
@@ -1154,56 +1003,6 @@ fun AgentChatScreen(
             onDismiss = { dismissedClarificationId = clarification.id },
             onSubmit = { vm.answerClarification(it) }
         )
-    }
-
-    // 任务标题收起后的悬浮圆球：点击展开，按住可拖到任意位置
-    if (session != null && !headerExpanded) {
-        val bubblePx = with(LocalDensity.current) { 44.dp.toPx() }
-        val marginPx = with(LocalDensity.current) { 12.dp.toPx() }
-        val defaultTopPx = with(LocalDensity.current) { 124.dp.toPx() }
-        LaunchedEffect(rootSize) {
-            if (bubbleOffset == null && rootSize.width > 0) {
-                bubbleOffset = Offset(
-                    (rootSize.width - bubblePx - marginPx).coerceAtLeast(0f),
-                    defaultTopPx.coerceAtMost((rootSize.height - bubblePx).coerceAtLeast(0f))
-                )
-            }
-        }
-        val pos = bubbleOffset ?: Offset.Zero
-        Box(
-            Modifier
-                .offset { IntOffset(pos.x.roundToInt(), pos.y.roundToInt()) }
-                .size(44.dp)
-                .shadow(6.dp, CircleShape)
-                .clip(CircleShape)
-                .background(Color(0xFF5B4B8A))
-                .pointerInput(rootSize) {
-                    detectDragGestures { change, drag ->
-                        change.consume()
-                        val current = bubbleOffset ?: Offset.Zero
-                        bubbleOffset = Offset(
-                            (current.x + drag.x).coerceIn(
-                                0f,
-                                (rootSize.width - bubblePx).coerceAtLeast(0f)
-                            ),
-                            (current.y + drag.y).coerceIn(
-                                0f,
-                                (rootSize.height - bubblePx).coerceAtLeast(0f)
-                            )
-                        )
-                    }
-                }
-                .clickable { headerExpanded = true },
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                Icons.Filled.KeyboardArrowDown,
-                contentDescription = "展开任务标题",
-                tint = Color.White,
-                modifier = Modifier.size(24.dp)
-            )
-        }
-    }
     }
 
     if (showLinkDialog) {
@@ -1265,17 +1064,6 @@ fun AgentChatScreen(
                 showWritePolicyMenu = false
             },
             onDismiss = { showWritePolicyMenu = false }
-        )
-    }
-
-    if (showWorkMode) {
-        AgentWorkModeDialog(
-            current = workMode,
-            onSelect = {
-                vm.setWorkMode(it)
-                showWorkMode = false
-            },
-            onDismiss = { showWorkMode = false }
         )
     }
 
@@ -1368,21 +1156,6 @@ fun AgentChatScreen(
             onToggle = vm::toggleOutline,
             onToggleCategory = vm::toggleOutlineCategory,
             onDismiss = { showOutlinePicker = false }
-        )
-    }
-
-    if (showPlanLibrary) {
-        AgentPlanLibraryDialog(
-            plans = planLibrary,
-            notice = planLibraryNotice,
-            onDismiss = {
-                showPlanLibrary = false
-                vm.clearPlanLibraryNotice()
-            },
-            onClearNotice = vm::clearPlanLibraryNotice,
-            onAddReference = { task -> vm.addPlanToReferences(task) },
-            onAddReferences = { tasks -> vm.addPlansToReferences(tasks) },
-            onSave = { task, plan -> vm.saveLibraryPlan(task, plan) }
         )
     }
 
@@ -1529,7 +1302,7 @@ fun AgentChatScreen(
     }
 
     if (showWritePolicy) {
-        AgentWritePolicyDialog(
+        WritePermissionDialog(
             current = writePolicy,
             onSelect = {
                 vm.setWritePolicy(it)
@@ -1597,12 +1370,12 @@ fun AgentChatScreen(
         var title by remember(target.id) { mutableStateOf(target.title) }
         AlertDialog(
             onDismissRequest = { renaming = null },
-            title = { Text("修改 Agent 会话标题") },
+            title = { Text("修改任务标题") },
             text = {
                 OutlinedTextField(
                     value = title,
                     onValueChange = { title = it },
-                    label = { Text("会话标题") },
+                    label = { Text("任务标题") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -1623,102 +1396,24 @@ fun AgentChatScreen(
     }
 }
 
-@Composable
-private fun AgentEmptyState(
-    hasHistory: Boolean,
-    onNew: () -> Unit,
-    onHistory: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Box(modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-        Column(
-            Modifier.padding(horizontal = 24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Text("自动化", style = MaterialTheme.typography.titleLarge)
-            Spacer(Modifier.height(10.dp))
-            Text(
-                "你可以在这里向 Agent 下达任务。\n" +
-                    "Agent 会分析目标、生成计划；确认后可执行查询、生成草稿与受控写入。",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(Modifier.height(20.dp))
-            Button(onClick = onNew) { Text("新建 Agent 任务") }
-            if (hasHistory) {
-                Spacer(Modifier.height(8.dp))
-                OutlinedButton(onClick = onHistory) { Text("查看历史会话") }
-            }
-        }
-    }
+/** 历史回复优先使用发送时的模型快照，不跟随当前设置冒充历史模型。 */
+private fun agentMessageModelName(
+    message: AgentMessage,
+    task: AgentTask?,
+    models: List<AiModel>
+): String {
+    val loggedName = runCatching {
+        agentJson.decodeFromString(AgentPromptLog.serializer(), message.promptLog).modelName
+    }.getOrNull()?.takeIf { it.isNotBlank() }
+    if (loggedName != null) return loggedName
+    return models.firstOrNull { it.id == task?.modelId }
+        ?.let { it.alias.ifBlank { it.name } }
+        ?.takeIf { it.isNotBlank() }
+        ?: "未知"
 }
 
 @Composable
-private fun AgentSessionHeader(
-    session: AgentSession,
-    messageCount: Int,
-    onRename: () -> Unit,
-    onCollapse: () -> Unit,
-    onOpenReferences: () -> Unit = {}
-) {
-    // 展开态：任务标题 + 已选资料 / 消息数 / 重命名；收起后由悬浮圆球接管
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 4.dp)
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                session.title,
-                style = MaterialTheme.typography.titleMedium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f)
-            )
-            // 已选资料的查看入口放在任务标题右侧
-            TextButton(
-                onClick = onOpenReferences,
-                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
-            ) {
-                Text("已选资料", style = MaterialTheme.typography.labelSmall)
-            }
-            Text(
-                "$messageCount 条消息",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            IconButton(onClick = onRename, modifier = Modifier.size(36.dp)) {
-                Icon(
-                    Icons.Filled.Edit,
-                    contentDescription = "修改会话标题",
-                    modifier = Modifier.size(18.dp)
-                )
-            }
-            IconButton(onClick = onCollapse, modifier = Modifier.size(36.dp)) {
-                Icon(
-                    Icons.Filled.KeyboardArrowUp,
-                    contentDescription = "收起任务标题",
-                    modifier = Modifier.size(20.dp)
-                )
-            }
-        }
-    }
-}
-
-/** 顶栏里的紧凑文字按钮：比默认 TextButton 更矮，适配 44dp 顶栏 */
-@Composable
-private fun CompactTextAction(text: String, onClick: () -> Unit) {
-    TextButton(
-        onClick = onClick,
-        modifier = Modifier.height(32.dp),
-        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
-    ) {
-        Text(text, style = MaterialTheme.typography.labelLarge)
-    }
-}
-
-@Composable
-private fun AgentMessageRow(
+internal fun AgentMessageRow(
     message: AgentMessage,
     editable: Boolean,
     editing: Boolean,
@@ -1750,7 +1445,8 @@ private fun AgentMessageRow(
     onPrevVersion: () -> Unit = {},
     onNextVersion: () -> Unit = {},
     onDeleteMessage: () -> Unit = {},
-    onViewLog: () -> Unit = {}
+    onViewLog: () -> Unit = {},
+    modelName: String = ""
 ) {
     val isUser = message.role == AgentMessageRole.USER
     val label = when {
@@ -1759,149 +1455,147 @@ private fun AgentMessageRow(
         isUser -> "你"
         else -> "Agent"
     }
-    // 自动模式：与普通聊天一致的整宽消息卡片，用户与 Agent 都不按轮次折叠
+    // 用户提问与 Agent 回复使用参考稿的整宽卡片，原有操作回调保持不变。
     if (chatStyle) {
-        Surface(
-            Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 6.dp),
-            shape = RoundedCornerShape(14.dp),
-            color = MaterialTheme.colorScheme.surface,
-            border = BorderStroke(
-                0.5.dp,
-                MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.8f)
-            )
-        ) {
-            Column(Modifier.padding(12.dp)) {
-                if (!isUser && showThinkingHeader) {
-                    AutoThinkingHeader(
-                        status = thinkingStatus,
-                        nodes = thinkingNodes,
-                        tools = thinkingTools,
-                        expanded = thinkingExpanded,
-                        onToggleExpanded = onToggleThinkingExpanded
-                    )
-                    Spacer(Modifier.height(8.dp))
-                }
+        AgentMessageCard(
+            ai = !isUser,
+            tools = {
                 if (!isUser && editing) {
-                    OutlinedTextField(
-                        value = draft,
-                        onValueChange = onDraftChange,
-                        modifier = Modifier.fillMaxWidth(),
-                        minLines = 3,
-                        maxLines = 12,
-                        textStyle = MaterialTheme.typography.bodyMedium
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        TextButton(
-                            onClick = onSubmitEdit,
-                            enabled = draft.isNotBlank()
-                        ) { Text("保存") }
-                        TextButton(onClick = onCancelEdit) { Text("取消") }
-                    }
+                    TextButton(
+                        onClick = onSubmitEdit,
+                        enabled = draft.isNotBlank()
+                    ) { Text("保存") }
+                    TextButton(onClick = onCancelEdit) { Text("取消") }
                 } else {
-                    Text(
-                        message.content,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = if (collapsed) 1 else Int.MAX_VALUE,
-                        overflow = TextOverflow.Ellipsis
+                    if (isUser) {
+                        MessageIcon(
+                            icon = Icons.Filled.Refresh,
+                            description = "重新生成",
+                            enabled = editable,
+                            onClick = onRegenerate
+                        )
+                        MessageIcon(
+                            icon = Icons.Filled.Edit,
+                            description = "编辑",
+                            enabled = editable,
+                            onClick = onStartEdit
+                        )
+                    } else if (showAssistantActions) {
+                        MessageIcon(
+                            icon = Icons.Filled.Refresh,
+                            description = "重新生成",
+                            enabled = canRegenerateAssistant,
+                            onClick = onRegenerateAssistant
+                        )
+                        MessageIcon(
+                            icon = Icons.Filled.Edit,
+                            description = "编辑回复",
+                            enabled = canRegenerateAssistant,
+                            onClick = onStartEdit
+                        )
+                    }
+                    MessageIcon(
+                        icon = Icons.Filled.ContentCopy,
+                        description = "复制",
+                        onClick = onCopy
                     )
-                    // 助手回复的 token 消耗与缓存命中率，与普通聊天保持一致的口径
-                    if (!isUser && !collapsed) {
-                        AgentUsageLine(
-                            message = message,
-                            modifier = Modifier.padding(top = 4.dp)
+                    if (!isUser && message.promptLog.isNotBlank()) {
+                        MessageIcon(
+                            icon = Icons.AutoMirrored.Filled.ReceiptLong,
+                            description = "查看提交日志",
+                            onClick = onViewLog
                         )
                     }
-                    // 与普通聊天一致的操作图标：重新生成 / 编辑 / 复制 / 删除 / 收起
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        if (isUser) {
-                            MessageIcon(
-                                icon = Icons.Filled.Refresh,
-                                description = "重新生成",
-                                enabled = editable,
-                                onClick = onRegenerate
-                            )
-                            MessageIcon(
-                                icon = Icons.Filled.Edit,
-                                description = "编辑",
-                                enabled = editable,
-                                onClick = onStartEdit
-                            )
-                        } else if (showAssistantActions) {
-                            MessageIcon(
-                                icon = Icons.Filled.Refresh,
-                                description = "重新生成",
-                                enabled = canRegenerateAssistant,
-                                onClick = onRegenerateAssistant
-                            )
-                            MessageIcon(
-                                icon = Icons.Filled.Edit,
-                                description = "编辑回复",
-                                enabled = canRegenerateAssistant,
-                                onClick = onStartEdit
+                    MessageIcon(
+                        icon = if (deletePending) Icons.Filled.Check else Icons.Filled.Delete,
+                        description = if (deletePending) "确认删除" else "删除",
+                        tint = if (deletePending) MaterialTheme.colorScheme.error else null,
+                        onClick = onDeleteMessage
+                    )
+                    Spacer(Modifier.weight(1f))
+                    if (showVersionSwitcher) {
+                        IconButton(
+                            onClick = onPrevVersion,
+                            enabled = versionIndex > 1,
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(
+                                Icons.AutoMirrored.Filled.KeyboardArrowLeft,
+                                contentDescription = "上一版本",
+                                modifier = Modifier.size(18.dp)
                             )
                         }
-                        MessageIcon(
-                            icon = Icons.Filled.ContentCopy,
-                            description = "复制",
-                            onClick = onCopy
+                        Text(
+                            "$versionIndex/$versionCount",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                        // 查看本次提交给 Agent 的完整输入（系统提示、上下文、工具往返）
-                        if (!isUser && message.promptLog.isNotBlank()) {
-                            MessageIcon(
-                                icon = Icons.AutoMirrored.Filled.ReceiptLong,
-                                description = "查看提交日志",
-                                onClick = onViewLog
+                        IconButton(
+                            onClick = onNextVersion,
+                            enabled = versionIndex < versionCount,
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(
+                                Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                contentDescription = "下一版本",
+                                modifier = Modifier.size(18.dp)
                             )
                         }
-                        MessageIcon(
-                            icon = if (deletePending) Icons.Filled.Check else Icons.Filled.Delete,
-                            description = if (deletePending) "确认删除" else "删除",
-                            tint = if (deletePending) MaterialTheme.colorScheme.error else null,
-                            onClick = onDeleteMessage
-                        )
-                        Spacer(Modifier.weight(1f))
-                        if (showVersionSwitcher) {
-                            IconButton(
-                                onClick = onPrevVersion,
-                                enabled = versionIndex > 1,
-                                modifier = Modifier.size(28.dp)
-                            ) {
-                                Icon(
-                                    Icons.AutoMirrored.Filled.KeyboardArrowLeft,
-                                    contentDescription = "上一版本",
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            }
-                            Text(
-                                "$versionIndex/$versionCount",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            IconButton(
-                                onClick = onNextVersion,
-                                enabled = versionIndex < versionCount,
-                                modifier = Modifier.size(28.dp)
-                            ) {
-                                Icon(
-                                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                                    contentDescription = "下一版本",
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            }
-                        }
-                        MessageIcon(
-                            icon = if (collapsed) {
-                                Icons.Filled.KeyboardArrowDown
-                            } else {
-                                Icons.Filled.KeyboardArrowUp
-                            },
-                            description = if (collapsed) "展开" else "收起",
-                            onClick = onToggleCollapsed
+                    }
+                    MessageIcon(
+                        icon = if (collapsed) {
+                            Icons.Filled.KeyboardArrowDown
+                        } else {
+                            Icons.Filled.KeyboardArrowUp
+                        },
+                        description = if (collapsed) "展开" else "收起",
+                        onClick = onToggleCollapsed
+                    )
+                }
+            }
+        ) {
+            if (!isUser && showThinkingHeader && !collapsed) {
+                AutoThinkingHeader(
+                    status = thinkingStatus,
+                    nodes = thinkingNodes,
+                    tools = thinkingTools,
+                    expanded = thinkingExpanded,
+                    onToggleExpanded = onToggleThinkingExpanded
+                )
+                Spacer(Modifier.height(8.dp))
+            }
+            if (!isUser && editing) {
+                OutlinedTextField(
+                    value = draft,
+                    onValueChange = onDraftChange,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp),
+                    minLines = 3,
+                    maxLines = 12,
+                    textStyle = MaterialTheme.typography.bodyMedium
+                )
+            } else {
+                Text(
+                    if (collapsed) message.content.replace('\n', ' ').trim() else message.content,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = if (collapsed) 1 else Int.MAX_VALUE,
+                    overflow = TextOverflow.Ellipsis
+                )
+                // 模型与 token / 缓存统计留在正文下方、操作栏分隔线上方。
+                if (!isUser && !collapsed) {
+                    if (modelName.isNotBlank()) {
+                        Text(
+                            "model: $modelName",
+                            modifier = Modifier.padding(top = 6.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
+                    AgentUsageLine(
+                        message = message,
+                        modifier = Modifier.padding(top = 4.dp)
+                    )
                 }
             }
         }
@@ -2305,53 +1999,41 @@ private fun AutoLiveAssistantCard(
     onRetry: () -> Unit = {},
     onEnd: () -> Unit = {}
 ) {
-    Surface(
-        Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 6.dp),
-        shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.surface,
-        border = BorderStroke(
-            0.5.dp,
-            MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.8f)
+    AgentMessageCard(ai = true) {
+        AutoThinkingHeader(
+            status = if (endedByUser) "任务完成" else status,
+            nodes = nodes,
+            tools = tools,
+            clarifications = clarifications,
+            expanded = thinkingExpanded,
+            onToggleExpanded = onToggleThinkingExpanded
         )
-    ) {
-        Column(Modifier.padding(12.dp)) {
-            AutoThinkingHeader(
-                status = if (endedByUser) "任务完成" else status,
-                nodes = nodes,
-                tools = tools,
-                clarifications = clarifications,
-                expanded = thinkingExpanded,
-                onToggleExpanded = onToggleThinkingExpanded
+        Spacer(Modifier.height(8.dp))
+        if (endedByUser) {
+            // 用户主动结束：按任务完成展示，不再提示失败
+            Text(
+                AgentTask.USER_ENDED_REASON,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            Spacer(Modifier.height(8.dp))
-            if (endedByUser) {
-                // 用户主动结束：按任务完成展示，不再提示失败
-                Text(
-                    AgentTask.USER_ENDED_REASON,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            } else if (error.isNotBlank()) {
-                Text(
-                    error,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.error
-                )
-                if (canRecover) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        TextButton(onClick = onRetry) { Text("重试") }
-                        TextButton(onClick = onEnd) { Text("结束") }
-                    }
+        } else if (error.isNotBlank()) {
+            Text(
+                error,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.error
+            )
+            if (canRecover) {
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TextButton(onClick = onRetry) { Text("重试") }
+                    TextButton(onClick = onEnd) { Text("结束") }
                 }
-            } else {
-                Text(
-                    "正在为你处理…",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
             }
+        } else {
+            Text(
+                "正在为你处理…",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }
@@ -2616,7 +2298,7 @@ private fun AgentToolsDialog(tools: List<AgentToolInfo>, onDismiss: () -> Unit) 
     )
 }
 
-/** Agent 章节上下文选择弹窗：复用侧边栏的上下文勾选 UI */
+/** Agent 章节上下文选择弹窗：与普通 AI 聊天共用统一的选择章节 UI。 */
 @Composable
 private fun AgentChapterContextDialog(
     chapters: List<com.lianwenqi.app.data.entity.Chapter>,
@@ -2636,55 +2318,29 @@ private fun AgentChapterContextDialog(
     onToggleVolumeSummaryAsset: (Long) -> Unit,
     onDismiss: () -> Unit
 ) {
-    val allChapterIds = chapters.map { it.id }.toSet()
-    Dialog(onDismissRequest = onDismiss) {
-        Surface(
-            Modifier.fillMaxWidth(0.94f),
-            shape = RoundedCornerShape(18.dp),
-            color = MaterialTheme.colorScheme.surface
-        ) {
-            Column {
-                ContextPicker(
-                    chapters = chapters,
-                    volumes = volumes,
-                    title = "选择章节",
-                    selected = summarySelected + contentSelected,
-                    summarySelected = summarySelected,
-                    contentSelected = contentSelected,
-                    activeVolumeSummaries = activeVolumeSummaries,
-                    selectedVolumeSummaryIds = selectedVolumeSummaryIds,
-                    onToggleVolumeSummaryAsset = onToggleVolumeSummaryAsset,
-                    focusVolumeId = volumes.firstOrNull()?.id,
-                    allSelected = allChapterIds.isNotEmpty() &&
-                        allChapterIds.all { it in summarySelected && it in contentSelected },
-                    summaryAll = allChapterIds.isNotEmpty() &&
-                        allChapterIds.all { it in summarySelected },
-                    contentAll = allChapterIds.isNotEmpty() &&
-                        allChapterIds.all { it in contentSelected },
-                    volumeSummaryAll = activeVolumeSummaries.isNotEmpty() &&
-                        activeVolumeSummaries.all { it.id in selectedVolumeSummaryIds },
-                    onToggleAll = onToggleAll,
-                    onToggleSummary = onToggleSummary,
-                    onToggleContent = onToggleContent,
-                    onToggleVolumeSummaryAll = onToggleVolumeSummaryAll,
-                    onToggleChapterSummary = onToggleChapterSummary,
-                    onToggleChapterContent = onToggleChapterContent,
-                    onToggleVolumeSummary = { volumeId ->
-                        onToggleVolumeSummary(chapters.filter { it.volumeId == volumeId }.map { it.id })
-                    },
-                    onToggleVolumeContent = { volumeId ->
-                        onToggleVolumeContent(chapters.filter { it.volumeId == volumeId }.map { it.id })
-                    }
-                )
-                Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-                    horizontalArrangement = Arrangement.End
-                ) {
-                    TextButton(onClick = onDismiss) { Text("完成") }
-                }
-            }
-        }
-    }
+    ChapterPickerDialog(
+        chapters = chapters,
+        volumes = volumes,
+        summarySelected = summarySelected,
+        contentSelected = contentSelected,
+        activeVolumeSummaries = activeVolumeSummaries,
+        selectedVolumeSummaryIds = selectedVolumeSummaryIds,
+        focusVolumeId = volumes.firstOrNull()?.id,
+        onToggleAll = onToggleAll,
+        onToggleSummary = onToggleSummary,
+        onToggleContent = onToggleContent,
+        onToggleVolumeSummaryAll = onToggleVolumeSummaryAll,
+        onToggleChapterSummary = onToggleChapterSummary,
+        onToggleChapterContent = onToggleChapterContent,
+        onToggleVolumeSummary = { volumeId ->
+            onToggleVolumeSummary(chapters.filter { it.volumeId == volumeId }.map { it.id })
+        },
+        onToggleVolumeContent = { volumeId ->
+            onToggleVolumeContent(chapters.filter { it.volumeId == volumeId }.map { it.id })
+        },
+        onToggleVolumeSummaryAsset = onToggleVolumeSummaryAsset,
+        onDismiss = onDismiss
+    )
 }
 
 /** Agent 大纲选择弹窗：复用侧边栏的大纲勾选 UI */
@@ -2722,157 +2378,20 @@ private fun AgentOutlineDialog(
     }
 }
 
-// 完整权限图标（viewBox 12×12）：d=低、z=中、g=高
-private const val PERMISSION_LOW_ICON =
-    "M0.0506602 0.5C0.0506602 0.5 1.88554 1.73063 3.05066 1.5C4.16756 1.27892 5.55066 0 5.55066 0V1.5" +
-        "C5.55066 1.5 4.10186 2.47385 3.05066 2.5C2.24583 2.52002 1.05066 2 1.05066 2" +
-        "C1.05066 2 1.07814 4.21744 1.55066 5.5C1.98289 6.6732 2.30865 7.13643 3.05066 8" +
-        "C3.86548 8.94831 5.55066 10 5.55066 10C5.55066 10 7.23584 8.94831 8.05066 8" +
-        "C8.79267 7.13643 9.11843 6.6732 9.55066 5.5C10.0232 4.21744 10.0507 2 10.0507 2" +
-        "C10.0507 2 8.8555 2.52002 8.05066 2.5C6.99947 2.47385 5.55066 1.5 5.55066 1.5V0" +
-        "C5.55066 0 6.93377 1.27892 8.05066 1.5C9.21579 1.73063 11.0507 0.5 11.0507 0.5" +
-        "C11.0507 0.5 11.3364 4.21245 10.5507 6C10.0475 7.14459 9.75302 7.60389 9.05066 8.5" +
-        "C7.94014 9.91688 5.55066 11.5 5.55066 11.5C5.55066 11.5 3.16119 9.91688 2.05066 8.5" +
-        "C1.3483 7.60389 1.05378 7.14459 0.55066 6C-0.235078 4.21245 0.0506602 0.5 0.0506602 0.5Z" +
-        "M3 7H8C8 7 7.42289 7.64477 7 8C6.46092 8.45282 5.5 9 5.5 9C5.5 9 4.53908 8.45282 4 8" +
-        "C3.57711 7.64477 3 7 3 7Z"
-
-private const val PERMISSION_MID_ICON =
-    "M0.0506602 0.5C0.0506602 0.5 1.88554 1.73063 3.05066 1.5C4.16756 1.27892 5.55066 0 5.55066 0V1.5" +
-        "C5.55066 1.5 4.10186 2.47385 3.05066 2.5C2.24583 2.52002 1.05066 2 1.05066 2" +
-        "C1.05066 2 1.07814 4.21744 1.55066 5.5C1.98289 6.6732 2.30865 7.13643 3.05066 8" +
-        "C3.86548 8.94831 5.55066 10 5.55066 10C5.55066 10 7.23584 8.94831 8.05066 8" +
-        "C8.79267 7.13643 9.11843 6.6732 9.55066 5.5C10.0232 4.21744 10.0507 2 10.0507 2" +
-        "C10.0507 2 8.8555 2.52002 8.05066 2.5C6.99947 2.47385 5.55066 1.5 5.55066 1.5V0" +
-        "C5.55066 0 6.93377 1.27892 8.05066 1.5C9.21579 1.73063 11.0507 0.5 11.0507 0.5" +
-        "C11.0507 0.5 11.3364 4.21245 10.5507 6C10.0475 7.14459 9.75302 7.60389 9.05066 8.5" +
-        "C7.94014 9.91688 5.55066 11.5 5.55066 11.5C5.55066 11.5 3.16119 9.91688 2.05066 8.5" +
-        "C1.3483 7.60389 1.05378 7.14459 0.55066 6C-0.235078 4.21245 0.0506602 0.5 0.0506602 0.5Z" +
-        "M3 7H8C8 7 7.42289 7.64477 7 8C6.46092 8.45282 5.5 9 5.5 9C5.5 9 4.53908 8.45282 4 8" +
-        "C3.57711 7.64477 3 7 3 7Z" +
-        "M1.75626 4.5H9.17213C9.17213 4.5 9.12085 5.12261 9.00001 5.5C8.86685 5.91582 8.5 6.5 8.5 6.5" +
-        "H2.5C2.5 6.5 2.14837 5.91064 2.00001 5.5C1.86342 5.12196 1.75626 4.5 1.75626 4.5Z"
-
-private const val PERMISSION_HIGH_ICON =
-    "M0.0506602 0.5C0.0506602 0.5 1.88554 1.73063 3.05066 1.5C4.16756 1.27892 5.55066 0 5.55066 0V1.5" +
-        "C5.55066 1.5 4.10186 2.47385 3.05066 2.5C2.24583 2.52002 1.05066 2 1.05066 2" +
-        "C1.05066 2 1.07814 4.21744 1.55066 5.5C1.98289 6.6732 2.30865 7.13643 3.05066 8" +
-        "C3.86548 8.94831 5.55066 10 5.55066 10C5.55066 10 7.23584 8.94831 8.05066 8" +
-        "C8.79267 7.13643 9.11843 6.6732 9.55066 5.5C10.0232 4.21744 10.0507 2 10.0507 2" +
-        "C10.0507 2 8.8555 2.52002 8.05066 2.5C6.99947 2.47385 5.55066 1.5 5.55066 1.5V0" +
-        "C5.55066 0 6.93377 1.27892 8.05066 1.5C9.21579 1.73063 11.0507 0.5 11.0507 0.5" +
-        "C11.0507 0.5 11.3364 4.21245 10.5507 6C10.0475 7.14459 9.75302 7.60389 9.05066 8.5" +
-        "C7.94014 9.91688 5.55066 11.5 5.55066 11.5C5.55066 11.5 3.16119 9.91688 2.05066 8.5" +
-        "C1.3483 7.60389 1.05378 7.14459 0.55066 6C-0.235078 4.21245 0.0506602 0.5 0.0506602 0.5Z" +
-        "M3 7H8C8 7 7.42289 7.64477 7 8C6.46092 8.45282 5.5 9 5.5 9C5.5 9 4.53908 8.45282 4 8" +
-        "C3.57711 7.64477 3 7 3 7Z" +
-        "M1.75626 4.5H9.17213C9.17213 4.5 9.12085 5.12261 9.00001 5.5C8.86685 5.91582 8.5 6.5 8.5 6.5" +
-        "H2.5C2.5 6.5 2.14837 5.91064 2.00001 5.5C1.86342 5.12196 1.75626 4.5 1.75626 4.5Z" +
-        "M1.5 2.5C1.5 2.5 2.69849 3.07582 3.5 3C4.36936 2.91776 5.5 2 5.5 2" +
-        "C5.5 2 6.63064 2.91776 7.5 3C8.30151 3.07582 9.5 2.5 9.5 2.5L9.24219 4H1.66406L1.5 2.5Z"
-
-/**
- * 高 / 中 / 低权限完整图标（d / z / g），按当前权限回显。
- */
+/** 写入权限入口：沿用设计稿的三档盾牌，始终可在输入前调整。 */
 @Composable
 private fun WritePermissionBadge(policy: String, onClick: () -> Unit) {
-    val color = MaterialTheme.colorScheme.primary
-    val pathData = when (policy) {
-        AgentWritePermissionPolicy.AUTO_ALLOW_NORMAL -> PERMISSION_HIGH_ICON
-        AgentWritePermissionPolicy.BATCH_CONFIRM -> PERMISSION_MID_ICON
-        else -> PERMISSION_LOW_ICON
-    }
-    val iconPath = remember(policy) { PathParser().parsePathString(pathData).toPath() }
-    Box(
-        Modifier
-            .size(46.dp)
-            .clip(CircleShape)
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center
+    IconButton(
+        onClick = onClick,
+        modifier = Modifier.size(48.dp)
     ) {
-        Canvas(Modifier.size(24.dp)) {
-            val scale = kotlin.math.min(size.width, size.height) / 12f
-            val dx = (size.width - 12f * scale) / 2f
-            val dy = (size.height - 12f * scale) / 2f
-            withTransform({
-                translate(dx, dy)
-                scale(scale, scale, pivot = Offset.Zero)
-            }) {
-                drawPath(iconPath, color = color)
-            }
-        }
+        AgentPermissionIcon(policy, iconSize = 14.dp)
     }
-}
-
-/** 工作模式入口：与写入权限并排，只影响后续新建任务 */
-@Composable
-private fun WorkModeChip(mode: String, onClick: () -> Unit) {
-    val auto = mode == AgentWorkMode.AUTO
-    Row(
-        Modifier
-            .clip(RoundedCornerShape(10.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 8.dp, vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Icon(
-            if (auto) Icons.Filled.PlayArrow else Icons.AutoMirrored.Filled.List,
-            contentDescription = "工作模式：${agentWorkModeLabel(mode)}",
-            modifier = Modifier.size(20.dp),
-            tint = if (auto) MaterialTheme.colorScheme.primary
-            else MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Spacer(Modifier.width(4.dp))
-        Text(
-            if (auto) "自动" else "计划",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-    }
-}
-
-/** 工作模式选择弹窗 */
-@Composable
-private fun AgentWorkModeDialog(
-    current: String,
-    onSelect: (String) -> Unit,
-    onDismiss: () -> Unit
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("任务模式") },
-        text = {
-            Column {
-                Text(
-                    "模式在创建任务时固化；已创建任务保持其创建时的模式。" +
-                        "写入操作仍需按写入权限确认。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(Modifier.height(8.dp))
-                WritePermissionOption(
-                    title = "自动模式",
-                    description = "Agent 自行判断是否需要规划或澄清；计划就绪后自动开始执行。",
-                    selected = current == AgentWorkMode.AUTO,
-                    onClick = { onSelect(AgentWorkMode.AUTO) }
-                )
-                WritePermissionOption(
-                    title = "计划模式",
-                    description = "先生成计划并等待你确认，确认后才允许开始执行。",
-                    selected = current == AgentWorkMode.PLAN,
-                    onClick = { onSelect(AgentWorkMode.PLAN) }
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text("取消") }
-        }
-    )
 }
 
 /** 写入权限选择弹窗 */
 @Composable
-private fun WritePermissionDialog(
+internal fun WritePermissionDialog(
     current: String,
     onSelect: (String) -> Unit,
     onDismiss: () -> Unit
@@ -2891,18 +2410,21 @@ private fun WritePermissionDialog(
                 WritePermissionOption(
                     title = "高权限",
                     description = "一般写入（修改梗概、创建 / 修改大纲）自动执行；覆盖正文、高风险与破坏性操作仍需逐次确认。",
+                    policy = AgentWritePermissionPolicy.AUTO_ALLOW_NORMAL,
                     selected = current == AgentWritePermissionPolicy.AUTO_ALLOW_NORMAL,
                     onClick = { onSelect(AgentWritePermissionPolicy.AUTO_ALLOW_NORMAL) }
                 )
                 WritePermissionOption(
                     title = "中权限",
                     description = "一般写入先汇总为待确认列表，由你一次性批量批准；高风险与破坏性操作仍需逐条确认。",
+                    policy = AgentWritePermissionPolicy.BATCH_CONFIRM,
                     selected = current == AgentWritePermissionPolicy.BATCH_CONFIRM,
                     onClick = { onSelect(AgentWritePermissionPolicy.BATCH_CONFIRM) }
                 )
                 WritePermissionOption(
                     title = "低权限",
                     description = "所有写入（包括一般写入）都需要你逐条确认后才执行。",
+                    policy = AgentWritePermissionPolicy.ASK_EVERY_TIME,
                     selected = current == AgentWritePermissionPolicy.ASK_EVERY_TIME,
                     onClick = { onSelect(AgentWritePermissionPolicy.ASK_EVERY_TIME) }
                 )
@@ -2919,16 +2441,20 @@ private fun WritePermissionOption(
     title: String,
     description: String,
     selected: Boolean,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    policy: String
 ) {
     Row(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp))
+            .clip(RoundedCornerShape(12.dp))
+            .background(if (selected) Color(0xFFF0EFFF) else Color.Transparent)
             .clickable(onClick = onClick)
-            .padding(horizontal = 8.dp, vertical = 10.dp),
+            .padding(horizontal = 10.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
+        AgentPermissionIcon(policy)
+        Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text(title, fontWeight = FontWeight.SemiBold)
             Text(

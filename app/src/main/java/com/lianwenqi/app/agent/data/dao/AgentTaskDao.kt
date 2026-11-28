@@ -56,10 +56,10 @@ interface AgentTaskDao {
     @Query("SELECT * FROM agent_task WHERE sessionId = :sessionId ORDER BY createdAt DESC, id DESC")
     fun observeTasksOfSession(sessionId: Long): Flow<List<AgentTask>>
 
-    /** 当前书籍下所有生成过计划书的计划模式任务（跨会话），用于计划书库 */
+    /** 当前书籍下所有保存过计划书的任务（跨会话），用于计划书库 */
     @Query(
         "SELECT t.* FROM agent_task t INNER JOIN agent_session s ON t.sessionId = s.id " +
-            "WHERE s.bookId = :bookId AND t.workMode = 'PLAN' " +
+            "WHERE s.bookId = :bookId " +
             "AND t.planJson != '' AND t.planJson != '{}' " +
             "ORDER BY t.createdAt DESC, t.id DESC"
     )

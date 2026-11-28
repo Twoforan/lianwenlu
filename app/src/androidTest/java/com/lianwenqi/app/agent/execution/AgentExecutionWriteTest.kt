@@ -158,6 +158,7 @@ class AgentExecutionWriteTest {
                 chapterMetaOf = { businessWriter.chapterMeta(it) },
                 chapterContentOf = { businessWriter.chapterContent(it) },
                 outlineOf = { businessWriter.outline(it) },
+                volumeOf = { businessWriter.volume(it) },
                 writeService = writeService
             ).create()
         )

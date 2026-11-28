@@ -1,0 +1,4 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="21.600098dp" android:height="18.699999dp" android:viewportWidth="21.6001" android:viewportHeight="18.7">
+    <!-- Converted from the supplied settings/model.svg, preserving its paths and strokes. -->
+    <path android:fillType="evenOdd" android:fillColor="@android:color/transparent" android:strokeColor="#000000" android:strokeWidth="1.2" android:strokeLineCap="round" android:strokeLineJoin="round" android:pathData="M10.8003,0.6L10.8003,3.1M15.3003,4.1C17.5093,4.1 19.3003,5.89086 19.3003,8.1L19.3003,14.1C19.3003,16.3091 17.5093,18.1 15.3003,18.1L6.30029,18.1C4.09131,18.1 2.30029,16.3091 2.30029,14.1L2.30029,8.1C2.30029,5.89086 4.09131,4.1 6.30029,4.1L15.3003,4.1ZM2.30029,9.6L0.600098,9.6L0.600098,13.6L2.30029,13.6M19.3003,9.6L21,9.6L21,13.6L19.3003,13.6M8.80029,10.1L8.80029,11.9M12.3003,10.1L12.3003,11.9" />
+</vector>

@@ -130,9 +130,6 @@ class Prefs(private val context: Context) {
         // F6：Agent 写入权限策略；默认每次操作都询问
         val agentWritePolicy = stringPreferencesKey("agent_write_policy")
 
-        // Agent 新任务的工作模式：AUTO（自动）/ PLAN（计划）；创建任务时固化到任务
-        val agentWorkMode = stringPreferencesKey("agent_work_mode")
-
         // Agent 模式上次打开的会话 id（0 表示无）；退出重进后恢复该会话
         val agentLastSessionId = longPreferencesKey("agent_last_session_id")
 
@@ -312,11 +309,6 @@ class Prefs(private val context: Context) {
     /** Agent 正文生成模型；0 表示跟随任务模型 */
     val agentContentModelId: Flow<Long> = context.dataStore.data.map {
         it[K.agentContentModelId] ?: 0L
-    }
-
-    /** Agent 新任务工作模式；默认计划模式，保持原有流程 */
-    val agentWorkMode: Flow<String> = context.dataStore.data.map {
-        it[K.agentWorkMode] ?: "PLAN"
     }
 
     /** 「上下文前缀化」：勾选的书籍 / 章节写进会话前缀后只增不减（默认开启） */
@@ -577,8 +569,6 @@ class Prefs(private val context: Context) {
     /** 设置 Agent 正文生成模型；0 表示跟随任务模型 */
     suspend fun setAgentContentModelId(v: Long) = writePrefs { it[K.agentContentModelId] = v }
 
-    /** 修改 Agent 新任务工作模式；不改变已创建任务固化的模式 */
-    suspend fun setAgentWorkMode(v: String) = writePrefs { it[K.agentWorkMode] = v }
     suspend fun setPrefixContextEnabled(v: Boolean) = writePrefs { it[K.prefixContextEnabled] = v }
     suspend fun setPrefixOutlineEnabled(v: Boolean) = writePrefs { it[K.prefixOutlineEnabled] = v }
     suspend fun setPrefixCustomText(v: String) = writePrefs { it[K.prefixCustomText] = v }

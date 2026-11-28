@@ -62,6 +62,7 @@ class AgentWriteToolGuardTest {
                     chapterMetaOf = { writer.chapterMeta(it) },
                     chapterContentOf = { writer.chapterContent(it) },
                     outlineOf = { writer.outline(it) },
+                    volumeOf = { writer.volume(it) },
                     writeService = service
                 ).create()
             )

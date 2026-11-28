@@ -10,9 +10,11 @@ import com.lianwenqi.app.agent.data.AgentPlanSaveRequest
 import com.lianwenqi.app.agent.data.AgentSessionRepository
 import com.lianwenqi.app.agent.data.AgentTaskRepository
 import com.lianwenqi.app.agent.data.AgentToolExecutionRepository
+import com.lianwenqi.app.agent.data.entity.AgentMessageKind
 import com.lianwenqi.app.agent.data.entity.AgentNodeStatus
 import com.lianwenqi.app.agent.data.entity.AgentTaskStatus
 import com.lianwenqi.app.agent.data.entity.AgentToolStatus
+import com.lianwenqi.app.agent.data.entity.AgentWorkMode
 import com.lianwenqi.app.agent.planning.AgentModelClient
 import com.lianwenqi.app.agent.planning.AgentPlanParser
 import com.lianwenqi.app.agent.planning.AgentPlanValidator
@@ -93,10 +95,16 @@ class AgentExecutionEngineTest {
     """.trimIndent()
 
     private suspend fun createConfirmedTask(
-        plan: String = planJson()
+        plan: String = planJson(),
+        legacyPlan: Boolean = true
     ): Pair<Long, Long> {
         val sessionId = sessions.createSession(bookId = 1L, modelId = 1L)
         val taskId = tasks.createTaskWithUserMessage(sessionId, "检查第三卷大纲").first
+        if (legacyPlan) {
+            // 历史计划仍按原语义执行；新建任务入口始终创建 AUTO。
+            val task = tasks.getTask(taskId)!!
+            db.agentTaskDao().updateTask(task.copy(workMode = AgentWorkMode.PLAN))
+        }
         tasks.updateStatus(taskId, AgentTaskStatus.PLANNING)
         tasks.savePlanAndWaitConfirmation(
             taskId,
@@ -197,9 +205,10 @@ class AgentExecutionEngineTest {
             { AgentToolResult.ok("""{"items":["第三卷大纲"]}""") },
             counter
         )
+        val expectedConclusion = "第三卷大纲显示存在两条冲突线。"
         val script = mutableListOf(
             toolCall("call_1"),
-            finalText("第三卷大纲显示存在两条冲突线。")
+            finalText(expectedConclusion)
         )
         val result = engine(registry, script).execute(taskId, sessionId)
         assertTrue(result is AgentExecutionResult.Completed)
@@ -223,8 +232,36 @@ class AgentExecutionEngineTest {
         assertTrue(eventList.any { it.eventType == "TOOL_CALL_STARTED" })
         assertTrue(eventList.any { it.eventType == "TOOL_CALL_COMPLETED" })
         assertTrue(eventList.any { it.eventType == "TASK_COMPLETED" })
+        val completed = result as AgentExecutionResult.Completed
+        assertTrue("实际执行摘要：${completed.summary}", completed.summary.contains(expectedConclusion))
+        val stepNode = nodeList.single { it.nodeKey.endsWith(":step_001") }
+        assertTrue("持久化步骤结果：${stepNode.outputJson}", stepNode.outputJson.contains(expectedConclusion))
         assertTrue(
-            sessions.getMessages(sessionId).any { it.content.contains("只读执行结果") }
+            sessions.getMessages(sessionId).none { it.kind == AgentMessageKind.FINAL_ANSWER }
+        )
+    }
+
+    @Test
+    fun 新建自动任务允许不调用工具直接回答() = runBlocking {
+        val (sessionId, taskId) = createConfirmedTask(
+            plan = planJson("GENERATE_REPORT"),
+            legacyPlan = false
+        )
+        val registry = registryWithTool({ AgentToolResult.ok("{}") })
+        val result = engine(
+            registry,
+            mutableListOf(finalText("这是直接回答。"))
+        ).execute(taskId, sessionId)
+
+        assertTrue(result is AgentExecutionResult.Completed)
+        assertEquals(AgentWorkMode.AUTO, tasks.getTask(taskId)!!.workMode)
+        assertEquals(AgentTaskStatus.COMPLETED, tasks.getTask(taskId)!!.status)
+        assertTrue(tools.executionsOfTask(taskId).isEmpty())
+        assertEquals(
+            "这是直接回答。",
+            sessions.getMessages(sessionId).single {
+                it.kind == AgentMessageKind.FINAL_ANSWER
+            }.content
         )
     }
 

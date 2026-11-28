@@ -72,12 +72,12 @@ object AgentToolStatus {
     fun isTerminal(status: String): Boolean = status in terminal
 }
 
-/** Agent 任务工作模式 */
+/** Agent 任务工作模式；PLAN 仅保留给已有任务的历史兼容与展示。 */
 object AgentWorkMode {
     /** 自动模式：Agent 自行判断是否规划，并在条件允许时自动开始执行 */
     const val AUTO = "AUTO"
 
-    /** 计划模式：先生成计划并等待用户确认，确认后才允许执行 */
+    /** 历史计划模式：旧任务继续按原语义展示，不用于新建任务。 */
     const val PLAN = "PLAN"
 
     val all: List<String> = listOf(AUTO, PLAN)
@@ -216,8 +216,8 @@ data class AgentTask(
     val currentNodeId: Long? = null,
     /** 本任务使用的模型；可空 */
     val modelId: Long? = null,
-    /** 创建任务时固化的模式，见 [AgentWorkMode]；运行中不随页面偏好变化 */
-    val workMode: String = AgentWorkMode.PLAN,
+    /** 创建时固化的模式；旧记录仍可保留 [AgentWorkMode.PLAN]。 */
+    val workMode: String = AgentWorkMode.AUTO,
     /** 父任务 id；null 表示根任务 */
     val parentTaskId: Long? = null,
     /** 根任务 id；根任务为 null，分支任务记录所属根任务 */

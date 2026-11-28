@@ -12,6 +12,7 @@ import com.lianwenqi.app.agent.data.entity.AgentNodeType
 import com.lianwenqi.app.agent.data.entity.AgentReferenceSourceType
 import com.lianwenqi.app.agent.data.entity.AgentTaskStatus
 import com.lianwenqi.app.agent.data.entity.AgentToolStatus
+import com.lianwenqi.app.agent.data.entity.AgentWorkMode
 import com.lianwenqi.app.data.AppDatabase
 import com.lianwenqi.app.data.BookRepository
 import com.lianwenqi.app.data.ChatRepository
@@ -83,6 +84,7 @@ class AgentTaskRepositoryTest {
         assertEquals("剧情冲突检查", task.title)
         assertEquals("检查第三卷大纲并找出剧情冲突", task.userGoal)
         assertEquals(AgentTaskStatus.CREATED, task.status)
+        assertEquals(AgentWorkMode.AUTO, task.workMode)
         assertEquals("{}", task.planJson)
         assertEquals(taskId, sessions.getSession(sessionId)!!.lastTaskId)
 
@@ -502,6 +504,34 @@ class AgentTaskRepositoryTest {
             events.latestSequence(running)
         )
         assertNotNull(events.latestEvent(running))
+    }
+
+    @Test
+    fun 计划书库保留旧计划并纳入AUTO任务中的计划() = runBlocking {
+        val bookRepository = BookRepository(db)
+        val bookId = bookRepository.createBook("计划书库", "", null, 0, "第%n卷", "第%n章")
+        val otherBookId = bookRepository.createBook("其他书", "", null, 0, "第%n卷", "第%n章")
+        val legacySessionId = sessions.createSession(bookId = bookId)
+        val autoSessionId = sessions.createSession(bookId = bookId)
+        val otherSessionId = sessions.createSession(bookId = otherBookId)
+
+        val legacyTaskId = tasks.createTask(legacySessionId, "旧计划任务")
+        val legacyTask = tasks.getTask(legacyTaskId)!!
+        db.agentTaskDao().updateTask(
+            legacyTask.copy(workMode = AgentWorkMode.PLAN, planJson = """{"legacy":true}""")
+        )
+        val autoTaskId = tasks.createTask(autoSessionId, "自动模式计划任务")
+        tasks.updatePlan(autoTaskId, """{"auto":true}""")
+        tasks.createTask(autoSessionId, "尚无计划任务")
+        val otherBookTaskId = tasks.createTask(otherSessionId, "其他书计划任务")
+        tasks.updatePlan(otherBookTaskId, """{"other":true}""")
+
+        assertEquals(
+            setOf(legacyTaskId, autoTaskId),
+            tasks.tasksWithPlanOfBook(bookId).map { it.id }.toSet()
+        )
+        assertEquals(AgentWorkMode.AUTO, tasks.getTask(autoTaskId)!!.workMode)
+        assertEquals(AgentWorkMode.PLAN, tasks.getTask(legacyTaskId)!!.workMode)
     }
 
     // ---------------- 删除与事务一致性 ----------------

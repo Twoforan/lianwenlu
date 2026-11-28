@@ -73,6 +73,7 @@ class AgentTaskRepository(private val db: AppDatabase) {
                     status = AgentTaskStatus.CREATED,
                     planJson = planJson,
                     modelId = modelId,
+                    workMode = AgentWorkMode.AUTO,
                     createdAt = now,
                     updatedAt = now
                 )
@@ -85,6 +86,7 @@ class AgentTaskRepository(private val db: AppDatabase) {
                     put("sessionId", sessionId)
                     put("title", title.trim().ifBlank { AgentTask.DEFAULT_TITLE })
                     put("userGoal", userGoal)
+                    put("workMode", AgentWorkMode.AUTO)
                     modelId?.let { put("modelId", it) }
                 }
             )
@@ -97,20 +99,18 @@ class AgentTaskRepository(private val db: AppDatabase) {
     suspend fun getTask(id: Long): AgentTask? = taskDao.getTask(id)
 
     /**
-     * 创建任务 + 用户任务消息 + 最近任务 + TASK_CREATED，全部在一个事务内完成。
-     * 返回 (taskId, userMessageId)。
+     * 创建 AUTO 任务 + 用户任务消息 + 最近任务 + TASK_CREATED，全部在一个事务内完成。
+     * 不读取旧版工作模式偏好。返回 (taskId, userMessageId)。
      */
     suspend fun createTaskWithUserMessage(
         sessionId: Long,
         userGoal: String,
         title: String = AgentTask.DEFAULT_TITLE,
         modelId: Long? = null,
-        workMode: String = AgentWorkMode.PLAN,
         contextSnapshot: String = "",
         attachmentsJson: String = ""
     ): Pair<Long, Long> {
         require(userGoal.isNotBlank()) { "userGoal 不能为空" }
-        require(AgentWorkMode.isValid(workMode)) { "非法工作模式：$workMode" }
         return db.withTransaction {
             require(sessionDao.getSession(sessionId) != null) { "Agent 会话不存在：$sessionId" }
             val now = System.currentTimeMillis()
@@ -122,7 +122,7 @@ class AgentTaskRepository(private val db: AppDatabase) {
                     userGoal = userGoal,
                     status = AgentTaskStatus.CREATED,
                     modelId = modelId,
-                    workMode = workMode,
+                    workMode = AgentWorkMode.AUTO,
                     createdAt = now,
                     updatedAt = now
                 )
@@ -135,7 +135,7 @@ class AgentTaskRepository(private val db: AppDatabase) {
                     put("sessionId", sessionId)
                     put("title", taskTitle)
                     put("userGoal", userGoal)
-                    put("workMode", workMode)
+                    put("workMode", AgentWorkMode.AUTO)
                     modelId?.let { put("modelId", it) }
                 }
             )
@@ -180,7 +180,7 @@ class AgentTaskRepository(private val db: AppDatabase) {
      * 创建任务分支：新任务 + 用户消息，可选携带已编辑计划。
      *
      * 父分支的用户目标、计划、事件和执行结果保持不变；
-     * 新分支从未执行状态开始，不继承确认、游标、工具结果或写入结果。
+     * 新分支固定为 AUTO，不继承旧任务的工作模式、确认、游标、工具结果或写入结果。
      * 返回 (新任务 id, 新用户消息 id)。
      */
     suspend fun createBranchTask(
@@ -216,7 +216,7 @@ class AgentTaskRepository(private val db: AppDatabase) {
                     },
                     planJson = planJson,
                     modelId = modelId ?: parent.modelId,
-                    workMode = parent.workMode,
+                    workMode = AgentWorkMode.AUTO,
                     parentTaskId = parent.id,
                     rootTaskId = rootId,
                     branchSource = branchSource,
@@ -232,7 +232,7 @@ class AgentTaskRepository(private val db: AppDatabase) {
                     put("sessionId", parent.sessionId)
                     put("title", taskTitle)
                     put("userGoal", userGoal)
-                    put("workMode", parent.workMode)
+                    put("workMode", AgentWorkMode.AUTO)
                     put("parentTaskId", parent.id)
                     put("rootTaskId", rootId)
                     put("branchSource", branchSource)

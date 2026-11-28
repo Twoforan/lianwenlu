@@ -90,7 +90,10 @@ class BookRepository(
         volumePrefix: String,
         chapterPrefix: String,
         groupId: Long? = null,
-        styleId: Long = 0
+        styleId: Long = 0,
+        coverGlyph: String? = null,
+        coverEnglish: String = "LIANWENLU",
+        coverTitleMode: Int = 0
     ): Long = db.withTransaction {
         if (styleId != 0L) {
             requireNotNull(styleProfileDao.getById(styleId)) { "文风档案不存在：$styleId" }
@@ -104,7 +107,10 @@ class BookRepository(
                 volumePrefix = volumePrefix,
                 chapterPrefix = chapterPrefix,
                 groupId = groupId,
-                styleId = styleId
+                styleId = styleId,
+                coverGlyph = coverGlyph,
+                coverEnglish = coverEnglish,
+                coverTitleMode = coverTitleMode
             )
         )
         val volumeId = volumeDao.insert(
@@ -168,6 +174,9 @@ class BookRepository(
                 chapterPrefix = src.chapterPrefix,
                 groupId = src.groupId,
                 styleId = src.styleId,
+                coverGlyph = src.coverGlyph,
+                coverEnglish = src.coverEnglish,
+                coverTitleMode = src.coverTitleMode,
                 createdAt = now,
                 updatedAt = now
             )

@@ -278,10 +278,6 @@ class AgentChatViewModel(private val container: AppContainer) : ViewModel() {
             AgentWritePermissionPolicy.ASK_EVERY_TIME
         )
 
-    /** 新任务工作模式；只影响后续创建的任务，已创建任务读取自身 workMode */
-    val workMode: StateFlow<String> = prefs.agentWorkMode
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AgentWorkMode.PLAN)
-
     /** 当前任务待回答的澄清请求；回答或取消后自动消失 */
     val pendingClarification: StateFlow<AgentClarificationView?> = _currentTaskId
         .flatMapLatest { id ->
@@ -993,12 +989,6 @@ class AgentChatViewModel(private val container: AppContainer) : ViewModel() {
         input.value = text
     }
 
-    /** 修改新任务工作模式；不改变已创建任务固化的模式 */
-    fun setWorkMode(mode: String) = viewModelScope.launch {
-        if (!AgentWorkMode.isValid(mode)) return@launch
-        prefs.setAgentWorkMode(mode)
-    }
-
     /** 快捷提示词：追加到任务目标输入框 */
     fun appendPrompt(prompt: Prompt) {
         if (prompt.content.isBlank()) return
@@ -1063,20 +1053,20 @@ class AgentChatViewModel(private val container: AppContainer) : ViewModel() {
     }
 
     /**
-     * 发送任务：创建任务 + 用户消息 → 状态 PLANNING → 调用 AgentPlanner。
+     * 发送任务：创建任务 + 用户消息 → 保存自动执行步骤 → 开始执行。
      * 模型未配置时不会创建任务，输入内容保留。
      */
     fun sendTask() = viewModelScope.launch {
         if (_planning.value || _sendingTask.value) return@launch
         _sendingTask.value = true
         try {
-            createAndPlanTask()
+            createAndExecuteTask()
         } finally {
             _sendingTask.value = false
         }
     }
 
-    private suspend fun createAndPlanTask() {
+    private suspend fun createAndExecuteTask() {
         val typedGoal = input.value.trim()
         val attachments = _pendingAttachments.value
         when {
@@ -1137,7 +1127,6 @@ class AgentChatViewModel(private val container: AppContainer) : ViewModel() {
                 sessionId = sessionId,
                 userGoal = goal,
                 modelId = modelId,
-                workMode = workMode.value,
                 contextSnapshot = mergedContext.text,
                 attachmentsJson = attachmentStore.encode(attachments)
             ).first
@@ -1152,17 +1141,8 @@ class AgentChatViewModel(private val container: AppContainer) : ViewModel() {
         _planError.value = null
         _planEditError.value = null
         confirmedTaskIds.value = confirmedTaskIds.value - taskId
-        if (workMode.value == AgentWorkMode.AUTO) {
-            // 自动模式不生成任务规划：直接用一个隐式步骤开始思考并调用工具
-            startAutoExecution(taskId = taskId, modelId = modelId, goal = goal)
-        } else {
-            startPlanning(
-                taskId = taskId,
-                modelId = modelId,
-                previousSummary = "",
-                attachmentContext = mergedContext
-            )
-        }
+        // 新任务固定为自动模式：直接用一个隐式步骤开始思考并按需调用工具。
+        startAutoExecution(taskId = taskId, modelId = modelId, goal = goal)
     }
 
     /**
@@ -1334,7 +1314,7 @@ class AgentChatViewModel(private val container: AppContainer) : ViewModel() {
         )
     }
 
-    /** 重新生成计划：创建新分支，父分支的计划与执行结果保持不变 */
+    /** 旧计划的重新生成也创建 AUTO 分支；父任务的计划与执行结果保持不变。 */
     fun regeneratePlan() = viewModelScope.launch {
         if (_planning.value) return@launch
         val task = currentTask.value ?: return@launch
@@ -1347,28 +1327,15 @@ class AgentChatViewModel(private val container: AppContainer) : ViewModel() {
             return@launch
         }
         val modelId = requireUsableModel() ?: return@launch
-        val oldVersion = eventRepository.eventsOfType(
-            task.id,
-            AgentEventType.TASK_PLAN_UPDATED
-        ).size
-        val oldPlan = currentPlan.value?.plan
-        val previousSummary = if (oldPlan != null) {
-            "v$oldVersion · ${oldPlan.taskTitle} · ${oldPlan.steps.size} 步"
-        } else {
-            ""
-        }
-        val answers = taskRepository.answeredClarifications(task.id).map { it.answer }
-        createBranchAndPlan(
+        createBranchAndExecute(
             parent = task,
             userGoal = task.userGoal,
             branchSource = AgentBranchSource.PLAN_REGENERATE,
-            modelId = modelId,
-            previousSummary = previousSummary,
-            clarificationAnswers = answers
+            modelId = modelId
         )
     }
 
-    /** 对某条用户提问重新生成：创建新分支并从该提问重新规划 */
+    /** 对某条用户提问重新生成：创建 AUTO 分支并重新执行。 */
     fun regenerateUserMessage(messageId: Long) = viewModelScope.launch {
         if (_planning.value) return@launch
         val task = currentTask.value ?: return@launch
@@ -1378,12 +1345,11 @@ class AgentChatViewModel(private val container: AppContainer) : ViewModel() {
         }
         val message = currentTaskUserMessage(messageId) ?: return@launch
         val modelId = requireUsableModel() ?: return@launch
-        createBranchAndPlan(
+        createBranchAndExecute(
             parent = task,
             userGoal = message.content,
             branchSource = AgentBranchSource.USER_EDIT,
             modelId = modelId,
-            previousSummary = "",
             contextOverride = contextFromMessage(message),
             attachmentsJsonOverride = message.attachments
         )
@@ -1414,12 +1380,11 @@ class AgentChatViewModel(private val container: AppContainer) : ViewModel() {
         }
         val message = currentTaskUserMessage(messageId) ?: return@launch
         val modelId = requireUsableModel() ?: return@launch
-        val childId = createBranchAndPlan(
+        val childId = createBranchAndExecute(
             parent = task,
             userGoal = goal,
             branchSource = AgentBranchSource.USER_EDIT,
             modelId = modelId,
-            previousSummary = "",
             contextOverride = contextFromMessage(message),
             attachmentsJsonOverride = message.attachments
         )
@@ -1465,12 +1430,11 @@ class AgentChatViewModel(private val container: AppContainer) : ViewModel() {
                 .joinToString("\n\n")
                 .take(MAX_ATTACHMENT_CONTEXT_CHARS)
         )
-        val childId = createBranchAndPlan(
+        val childId = createBranchAndExecute(
             parent = task,
             userGoal = goal,
             branchSource = AgentBranchSource.USER_EDIT,
             modelId = modelId,
-            previousSummary = "",
             contextOverride = context,
             attachmentsJsonOverride = attachmentsJson
         )
@@ -1688,14 +1652,12 @@ class AgentChatViewModel(private val container: AppContainer) : ViewModel() {
         )
     }
 
-    /** 基于父任务创建分支并开始规划；成功后切换到新分支 */
-    private suspend fun createBranchAndPlan(
+    /** 基于父任务创建 AUTO 分支并立即执行；成功后切换到新分支。 */
+    private suspend fun createBranchAndExecute(
         parent: AgentTask,
         userGoal: String,
         branchSource: String,
         modelId: Long,
-        previousSummary: String,
-        clarificationAnswers: List<String> = emptyList(),
         contextOverride: AgentAttachmentContext? = null,
         attachmentsJsonOverride: String? = null
     ): Long? {
@@ -1720,19 +1682,8 @@ class AgentChatViewModel(private val container: AppContainer) : ViewModel() {
         _planError.value = null
         _planEditError.value = null
         confirmedTaskIds.value = confirmedTaskIds.value - childId
-        // 自动模式本就不生成计划：编辑 / 重新生成提问时也应直接重新执行并生成回复，
-        // 不能走规划流程，否则会自动模式里凭空多出一份计划。
-        if (parent.workMode == AgentWorkMode.AUTO) {
-            startAutoExecution(taskId = childId, modelId = modelId, goal = userGoal)
-        } else {
-            startPlanning(
-                taskId = childId,
-                modelId = modelId,
-                previousSummary = previousSummary,
-                attachmentContext = context,
-                clarificationAnswers = clarificationAnswers
-            )
-        }
+        // 新分支固定为 AUTO，包括从旧 PLAN 任务派生的编辑重发与重新生成。
+        startAutoExecution(taskId = childId, modelId = modelId, goal = userGoal)
         return childId
     }
 

@@ -38,10 +38,10 @@ import coil.compose.AsyncImage
 import com.lianwenqi.app.data.entity.Book
 import java.io.File
 
-/** 默认封面配色 */
+/** 封面配色（与添加书籍设计稿一致的 7 组低饱和渐变底色） */
 val CoverColors = listOf(
-    0xFF3F51B5.toInt(), 0xFF00796B.toInt(), 0xFFC2185B.toInt(), 0xFF5D4037.toInt(),
-    0xFF455A64.toInt(), 0xFF7B1FA2.toInt(), 0xFFEF6C00.toInt(), 0xFF2E7D32.toInt()
+    0xFF3E446D.toInt(), 0xFFB17D6B.toInt(), 0xFFD9D3C6.toInt(), 0xFF8699B6.toInt(),
+    0xFFC5A461.toInt(), 0xFFA68FBC.toInt(), 0xFF5A8178.toInt()
 )
 
 /** 封面装饰符号：按书籍 id 轮换，避免每本书封面完全一样 */
@@ -68,7 +68,9 @@ fun BookCover(
     val topColor = lerp(base, Color.White, 0.28f)
     val bottomColor = lerp(base, Color.Black, 0.42f)
     val ink = Color(0xFFF7EEDC)
-    val glyph = CoverGlyphs[((book.id + book.title.length) % CoverGlyphs.size).toInt()]
+    val glyph = book.coverGlyph?.takeIf { it.isNotBlank() }
+        ?: CoverGlyphs[((book.id + book.title.length) % CoverGlyphs.size).toInt()]
+    val coverTitle = if (book.coverTitleMode == 1) book.title.take(4) else book.title
 
     Box(
         modifier = modifier
@@ -97,7 +99,7 @@ fun BookCover(
                 )
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    text = book.title,
+                    text = coverTitle,
                     color = ink,
                     textAlign = TextAlign.Center,
                     maxLines = 3,
@@ -115,14 +117,17 @@ fun BookCover(
                         )
                     )
                 )
-                Spacer(Modifier.height(5.dp))
-                Text(
-                    text = "LIANWENLU",
-                    color = ink.copy(alpha = 0.7f),
-                    fontSize = (titleSize * 0.42f).coerceAtLeast(4.5f).sp,
-                    letterSpacing = (titleSize * 0.2f).sp,
-                    maxLines = 1
-                )
+                if (book.coverEnglish.isNotBlank()) {
+                    Spacer(Modifier.height(5.dp))
+                    Text(
+                        text = book.coverEnglish,
+                        color = ink.copy(alpha = 0.7f),
+                        fontSize = (titleSize * 0.42f).coerceAtLeast(4.5f).sp,
+                        letterSpacing = (titleSize * 0.2f).sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
         }
 

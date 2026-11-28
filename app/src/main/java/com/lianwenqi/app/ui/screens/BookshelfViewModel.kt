@@ -146,6 +146,9 @@ class BookshelfViewModel(private val container: AppContainer) : ViewModel() {
         chapterPrefix: String,
         groupId: Long?,
         styleId: Long,
+        coverGlyph: String? = null,
+        coverEnglish: String = "LIANWENLU",
+        coverTitleMode: Int = 0,
         onCreated: (Long) -> Unit,
         onError: (String) -> Unit
     ) = viewModelScope.launch {
@@ -156,7 +159,8 @@ class BookshelfViewModel(private val container: AppContainer) : ViewModel() {
                 return@launch
             }
             val id = bookRepository.createBook(
-                title, intro, coverPath, coverColor, volumePrefix, chapterPrefix, groupId, styleId
+                title, intro, coverPath, coverColor, volumePrefix, chapterPrefix, groupId, styleId,
+                coverGlyph, coverEnglish, coverTitleMode
             )
             val saved = bookRepository.getBook(id)
             if (saved == null || saved.styleId != styleId) {
@@ -194,6 +198,9 @@ class BookshelfViewModel(private val container: AppContainer) : ViewModel() {
         chapterPrefix: String,
         groupId: Long?,
         styleId: Long,
+        coverGlyph: String? = null,
+        coverEnglish: String = "LIANWENLU",
+        coverTitleMode: Int = 0,
         onUpdated: () -> Unit,
         onError: (String) -> Unit
     ) {
@@ -215,7 +222,10 @@ class BookshelfViewModel(private val container: AppContainer) : ViewModel() {
                         volumePrefix = volumePrefix,
                         chapterPrefix = chapterPrefix,
                         groupId = groupId,
-                        styleId = styleId
+                        styleId = styleId,
+                        coverGlyph = coverGlyph,
+                        coverEnglish = coverEnglish,
+                        coverTitleMode = coverTitleMode
                     )
                 )
                 if (!saved) {

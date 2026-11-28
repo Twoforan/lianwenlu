@@ -78,7 +78,6 @@ import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.FilterAlt
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.NoteAdd
 import androidx.compose.material.icons.filled.ReceiptLong
 import androidx.compose.material.icons.filled.Refresh
@@ -86,13 +85,13 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Badge
-import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
@@ -134,6 +133,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.onFocusChanged
@@ -150,6 +153,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -159,6 +163,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import coil.compose.AsyncImage
+import com.lianwenqi.app.R
 import com.lianwenqi.app.agent.ui.AgentChatMode
 import com.lianwenqi.app.agent.ui.AgentChatScreen
 import com.lianwenqi.app.ai.CacheRateCalculator
@@ -192,6 +197,9 @@ import com.lianwenqi.app.data.style.StyleLibraryState
 import com.lianwenqi.app.ui.appViewModel
 import com.lianwenqi.app.ui.components.BookFormResult
 import com.lianwenqi.app.ui.components.BookFormDialog
+import com.lianwenqi.app.ui.components.ChatToolbar
+import com.lianwenqi.app.ui.components.ChatToolbarAction
+import com.lianwenqi.app.ui.components.ModelSetupReminder
 import com.lianwenqi.app.util.AI_TOOLS
 import com.lianwenqi.app.util.AI_TOOL_IMPORT_CHAPTER
 import com.lianwenqi.app.util.AI_TOOL_WRITE_OUTLINE
@@ -329,6 +337,12 @@ private fun NormalAiChatScreen(
     val scope = rememberCoroutineScope()
     val ui = remember { MessageUiState() }
     val modelName = models.firstOrNull { it.id == activeModelId }?.displayName ?: "未选择模型"
+    val modelSelected = models.any { it.id == activeModelId }
+    val modelSetupMessage = if (models.isEmpty()) {
+        "还没有配置模型，没有办法开始喵"
+    } else {
+        "还没有选择模型，暂时没有办法开始喵"
+    }
     // 当前模型是否标记了「支持联网搜索」：只有标记过才显示搜索按钮
     val activeModelWebSearch =
         models.firstOrNull { it.id == activeModelId }?.webSearchEnabled == true
@@ -338,50 +352,85 @@ private fun NormalAiChatScreen(
     BackHandler(enabled = ui.editingId != null) { ui.editingId = null }
 
     Scaffold(
-        // 顶部内边距交给 TopAppBar，底部由 union(navigationBars, ime) 统一处理
+        // 顶部内边距交给双层顶部栏，底部由 union(navigationBars, ime) 统一处理
+        containerColor = Color(0xFFF5F6FA),
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
-            Row(
-                modifier = Modifier
+            BoxWithConstraints(
+                Modifier
                     .fillMaxWidth()
+                    .background(Color(0xFFF5F6FA))
                     .windowInsetsPadding(WindowInsets.statusBars)
-                    .height(56.dp)
-                    .padding(start = 20.dp, end = 8.dp),
-                verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(
-                    modifier = Modifier.weight(1f),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    // 模型选择与「AI 聊天」同排
-                    Text("AI 聊天", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
-                    Spacer(Modifier.width(8.dp))
-                    ModelSelectorChip(
-                        models = models,
-                        providers = providers,
-                        activeId = activeModelId,
-                        maxLabelWidth = 110.dp,
-                        onSelect = { vm.setModel(it) }
-                    )
+                val modelLabelWidth = (maxWidth - 276.dp).coerceIn(32.dp, 88.dp)
+                val contextSpacing = if (maxWidth < 360.dp) 8.dp else if (maxWidth < 400.dp) 12.dp else 20.dp
+                Column {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(56.dp)
+                            .padding(horizontal = 16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text("AI聊天", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Color(0xFF17171B))
+                        Spacer(Modifier.weight(1f))
+                        ModelSelectorChip(
+                            models = models,
+                            providers = providers,
+                            activeId = activeModelId,
+                            maxLabelWidth = modelLabelWidth,
+                            onSelect = { vm.setModel(it) }
+                        )
+                        ChatHeaderAction(
+                            iconRes = R.drawable.ic_chat_history,
+                            description = "会话历史",
+                            onClick = { showSessions = true }
+                        )
+                        ChatHeaderAction(
+                            iconRes = R.drawable.ic_chat_new,
+                            description = "新对话",
+                            iconSize = 10.dp,
+                            onClick = { vm.newSession() }
+                        )
+                        ChatHeaderAction(
+                            iconRes = R.drawable.ic_chat_agent,
+                            description = "切换 Agent",
+                            onClick = { onModeChange(AgentChatMode.AGENT) }
+                        )
+                    }
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .height(55.dp)
+                            .padding(horizontal = 16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(contextSpacing),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        val selectedBook = selBooks.singleOrNull()?.let { id -> books.firstOrNull { it.id == id } }
+                        ChatContextPill(
+                            label = selectedBook?.title ?: "选择书籍",
+                            modifier = Modifier.weight(1.5f),
+                            iconRes = R.drawable.ic_chat_book,
+                            enabled = true,
+                            onClick = { showBooks = true }
+                        )
+                        ChatContextPill(
+                            label = "章节",
+                            modifier = Modifier.weight(1f),
+                            count = selChapters.size,
+                            enabled = selBooks.isNotEmpty(),
+                            onClick = { showChapters = true }
+                        )
+                        ChatContextPill(
+                            label = "大纲",
+                            modifier = Modifier.weight(1f),
+                            count = selOutline.size,
+                            enabled = selBooks.isNotEmpty(),
+                            onClick = { showOutline = true }
+                        )
+                    }
                 }
-                IconButton(onClick = { vm.newSession() }) {
-                    Icon(Icons.Filled.Add, contentDescription = "新对话")
-                }
-                TextButton(onClick = { showSessions = true }) { Text("会话") }
-                // 机器人图标与开关固定在最右侧
-                Icon(
-                    Icons.Filled.SmartToy,
-                    contentDescription = "自动化",
-                    modifier = Modifier.size(20.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Switch(
-                    checked = mode == AgentChatMode.AGENT,
-                    onCheckedChange = { on ->
-                        if (on) onModeChange(AgentChatMode.AGENT)
-                    },
-                    modifier = Modifier.scale(0.75f)
-                )
             }
         }
     ) { padding ->
@@ -392,59 +441,6 @@ private fun NormalAiChatScreen(
                 // 底部取「导航栏 / 输入法」较大者，避免两者叠加产生空白
                 .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime))
         ) {
-            // 上下文选择（未选书籍时不能选择章节 / 大纲 / 仅梗概 / 仅正文）
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                val selectedBook = selBooks.singleOrNull()?.let { id -> books.firstOrNull { it.id == id } }
-                AssistChip(
-                    onClick = { showBooks = true },
-                    label = {
-                        Text(
-                            selectedBook?.title ?: "选择书籍",
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.widthIn(max = 140.dp)
-                        )
-                    }
-                )
-                AssistChip(
-                    onClick = { if (selBooks.isNotEmpty()) showChapters = true },
-                    enabled = selBooks.isNotEmpty(),
-                    label = { Text("章节(${selChapters.size})") }
-                )
-                AssistChip(
-                    onClick = { if (selBooks.isNotEmpty()) showOutline = true },
-                    enabled = selBooks.isNotEmpty(),
-                    label = { Text("大纲(${selOutline.size})") }
-                )
-                FilterChip(
-                    selected = summaryAll,
-                    onClick = { vm.selectAllSummary() },
-                    enabled = selBooks.isNotEmpty(),
-                    label = { Text("仅梗概") }
-                )
-                FilterChip(
-                    selected = contentAll,
-                    onClick = { vm.selectAllContent() },
-                    enabled = selBooks.isNotEmpty(),
-                    label = { Text("仅正文") }
-                )
-                FilterChip(
-                    selected = activeVolumeSummaries.isNotEmpty() &&
-                        selVolumeSummaries.containsAll(activeVolumeSummaries.map { it.id }),
-                    onClick = { vm.toggleAllVolumeSummaryAssets() },
-                    enabled = activeVolumeSummaries.isNotEmpty(),
-                    label = { Text("卷梗概") }
-                )
-            }
-
-            HorizontalDivider()
-
             val entries = remember(messages) { buildChatEntries(messages) }
             // 按「消息所属章节」连续分组：每一组都整组包裹（含最后一组，这样最后一章的对话也有章节抬头、可收起）。
             // 未绑定章节的对话则按「一轮对话」各自成块（标题为「第X轮对话」，可长按改名）。
@@ -546,7 +542,7 @@ private fun NormalAiChatScreen(
                         ChapterGroupCard(
                             title = title,
                             // 组内「对话」条数（一问一答算一条）与回答字数
-                            rounds = group.entries.count { it is ChatEntry.User },
+                            rounds = group.entries.size,
                             words = group.entries.sumOf { e ->
                                 // 回答作为「用户消息的版本」随用户条目展示，字数从当前展示的版本取
                                 when (e) {
@@ -568,6 +564,33 @@ private fun NormalAiChatScreen(
                             if (!collapsed) group.entries.forEach { renderEntry(it) }
                         }
                     }
+                    if (!modelSelected && messages.isNotEmpty()) {
+                        item(key = "model-setup-reminder") {
+                            Box(
+                                Modifier.fillMaxWidth().padding(vertical = 24.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                ModelSetupReminder(
+                                    message = modelSetupMessage,
+                                    modifier = Modifier
+                                        .padding(horizontal = 24.dp)
+                                        .widthIn(max = 320.dp)
+                                        .fillMaxWidth()
+                                )
+                            }
+                        }
+                    }
+                }
+
+                if (!modelSelected && messages.isEmpty()) {
+                    ModelSetupReminder(
+                        message = modelSetupMessage,
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .padding(horizontal = 24.dp)
+                            .widthIn(max = 320.dp)
+                            .fillMaxWidth()
+                    )
                 }
 
                 // 工具条上方的冒泡提示：检索中（浮在对话区底部，不占用工具条宽度）
@@ -597,7 +620,7 @@ private fun NormalAiChatScreen(
                 )
             }
 
-            errorMsg?.let {
+            errorMsg?.takeIf { modelSelected }?.let {
                 Text(it, color = MaterialTheme.colorScheme.error,
                     modifier = Modifier.padding(horizontal = 12.dp))
             }
@@ -623,96 +646,66 @@ private fun NormalAiChatScreen(
                 manifestChapters.size + manifestOutline.size + manifestVolumeSummaries.size
 
             // 底部工具条：常用提示词 / AI工具 / 图片 / 文件 / 链接 / 联网搜索，右侧文件清单
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 8.dp, vertical = 2.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(2.dp)
-            ) {
-                // 常用提示词：闪电图标，展开/收起提示词面板
-                IconButton(
+            ChatToolbar {
+                // 常用提示词：快捷气泡图标，展开/收起提示词面板
+                ChatToolbarAction(
+                    iconRes = R.drawable.ic_chat_shortcut,
+                    description = "常用提示词",
+                    selected = showPrompts,
                     onClick = {
                         focusManager.clearFocus()
                         keyboard?.hide()
                         showPrompts = !showPrompts
                         if (showPrompts) manifestState = 0
                     }
-                ) {
-                    Icon(
-                        Icons.Filled.Bolt,
-                        contentDescription = "常用提示词",
-                        tint = if (showPrompts) MaterialTheme.colorScheme.primary
-                        else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
+                )
                 // AI 工具多选（被工具页关闭的工具不出现在列表里）；右上角角标显示已勾选数量
                 if (outlineToolEnabled || chapterToolEnabled) {
-                    IconButton(onClick = { showAiTools = true }) {
-                        BadgedBox(
-                            badge = {
-                                if (chatTools.isNotEmpty()) {
-                                    Badge { Text("${chatTools.size}") }
-                                }
+                    ChatToolbarAction(
+                        iconRes = R.drawable.ic_chat_tools,
+                        description = "AI工具，已勾选 ${chatTools.size} 个",
+                        selected = chatTools.isNotEmpty(),
+                        badge = {
+                            if (chatTools.isNotEmpty()) {
+                                Badge { Text("${chatTools.size}") }
                             }
-                        ) {
-                            Icon(
-                                Icons.Filled.Build,
-                                contentDescription = "AI工具，已勾选 ${chatTools.size} 个",
-                                tint = if (chatTools.isNotEmpty()) MaterialTheme.colorScheme.primary
-                                else MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
+                        },
+                        onClick = { showAiTools = true }
+                    )
                 }
                 // 图片：相册选图后按多模态直传
-                IconButton(
+                ChatToolbarAction(
+                    iconRes = R.drawable.ic_chat_image,
+                    description = "添加图片",
                     onClick = {
                         imagePicker.launch(
                             PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                         )
                     }
-                ) {
-                    Icon(
-                        Icons.Filled.Image,
-                        contentDescription = "添加图片",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
+                )
                 // 文件：只收纯文本类，读取后作为参考资料注入
-                IconButton(
+                ChatToolbarAction(
+                    iconRes = R.drawable.ic_chat_file,
+                    description = "添加文件",
                     onClick = { filePicker.launch(TEXT_FILE_MIME_TYPES) }
-                ) {
-                    Icon(
-                        Icons.Filled.AttachFile,
-                        contentDescription = "添加文件",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
+                )
                 // 链接：抓取网页正文
-                IconButton(
+                ChatToolbarAction(
+                    iconRes = R.drawable.ic_chat_link,
+                    description = "添加链接",
                     onClick = {
                         linkInput = ""
                         showLinkDialog = true
                     }
-                ) {
-                    Icon(
-                        Icons.Filled.Link,
-                        contentDescription = "添加链接",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
+                )
                 // 联网搜索：仅模型标记支持内置搜索时显示
                 if (activeModelWebSearch) {
-                    IconButton(onClick = { vm.toggleWebSearch() }) {
-                        Icon(
-                            Icons.Filled.TravelExplore,
-                            contentDescription = "联网搜索",
-                            tint = if (webSearchOn) MaterialTheme.colorScheme.primary
-                            else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
+                    ChatToolbarAction(
+                        iconRes = R.drawable.ic_chat_web,
+                        description = "联网搜索",
+                        selected = webSearchOn,
+                        onClick = { vm.toggleWebSearch() }
+                    )
                 }
                 if (manifestCount > 0) {
                     Row(
@@ -744,29 +737,17 @@ private fun NormalAiChatScreen(
                 }
             }
 
-            // 文件清单内容（复用清单表格 / txt 渲染）
+            // 当前上下文与消息中的清单共用同一张卡片及顶部操作行。
             if (manifestState != 0) {
-                ContextManifestContent(
+                ContextManifestCard(
                     state = manifestState,
+                    onStateChange = { manifestState = it },
                     chapterRows = manifestChapters,
                     outlineRows = manifestOutline,
                     volumeSummaryRows = manifestVolumeSummaries,
                     preview = { vm.contextPreview() },
                     modifier = Modifier.padding(horizontal = 12.dp)
                 )
-                Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 12.dp),
-                    horizontalArrangement = Arrangement.End,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    // 「查看txt」旁边：一键复制整份 txt
-                    if (manifestState == 1) {
-                        CopyContextAction(text = { vm.contextPreview() })
-                    }
-                    TextButton(onClick = { manifestState = if (manifestState == 2) 1 else 2 }) {
-                        Text(if (manifestState == 2) "返回清单" else "查看txt")
-                    }
-                }
             }
 
             // 常用提示词面板
@@ -854,14 +835,18 @@ private fun NormalAiChatScreen(
             ChatComposer(
                 value = input,
                 onValueChange = { vm.input.value = it },
-                placeholder = "说点什么…",
-                sendEnabled = !sending && (input.isNotBlank() || pendingAttachments.isNotEmpty()),
+                placeholder = "说点什么吧……",
+                sendEnabled = modelSelected && !sending &&
+                    (input.isNotBlank() || pendingAttachments.isNotEmpty()),
                 onSend = {
                     focusManager.clearFocus()
                     keyboard?.hide()
                     vm.send()
                 },
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color.White)
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
             )
         }
     }
@@ -927,9 +912,20 @@ private fun NormalAiChatScreen(
         ChapterPickerDialog(
             chapters = chapters,
             volumes = volumes,
-            selected = selChapters,
-            onToggle = { vm.toggleChapter(it) },
+            summarySelected = selSummary,
+            contentSelected = selContent,
+            activeVolumeSummaries = activeVolumeSummaries,
+            selectedVolumeSummaryIds = selVolumeSummaries,
+            focusVolumeId = volumes.firstOrNull()?.id,
             onToggleAll = { vm.selectAllChapters() },
+            onToggleSummary = { vm.selectAllSummary() },
+            onToggleContent = { vm.selectAllContent() },
+            onToggleVolumeSummaryAll = { vm.toggleAllVolumeSummaryAssets() },
+            onToggleChapterSummary = { vm.toggleChapterSummary(it) },
+            onToggleChapterContent = { vm.toggleChapterContent(it) },
+            onToggleVolumeSummary = { vm.toggleVolumeSummary(it) },
+            onToggleVolumeContent = { vm.toggleVolumeContent(it) },
+            onToggleVolumeSummaryAsset = { vm.toggleVolumeSummaryContext(it) },
             onDismiss = { showChapters = false }
         )
     }
@@ -1399,12 +1395,15 @@ internal fun attachmentLabel(attachment: ChatAttachment): String {
     return prefix + attachment.name.take(24)
 }
 
-/** 待发送附件的类型图标 */
-internal fun attachmentIcon(attachment: ChatAttachment) = when (attachment.type) {
-    "image" -> Icons.Filled.Image
-    "link" -> Icons.Filled.Link
-    else -> Icons.Filled.AttachFile
-}
+/** 待发送附件沿用输入栏中的同一组设计图标。 */
+@Composable
+internal fun attachmentIcon(attachment: ChatAttachment) = painterResource(
+    when (attachment.type) {
+        "image" -> R.drawable.ic_chat_image
+        "link" -> R.drawable.ic_chat_link
+        else -> R.drawable.ic_chat_file
+    }
+)
 
 /**
  * 附件预览弹窗：图片直接显示，文件 / 链接显示提取出的正文。
@@ -1613,7 +1612,7 @@ private fun AiAssistantPanel(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(
-                        Icons.Filled.MenuBook,
+                        Icons.AutoMirrored.Filled.MenuBook,
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.size(16.dp)
@@ -1772,7 +1771,7 @@ private fun AiAssistantPanel(
                         val title = groupTitle(group, chapters)
                         ChapterGroupCard(
                             title = title,
-                            rounds = group.entries.count { it is ChatEntry.User },
+                            rounds = group.entries.size,
                             words = group.entries.sumOf { e ->
                                 when (e) {
                                     is ChatEntry.User ->
@@ -1964,7 +1963,7 @@ private fun AiAssistantPanel(
                         openPanel = if (openPanel == "prompt") null else "prompt"
                         manifestState = 0
                     },
-                    icon = Icons.Filled.Bolt,
+                    iconRes = R.drawable.ic_chat_shortcut,
                     contentDescription = "快捷提示词"
                 )
                 // 梗概：按「生成梗概」配置（是否限定范围 → 是否先弹标签选择）直接生成；
@@ -2402,6 +2401,7 @@ private fun AssistantBarAction(
     enabled: Boolean = true,
     selected: Boolean = false,
     icon: ImageVector? = null,
+    iconRes: Int? = null,
     contentDescription: String? = null,
     label: String? = null
 ) {
@@ -2422,10 +2422,14 @@ private fun AssistantBarAction(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.Center
     ) {
-        icon?.let {
-            Icon(it, contentDescription = contentDescription, tint = tint, modifier = Modifier.size(19.dp))
-            if (label != null) Spacer(Modifier.width(5.dp))
+        if (iconRes != null) {
+            Icon(painterResource(iconRes), contentDescription = contentDescription, tint = tint, modifier = Modifier.size(19.dp))
+        } else {
+            icon?.let {
+                Icon(it, contentDescription = contentDescription, tint = tint, modifier = Modifier.size(19.dp))
+            }
         }
+        if ((icon != null || iconRes != null) && label != null) Spacer(Modifier.width(5.dp))
         label?.let {
             Text(
                 it,
@@ -2696,112 +2700,174 @@ internal fun ContextPicker(
     onToggleChapterSummary: (Long) -> Unit,
     onToggleChapterContent: (Long) -> Unit,
     onToggleVolumeSummary: (Long) -> Unit,
-    onToggleVolumeContent: (Long) -> Unit
+    onToggleVolumeContent: (Long) -> Unit,
+    /** 弹窗中由外层提供标题时隐藏内嵌标题栏 */
+    showHeader: Boolean = true,
+    /** 在独立弹窗中嵌入时使用外层卡片样式 */
+    embedded: Boolean = false,
+    modifier: Modifier = Modifier
 ) {
     // 各分卷的展开状态：默认只展开当前章节所在的分卷
     val expandedState = remember { mutableStateMapOf<Long, Boolean>() }
-    Column(
+    val contentModifier = if (embedded) {
+        Modifier.fillMaxWidth()
+    } else {
         Modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 6.dp)
             .clip(RoundedCornerShape(18.dp))
             .background(PickerSurface)
             .border(1.dp, PickerBorder, RoundedCornerShape(18.dp))
-    ) {
-        // 头部：图标 + 标题 + 已选数量
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                Modifier.size(32.dp).clip(RoundedCornerShape(10.dp)).background(PickerSoft),
-                contentAlignment = Alignment.Center
+    }
+    Column(contentModifier.then(modifier)) {
+        if (showHeader) {
+            // 头部：图标 + 标题 + 已选数量
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(
-                    Icons.Filled.Description,
-                    contentDescription = null,
-                    tint = PickerPurple,
-                    modifier = Modifier.size(17.dp)
+                Box(
+                    Modifier.size(32.dp).clip(RoundedCornerShape(10.dp)).background(PickerSoft),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        Icons.Filled.Description,
+                        contentDescription = null,
+                        tint = PickerPurple,
+                        modifier = Modifier.size(17.dp)
+                    )
+                }
+                Spacer(Modifier.width(10.dp))
+                Text(title, color = PickerInk, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.weight(1f))
+                Text(
+                    "已选 ${selectedVolumeSummaryIds.size} 卷 · ${selected.size} 章",
+                    color = PickerMuted,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    softWrap = false
                 )
             }
-            Spacer(Modifier.width(10.dp))
-            Text(title, color = PickerInk, fontSize = 17.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.weight(1f))
-            Text(
-                "已选 ${selectedVolumeSummaryIds.size} 卷 · ${selected.size} 章",
-                color = PickerMuted,
-                fontSize = 12.sp,
-                maxLines = 1,
-                softWrap = false
-            )
+            HorizontalDivider(color = PickerLine)
         }
-        HorizontalDivider(color = PickerLine)
-        // 工具行：全选 / 梗概 / 正文
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            GenPill("全选", allSelected) { onToggleAll() }
-            GenPill("梗概", summaryAll) { onToggleSummary() }
-            GenPill("正文", contentAll) { onToggleContent() }
-            GenPill("卷梗概", volumeSummaryAll) { onToggleVolumeSummaryAll() }
-        }
-        // 三列含义表头：章节 / 卷梗概 / 正文 / 梗概（章节列不设勾选框，勾梗概或正文即纳入该章）
-        Row(
-            Modifier.fillMaxWidth().padding(start = 14.dp, end = 12.dp, bottom = 2.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text("章节", color = PickerMuted, fontSize = 12.sp, modifier = Modifier.weight(1f))
-            GenColumnLabel("卷梗概")
-            GenColumnLabel("正文")
-            GenColumnLabel("梗概")
-        }
-        Column(Modifier.heightIn(max = 300.dp).verticalScroll(rememberScrollState())) {
-            if (chapters.isEmpty()) {
-                Text("暂无可选章节", Modifier.padding(14.dp), color = PickerMuted, fontSize = 13.sp)
+        // 弹窗版工具栏按参考稿使用方形选择控件；内嵌面板维持原有快捷标签样式。
+        if (embedded) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 18.dp, vertical = 8.dp)
+                    .height(52.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Color.White)
+                    .border(1.dp, Color(0xFFEBEEF4), RoundedCornerShape(10.dp))
+                    .padding(horizontal = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                GenCheckbox(checked = allSelected, onCheckedChange = { onToggleAll() }, boxSize = 17.dp)
+                Spacer(Modifier.width(6.dp))
+                Text("全选", color = Color(0xFF252432), fontSize = 11.sp)
+                Spacer(Modifier.weight(1f))
+                ContextQuickFilter("卷梗概", volumeSummaryAll, onToggleVolumeSummaryAll)
+                Spacer(Modifier.width(6.dp))
+                ContextQuickFilter("梗概", summaryAll, onToggleSummary)
+                Spacer(Modifier.width(6.dp))
+                ContextQuickFilter("正文", contentAll, onToggleContent)
             }
-            volumes.forEach { v ->
-                val list = chapters.filter { it.volumeId == v.id }
-                if (list.isNotEmpty()) {
-                    val expanded = expandedState[v.id] ?: (v.id == focusVolumeId)
-                    val activeSummary = activeVolumeSummaries.firstOrNull { it.volumeId == v.id }
-                    GenVolumeRow(
-                        label = v.title,
-                        picked = list.count { it.id in selected },
-                        total = list.size,
-                        expanded = expanded,
-                        onToggleExpand = { expandedState[v.id] = !expanded },
-                        volumeSummarySelected =
-                            activeSummary != null && activeSummary.id in selectedVolumeSummaryIds,
-                        onToggleVolumeSummary = { onToggleVolumeSummaryAsset(v.id) },
-                        summarySelected = list.all { it.id in summarySelected },
-                        contentSelected = list.all { it.id in contentSelected },
-                        onToggleSummary = { onToggleVolumeSummary(v.id) },
-                        onToggleContent = { onToggleVolumeContent(v.id) }
-                    )
-                    if (expanded) {
-                        list.forEach { ch ->
-                            GenChapterRow(
-                                label = ch.title,
-                                summary = ch.id in summarySelected,
-                                content = ch.id in contentSelected,
-                                indented = true,
-                                onToggleSummary = { onToggleChapterSummary(ch.id) },
-                                onToggleContent = { onToggleChapterContent(ch.id) }
-                            )
+        } else {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                GenPill("全选", allSelected) { onToggleAll() }
+                GenPill("卷梗概", volumeSummaryAll) { onToggleVolumeSummaryAll() }
+                GenPill("梗概", summaryAll) { onToggleSummary() }
+                GenPill("正文", contentAll) { onToggleContent() }
+            }
+        }
+        // 表格卡片：章节树与卷梗概 / 梗概 / 正文列按设计稿对齐。
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = if (embedded) 18.dp else 0.dp)
+                .heightIn(max = if (embedded) 293.dp else 300.dp)
+                .then(
+                    if (embedded) Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Color.White)
+                        .border(1.dp, Color(0xFFEBEEF4), RoundedCornerShape(10.dp))
+                    else Modifier
+                )
+        ) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .background(if (embedded) Color(0xFFF7F7FC) else Color.Transparent)
+                    .padding(start = 14.dp, end = 12.dp, top = 10.dp, bottom = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("章节", color = PickerMuted, fontSize = 11.sp, modifier = Modifier.weight(1f))
+                GenColumnLabel("卷梗概")
+                GenColumnLabel("梗概")
+                GenColumnLabel("正文")
+            }
+            if (embedded) HorizontalDivider(color = PickerLine)
+            Column(
+                Modifier
+                    .heightIn(max = if (embedded) 245.dp else 300.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                if (chapters.isEmpty()) {
+                    Text("暂无可选章节", Modifier.padding(14.dp), color = PickerMuted, fontSize = 13.sp)
+                }
+                volumes.forEach { v ->
+                    val list = chapters.filter { it.volumeId == v.id }
+                    if (list.isNotEmpty()) {
+                        val expanded = expandedState[v.id] ?: (v.id == focusVolumeId)
+                        val activeSummary = activeVolumeSummaries.firstOrNull { it.volumeId == v.id }
+                        GenVolumeRow(
+                            label = v.title,
+                            picked = list.count { it.id in selected },
+                            total = list.size,
+                            expanded = expanded,
+                            onToggleExpand = { expandedState[v.id] = !expanded },
+                            volumeSummarySelected =
+                                activeSummary != null && activeSummary.id in selectedVolumeSummaryIds,
+                            onToggleVolumeSummary = { onToggleVolumeSummaryAsset(v.id) },
+                            summarySelected = list.all { it.id in summarySelected },
+                            contentSelected = list.all { it.id in contentSelected },
+                            onToggleSummary = { onToggleVolumeSummary(v.id) },
+                            onToggleContent = { onToggleVolumeContent(v.id) },
+                            compact = embedded
+                        )
+                        if (embedded) HorizontalDivider(color = PickerLine)
+                        if (expanded) {
+                            list.forEach { ch ->
+                                GenChapterRow(
+                                    label = ch.title,
+                                    summary = ch.id in summarySelected,
+                                    content = ch.id in contentSelected,
+                                    indented = true,
+                                    onToggleSummary = { onToggleChapterSummary(ch.id) },
+                                    onToggleContent = { onToggleChapterContent(ch.id) },
+                                    compact = embedded
+                                )
+                                if (embedded) HorizontalDivider(color = PickerLine)
+                            }
                         }
                     }
                 }
-            }
-            chapters.filter { it.volumeId == null }.forEach { ch ->
-                GenChapterRow(
-                    label = ch.title,
-                    summary = ch.id in summarySelected,
-                    content = ch.id in contentSelected,
-                    indented = false,
-                    onToggleSummary = { onToggleChapterSummary(ch.id) },
-                    onToggleContent = { onToggleChapterContent(ch.id) }
-                )
+                chapters.filter { it.volumeId == null }.forEach { ch ->
+                    GenChapterRow(
+                        label = ch.title,
+                        summary = ch.id in summarySelected,
+                        content = ch.id in contentSelected,
+                        indented = false,
+                        onToggleSummary = { onToggleChapterSummary(ch.id) },
+                        onToggleContent = { onToggleChapterContent(ch.id) },
+                        compact = embedded
+                    )
+                    if (embedded) HorizontalDivider(color = PickerLine)
+                }
             }
         }
     }
@@ -2823,6 +2889,30 @@ private fun GenColumnCheckbox(checked: Boolean, onToggle: () -> Unit) {
     }
 }
 
+@Composable
+private fun ContextQuickFilter(label: String, selected: Boolean, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(8.dp)
+    Box(
+        Modifier
+            .height(28.dp)
+            .widthIn(min = 37.dp)
+            .clip(shape)
+            .background(if (selected) Color(0xFFF0EFFF) else Color.White)
+            .border(1.dp, if (selected) Color(0xFFE5E1FF) else Color(0xFFE7E9F1), shape)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 7.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            label,
+            color = if (selected) PickerPurple else PickerMuted,
+            fontSize = 11.sp,
+            maxLines = 1,
+            softWrap = false
+        )
+    }
+}
+
 /** 上下文里的分卷行（对齐设计稿）：折叠箭头 + 名称 + 已选数 + 卷梗概 / 正文 / 梗概三列 */
 @Composable
 private fun GenVolumeRow(
@@ -2836,16 +2926,22 @@ private fun GenVolumeRow(
     summarySelected: Boolean,
     contentSelected: Boolean,
     onToggleSummary: () -> Unit,
-    onToggleContent: () -> Unit
+    onToggleContent: () -> Unit,
+    compact: Boolean = false
 ) {
     Row(
         Modifier
             .fillMaxWidth()
-            .background(PickerSoftRow)
-            .padding(start = 4.dp, end = 12.dp, top = 6.dp, bottom = 6.dp),
+            .background(if (compact) Color(0xFFFBFBFE) else PickerSoftRow)
+            .padding(
+                start = if (compact) 2.dp else 4.dp,
+                end = 12.dp,
+                top = if (compact) 6.dp else 6.dp,
+                bottom = if (compact) 6.dp else 6.dp
+            ),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        IconButton(onClick = onToggleExpand, modifier = Modifier.size(26.dp)) {
+        IconButton(onClick = onToggleExpand, modifier = Modifier.size(if (compact) 20.dp else 26.dp)) {
             Icon(
                 if (expanded) Icons.Filled.KeyboardArrowDown
                 else Icons.AutoMirrored.Filled.KeyboardArrowRight,
@@ -2864,11 +2960,13 @@ private fun GenVolumeRow(
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f)
         )
-        Spacer(Modifier.width(6.dp))
-        Text("$picked/$total", color = PickerMuted, fontSize = 12.sp, maxLines = 1, softWrap = false)
+        if (!compact) {
+            Spacer(Modifier.width(6.dp))
+            Text("$picked/$total", color = PickerMuted, fontSize = 12.sp, maxLines = 1, softWrap = false)
+        }
         GenColumnCheckbox(volumeSummarySelected, onToggleVolumeSummary)
-        GenColumnCheckbox(contentSelected, onToggleContent)
         GenColumnCheckbox(summarySelected, onToggleSummary)
+        GenColumnCheckbox(contentSelected, onToggleContent)
     }
 }
 
@@ -2880,12 +2978,19 @@ private fun GenChapterRow(
     content: Boolean,
     indented: Boolean,
     onToggleSummary: () -> Unit,
-    onToggleContent: () -> Unit
+    onToggleContent: () -> Unit,
+    compact: Boolean = false
 ) {
     Row(
         Modifier
             .fillMaxWidth()
-            .padding(start = if (indented) 22.dp else 12.dp, end = 12.dp, top = 6.dp, bottom = 6.dp),
+            .background(if (compact) Color.White else Color.Transparent)
+            .padding(
+                start = if (indented) 22.dp else 12.dp,
+                end = 12.dp,
+                top = if (compact) 10.dp else 6.dp,
+                bottom = if (compact) 10.dp else 6.dp
+            ),
         verticalAlignment = Alignment.CenterVertically
     ) {
         if (indented) {
@@ -2902,8 +3007,8 @@ private fun GenChapterRow(
         )
         // 与分卷行三列对齐：卷梗概只作用于分卷，章节行留空
         Spacer(Modifier.width(ContextColumnWidth))
-        GenColumnCheckbox(content, onToggleContent)
         GenColumnCheckbox(summary, onToggleSummary)
+        GenColumnCheckbox(content, onToggleContent)
     }
 }
 
@@ -3074,10 +3179,114 @@ private fun GenEntryRow(
     }
 }
 
-/**
- * 顶部紧凑的模型选择入口：显示当前模型名（超长省略），点击弹出下拉。
- * 下拉里展示全称「备注（显示名）+ 供应商」，与主界面模型下拉一致。
- */
+/** 顶栏操作按钮，与模型框使用相同的圆角、边框和底色。 */
+@Composable
+private fun ChatHeaderAction(
+    iconRes: Int,
+    description: String,
+    iconSize: Dp = 16.dp,
+    onClick: () -> Unit
+) {
+    val shape = RoundedCornerShape(10.dp)
+    Box(
+        Modifier
+            .size(36.dp)
+            .clip(shape)
+            .background(Color.White)
+            .border(1.dp, Color(0xFFE3E6EE), shape)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            painterResource(iconRes),
+            contentDescription = description,
+            modifier = Modifier.size(iconSize),
+            tint = Color.Black
+        )
+    }
+}
+
+/** 书籍 / 章节 / 大纲入口：圆角胶囊，选择数量单独显示在右侧。 */
+@Composable
+private fun ChatContextPill(
+    label: String,
+    modifier: Modifier = Modifier,
+    iconRes: Int? = null,
+    count: Int? = null,
+    enabled: Boolean,
+    onClick: () -> Unit
+) {
+    val foreground = if (enabled) Color.Black else Color(0xFF9AA1B0)
+    val shape = RoundedCornerShape(20.dp)
+    Surface(
+        modifier = modifier
+            .height(31.dp)
+            .clip(shape)
+            .clickable(enabled = enabled, onClick = onClick),
+        shape = shape,
+        color = Color.White,
+        border = BorderStroke(1.dp, Color(0xFFE3E6EE))
+    ) {
+        Row(
+            Modifier.fillMaxSize(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(
+                Modifier
+                    .weight(1f)
+                    .padding(start = if (iconRes != null) 13.dp else 12.dp, end = if (count != null) 6.dp else 13.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(if (count != null) 4.dp else 7.dp)
+            ) {
+                iconRes?.let {
+                    Icon(
+                        painterResource(it),
+                        contentDescription = null,
+                        modifier = Modifier.size(11.dp),
+                        tint = Color(0xFF70798C)
+                    )
+                }
+                Text(
+                    label,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = foreground,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                Icon(
+                    painterResource(R.drawable.ic_chat_dropdown),
+                    contentDescription = null,
+                    modifier = Modifier.size(width = 5.dp, height = 4.dp),
+                    tint = foreground
+                )
+            }
+            if (count != null) {
+                Spacer(Modifier.width(1.dp).height(29.dp).background(Color(0xFFE3E6EE)))
+                Box(Modifier.width(26.dp).fillMaxHeight(), contentAlignment = Alignment.Center) {
+                    Box(
+                        Modifier
+                            .size(16.dp)
+                            .background(Color(0xFFF0EFFF), CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            count.toString(),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = Color(0xFF6658E8),
+                            lineHeight = 13.sp,
+                            maxLines = 1
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** 当前模型名称省略显示，点击后在下拉中展示模型与供应商全称。 */
 @Composable
 internal fun ModelSelectorChip(
     models: List<AiModel>,
@@ -3088,17 +3297,38 @@ internal fun ModelSelectorChip(
 ) {
     var expanded by remember { mutableStateOf(false) }
     Box {
-        AssistChip(
-            onClick = { expanded = true },
-            label = {
+        val shape = RoundedCornerShape(10.dp)
+        Surface(
+            modifier = Modifier
+                .height(36.dp)
+                .clip(shape)
+                .clickable { expanded = true },
+            shape = shape,
+            color = Color.White,
+            border = BorderStroke(1.dp, Color(0xFFE3E6EE))
+        ) {
+            Row(
+                Modifier.padding(horizontal = 9.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(3.dp)
+            ) {
                 Text(
                     models.firstOrNull { it.id == activeId }?.displayName ?: "选择模型",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF25252B),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.widthIn(max = maxLabelWidth)
                 )
+                Icon(
+                    painterResource(R.drawable.ic_chat_dropdown),
+                    contentDescription = null,
+                    modifier = Modifier.size(width = 5.dp, height = 4.dp),
+                    tint = Color.Black
+                )
             }
-        )
+        }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             if (models.isEmpty()) {
                 DropdownMenuItem(
@@ -3383,12 +3613,12 @@ private fun groupPreview(group: ChatChapterGroup): String {
 }
 
 /**
- * 章节对话分组卡片：头部为「章节号徽标 + 章节名 + 本条统计」，点击整组展开 / 收起。
- * 收起时额外露出一行内容预览，展开时在卡片内渲染 [content]。
+ * 章节会话卡片：白底描边外壳，头部统计、收起预览与展开内容共用相同的左右边距。
+ * 背景、描边和阴影直接绘制，避免长章节整体裁剪产生超大图层，导致底部收起入口失效。
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ChapterGroupCard(
+internal fun ChapterGroupCard(
     title: String,
     rounds: Int,
     words: Int,
@@ -3398,102 +3628,118 @@ private fun ChapterGroupCard(
     onLongPressTitle: (() -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit
 ) {
-    // 圆角不再由整张卡片统一 clip：超长分组的整体圆角裁剪会生成一块巨大的图形层，
-    // 超出平台图层尺寸上限后，卡片下半部分（含尾部收起栏）会不绘制、也点不到 ——
-    // 表现为「对话过长时尾部收起栏收起不了」。改为由「头部区块 / 尾条」各自绘制圆角。
-    val topShape = RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp)
-    val bottomShape = RoundedCornerShape(bottomStart = 10.dp, bottomEnd = 10.dp)
-    val headShape = if (collapsed) RoundedCornerShape(18.dp) else topShape
-    val accent = MaterialTheme.colorScheme.primary
-    // 参照原型：头部淡紫→纸白渐变、内容区纸白底、尾条淡紫底，逐块拼出「一张卡片包住这一章」
-    val headBrush = Brush.verticalGradient(
-        listOf(
-            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
-            MaterialTheme.colorScheme.surface
-        )
-    )
-    Column(Modifier.fillMaxWidth()) {
-        // 头部区块：收起时四角圆角，展开时只有上两角圆角
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .clip(headShape)
-                .background(headBrush, headShape)
-        ) {
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .combinedClickable(onClick = { onToggle() }, onLongClick = onLongPressTitle)
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        title,
-                        style = MaterialTheme.typography.labelLarge,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        "共 $rounds 条对话 · 约 $words 字",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                Icon(
-                    if (collapsed) Icons.Filled.KeyboardArrowDown
-                    else Icons.Filled.KeyboardArrowUp,
-                    contentDescription = if (collapsed) "展开" else "收起",
-                    modifier = Modifier.size(20.dp),
-                    tint = accent
+    val dark = MaterialTheme.colorScheme.surface.luminance() < 0.5f
+    val background = if (dark) MaterialTheme.colorScheme.surface else Color.White
+    val border = if (dark) MaterialTheme.colorScheme.outlineVariant else Color(0xFFE3E6EE)
+    val muted = if (dark) MaterialTheme.colorScheme.onSurfaceVariant else Color(0xFF70798C)
+    val shape = RoundedCornerShape(15.dp)
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .drawBehind {
+                val radius = CornerRadius(15.dp.toPx())
+                drawRoundRect(
+                    color = Color.Black.copy(alpha = 0.04f),
+                    topLeft = Offset(0f, 4.dp.toPx()),
+                    size = size,
+                    cornerRadius = radius
+                )
+                drawRoundRect(
+                    color = Color.Black.copy(alpha = 0.04f),
+                    topLeft = Offset(0f, 2.dp.toPx()),
+                    size = size,
+                    cornerRadius = radius
                 )
             }
-            if (collapsed && preview.isNotBlank()) {
+            .background(background, shape)
+            .border(1.dp, border, shape)
+            .padding(horizontal = 14.dp)
+    ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .combinedClickable(
+                    onClickLabel = if (collapsed) "展开会话" else "收起会话",
+                    onLongClickLabel = if (onLongPressTitle != null) "重命名" else null,
+                    onClick = onToggle,
+                    onLongClick = onLongPressTitle
+                )
+                .padding(start = 2.dp, end = 6.dp, top = 12.dp, bottom = 9.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(
+                Modifier.weight(1f).padding(end = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(5.dp)
+            ) {
                 Text(
-                    preview,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(start = 56.dp, end = 12.dp, bottom = 10.dp),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    title,
+                    fontSize = 12.sp,
+                    lineHeight = 18.sp,
+                    fontWeight = FontWeight.Normal,
+                    color = if (dark) MaterialTheme.colorScheme.onSurface else Color.Black,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    "共${rounds}条对话·约${words}字",
+                    fontSize = 11.sp,
+                    lineHeight = 16.sp,
+                    color = muted,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
             }
-        }
-        if (!collapsed) {
-            // 原型：分隔线为淡紫（#a6a1e9），并加重与头部的分界
-            HorizontalDivider(color = accent.copy(alpha = 0.45f))
-            Column(
-                Modifier
-                    .background(MaterialTheme.colorScheme.surface)
-                    .padding(top = 10.dp, bottom = 12.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp),
-                content = content
-            )
-            // 尾部手柄：整组「头 — 对话 — 尾」中的尾块，点击即把整块向上收起（与头部点击等效）
-            // 满宽贴底、41dp 高、淡紫底、大号 ∧；只保留顶部分隔线，底两角 10dp 圆角
-            HorizontalDivider(color = accent.copy(alpha = 0.45f))
             Box(
                 Modifier
-                    .fillMaxWidth()
-                    .height(41.dp)
-                    .clip(bottomShape)
-                    .background(
-                        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
-                        bottomShape
-                    )
-                    .clickable { onToggle() },
+                    .size(20.dp)
+                    .background(background, RoundedCornerShape(5.dp))
+                    .border(1.dp, border, RoundedCornerShape(5.dp)),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
-                    Icons.Filled.KeyboardArrowUp,
-                    contentDescription = "收起",
-                    modifier = Modifier.size(26.dp),
-                    tint = accent
+                    if (collapsed) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
+                    contentDescription = if (collapsed) "展开会话" else "收起会话",
+                    modifier = Modifier.size(14.dp),
+                    tint = muted
                 )
             }
+        }
+        HorizontalDivider(color = border)
+        if (collapsed) {
+            Text(
+                preview,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(onClickLabel = "展开会话", onClick = onToggle)
+                    .padding(start = 2.dp, end = 2.dp, top = 5.dp, bottom = 10.dp),
+                fontSize = 11.sp,
+                lineHeight = 16.sp,
+                color = muted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        } else {
+            Column(
+                Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                content = content
+            )
+            HorizontalDivider(color = border)
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(32.dp)
+                    .clickable(onClickLabel = "收起会话", onClick = onToggle),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    painterResource(R.drawable.ic_chat_collapse_paw),
+                    contentDescription = "收起会话",
+                    modifier = Modifier.size(16.dp),
+                    tint = muted
+                )
+            }
+            Spacer(Modifier.height(8.dp))
         }
     }
 }
@@ -3851,7 +4097,7 @@ private fun ChatMessageItem(
             // 外层 14dp 的分组间距只负责分隔不同轮次，避免清单与回答之间被撑出大片空白
             Column(
                 Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 MessageCard(
                     ai = false,
@@ -4152,7 +4398,7 @@ private fun AssistantBlock(
                 Text(
                     "model: $modelName",
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = Color.Gray
                 )
                 val promptKnown = msg.promptTokens >= 0
                 val tokens = (if (promptKnown) msg.promptTokens else 0) + msg.completionTokens
@@ -4175,7 +4421,7 @@ private fun AssistantBlock(
                             )
                         },
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = Color.Gray
                     )
                 }
             }
@@ -4189,16 +4435,24 @@ private fun AssistantBlock(
  * 抬头不再显示时间与「分卷 · 章节名」——章节归属由分组卡片标题体现。
  */
 @Composable
-private fun MessageCard(
+internal fun MessageCard(
     ai: Boolean,
     tools: @Composable RowScope.() -> Unit,
     content: @Composable ColumnScope.() -> Unit
 ) {
-    val shape = RoundedCornerShape(15.dp)
-    val accent = MaterialTheme.colorScheme.primary
-    val background = if (ai) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.30f)
-    else MaterialTheme.colorScheme.surface
-    val borderColor = if (ai) accent.copy(alpha = 0.20f) else MaterialTheme.colorScheme.outlineVariant
+    val dark = MaterialTheme.colorScheme.surface.luminance() < 0.5f
+    val shape = RoundedCornerShape(10.dp)
+    val background = when {
+        dark && ai -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.30f)
+        dark -> MaterialTheme.colorScheme.surface
+        ai -> Color(0xFFF6F4FF)
+        else -> Color.White
+    }
+    val borderColor = when {
+        dark -> MaterialTheme.colorScheme.outlineVariant
+        ai -> Color(0xFFEAECF2)
+        else -> Color(0xFFE3E6EE)
+    }
     Column(
         Modifier
             .fillMaxWidth()
@@ -4209,22 +4463,25 @@ private fun MessageCard(
             .border(1.dp, borderColor, shape)
     ) {
         Column(
-            Modifier.padding(start = 12.dp, end = 12.dp, top = 10.dp, bottom = 8.dp),
+            Modifier.fillMaxWidth().padding(start = 15.dp, end = 13.dp, top = 10.dp, bottom = 10.dp),
             content = content
         )
-        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            content = tools
-        )
+        HorizontalDivider(color = borderColor)
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            Row(
+                Modifier.horizontalScroll(rememberScrollState()).widthIn(min = maxWidth)
+                    .padding(horizontal = 4.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                content = tools
+            )
+        }
     }
 }
 
 /**
- * 统一的对话输入区（参照原型 composer）：外侧圆角描边卡片，内嵌无边框输入框。
+ * 输入框与发送按钮并排，圆角容器只包住输入内容。
  * 输入行随内容高度自适应，最多 5 行。
- * 侧边 AI 抽屉的发送按钮已挪到底部操作行，故该入口传 [showSend] = false 隐藏内嵌圆形发送按钮。
+ * 侧边 AI 抽屉通过 [showSend] = false 隐藏这里的发送按钮，输入框仍占满整行。
  */
 @Composable
 internal fun ChatComposer(
@@ -4245,57 +4502,56 @@ internal fun ChatComposer(
             if (interaction is PressInteraction.Release) onFocus()
         }
     }
-    Surface(
+    Row(
         modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(18.dp),
-        color = MaterialTheme.colorScheme.surface,
-        border = BorderStroke(1.5.dp, MaterialTheme.colorScheme.outlineVariant)
+        verticalAlignment = Alignment.Bottom,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        Row(
-            Modifier.padding(start = 6.dp, end = 6.dp, top = 2.dp, bottom = 2.dp),
-            verticalAlignment = Alignment.Bottom
+        Surface(
+            modifier = Modifier.weight(1f),
+            shape = RoundedCornerShape(10.dp),
+            color = Color(0xFFF5F6FA)
         ) {
-            TextField(
+            BasicTextField(
                 value = value,
                 onValueChange = onValueChange,
                 modifier = Modifier
-                    .weight(1f)
+                    .padding(horizontal = 12.dp, vertical = 4.dp)
+                    .heightIn(min = 38.dp, max = 120.dp)
                     .onFocusChanged { if (it.isFocused) onFocus() },
                 interactionSource = inputInteraction,
-                placeholder = {
-                    Text(placeholder, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                },
+                textStyle = MaterialTheme.typography.bodyMedium.copy(color = Color(0xFF22232A)),
+                cursorBrush = SolidColor(Color(0xFF6658E8)),
                 maxLines = 5,
-                colors = TextFieldDefaults.colors(
-                    focusedContainerColor = Color.Transparent,
-                    unfocusedContainerColor = Color.Transparent,
-                    disabledContainerColor = Color.Transparent,
-                    focusedIndicatorColor = Color.Transparent,
-                    unfocusedIndicatorColor = Color.Transparent,
-                    disabledIndicatorColor = Color.Transparent
-                )
-            )
-            if (showSend) {
-                Box(
-                    Modifier
-                        .padding(end = 2.dp, bottom = 5.dp)
-                        .size(38.dp)
-                        .clip(CircleShape)
-                        .background(
-                            if (sendEnabled) MaterialTheme.colorScheme.primaryContainer
-                            else MaterialTheme.colorScheme.surfaceVariant
-                        )
-                        .clickable(enabled = sendEnabled, onClick = onSend),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        Icons.AutoMirrored.Filled.Send,
-                        contentDescription = "发送",
-                        modifier = Modifier.size(18.dp),
-                        tint = if (sendEnabled) MaterialTheme.colorScheme.primary
-                        else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                decorationBox = { innerTextField ->
+                    Box(
+                        Modifier.fillMaxWidth().padding(vertical = 7.dp),
+                        contentAlignment = Alignment.CenterStart
+                    ) {
+                        if (value.isEmpty()) {
+                            Text(placeholder, color = Color(0xFF939BAD), fontSize = 12.sp)
+                        }
+                        innerTextField()
+                    }
                 }
+            )
+        }
+        if (showSend) {
+            Box(
+                Modifier
+                    .padding(bottom = 5.dp)
+                    .size(36.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(if (sendEnabled) Color(0xFF6658E8) else Color(0xFFD8D5F7))
+                    .clickable(enabled = sendEnabled, onClick = onSend),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    painterResource(R.drawable.ic_chat_send),
+                    contentDescription = "发送",
+                    modifier = Modifier.size(20.dp),
+                    tint = Color.White
+                )
             }
         }
     }
@@ -4454,7 +4710,10 @@ private fun AnswerBlock(content: String, resetKey: Int) {
     // 长按可选中并复制回答内容；key 随 resetKey 变化时重建以取消选中
     key(resetKey) {
         SelectionContainer {
-            Text(content, style = MaterialTheme.typography.bodyMedium)
+            Text(
+                content,
+                style = MaterialTheme.typography.bodyMedium
+            )
         }
     }
 }
@@ -4497,13 +4756,13 @@ private fun RespondingBlock(
             Text(
                 "model: $modelName",
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = Color.Gray
             )
             Spacer(Modifier.weight(1f))
             Text(
                 (stage ?: "正在生成") + "…".repeat(dots),
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = Color.Gray
             )
         }
     }
@@ -4514,14 +4773,23 @@ private fun RespondingBlock(
  * [text] 为惰性求值（生成 txt 需要查库），点击后再取。
  */
 @Composable
-private fun CopyContextAction(text: suspend () -> String, modifier: Modifier = Modifier) {
+private fun CopyContextAction(
+    text: suspend () -> String,
+    modifier: Modifier = Modifier,
+    compact: Boolean = false
+) {
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     Text(
         "复制",
-        style = MaterialTheme.typography.labelSmall,
-        color = MaterialTheme.colorScheme.primary,
+        style = MaterialTheme.typography.labelSmall.copy(
+            fontSize = if (compact) 9.sp else 11.sp,
+            lineHeight = if (compact) 12.sp else 16.sp
+        ),
+        color = if (compact && MaterialTheme.colorScheme.surface.luminance() >= 0.5f) {
+            Color(0xFF6658E8)
+        } else MaterialTheme.colorScheme.primary,
         modifier = modifier
             .clip(RoundedCornerShape(6.dp))
             .clickable {
@@ -4545,7 +4813,7 @@ private fun CopyContextAction(text: suspend () -> String, modifier: Modifier = M
  * 只有点击「查看txt」才会显示生成的上下文文本。表格与 txt 都可以滑动查看。
  */
 @Composable
-private fun ContextManifest(
+internal fun ContextManifest(
     snapshot: ContextSnapshot,
     chapters: List<Chapter>,
     outline: List<OutlineItem>,
@@ -4579,57 +4847,92 @@ private fun ContextManifest(
     }
     if (total == 0) return
 
-    Column(modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+    ContextManifestCard(
+        state = state,
+        onStateChange = setState,
+        chapterRows = chapterRows,
+        outlineRows = outlineRows,
+        volumeSummaryRows = volumeSummaryRows,
+        preview = preview,
+        modifier = modifier
+    )
+}
+
+/** 表格与 TXT 共用设计稿中的浅灰外壳，操作行始终保留在卡片顶部。 */
+@Composable
+private fun ContextManifestCard(
+    state: Int,
+    onStateChange: (Int) -> Unit,
+    chapterRows: List<ManifestChapterRow>,
+    outlineRows: List<String>,
+    volumeSummaryRows: List<String>,
+    preview: suspend () -> String,
+    modifier: Modifier = Modifier
+) {
+    val total = chapterRows.size + outlineRows.size + volumeSummaryRows.size
+    if (total == 0) return
+    val dark = MaterialTheme.colorScheme.surface.luminance() < 0.5f
+    val accent = if (dark) MaterialTheme.colorScheme.primary else Color(0xFF6658E8)
+    val shape = RoundedCornerShape(5.dp)
+    Column(
+        modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(if (dark) MaterialTheme.colorScheme.surfaceVariant else Color(0xFFF5F6FA))
+            .border(1.dp, if (dark) MaterialTheme.colorScheme.outlineVariant else Color(0xFFECEEF3), shape)
+    ) {
         Row(
             Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(8.dp))
-                .background(MaterialTheme.colorScheme.surfaceVariant)
-                .clickable { setState(if (state == 0) 1 else 0) }
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .clickable { onStateChange(if (state == 0) 1 else 0) }
+                .padding(horizontal = 7.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            Icon(
-                Icons.Filled.Description,
-                contentDescription = null,
-                modifier = Modifier.size(16.dp),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(Modifier.width(6.dp))
             Text(
-                "文件清单（$total）",
-                style = MaterialTheme.typography.bodySmall,
+                "文件清单",
+                fontSize = 10.sp,
+                lineHeight = 14.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f)
             )
             Text(
-                when (state) {
-                    0 -> "展开"
-                    1 -> "查看txt"
-                    else -> "收起"
-                },
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                // 只有「查看txt」自身可点击；点击清单行只会展开/合上清单
-                modifier = if (state == 1) {
-                    Modifier
-                        .clip(RoundedCornerShape(6.dp))
-                        .clickable { setState(2) }
-                        .padding(horizontal = 6.dp, vertical = 2.dp)
-                } else {
-                    Modifier
-                }
+                "${total}项",
+                modifier = Modifier
+                    .background(
+                        if (dark) MaterialTheme.colorScheme.primaryContainer else Color(0xFFF0EFFF),
+                        RoundedCornerShape(3.dp)
+                    )
+                    .padding(horizontal = 4.dp, vertical = 1.dp),
+                fontSize = 9.sp,
+                lineHeight = 12.sp,
+                color = accent,
+                maxLines = 1
             )
-            // 「查看txt」旁边：一键复制整份 txt
-            if (state == 1) {
-                Spacer(Modifier.width(6.dp))
-                CopyContextAction(text = preview)
-            }
-            Icon(
-                if (state == 0) Icons.Filled.KeyboardArrowDown else Icons.Filled.KeyboardArrowUp,
-                contentDescription = null,
-                modifier = Modifier.size(16.dp),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            Text(
+                if (state == 0) "展开" else "收起",
+                modifier = Modifier
+                    .clip(RoundedCornerShape(3.dp))
+                    .clickable { onStateChange(if (state == 0) 1 else 0) }
+                    .padding(horizontal = 4.dp, vertical = 2.dp),
+                fontSize = 9.sp,
+                lineHeight = 12.sp,
+                maxLines = 1,
+                color = accent
             )
+            Text(
+                "查看TXT",
+                modifier = Modifier
+                    .clip(RoundedCornerShape(3.dp))
+                    .clickable { onStateChange(if (state == 2) 0 else 2) }
+                    .padding(horizontal = 4.dp, vertical = 2.dp),
+                fontSize = 9.sp,
+                lineHeight = 12.sp,
+                maxLines = 1,
+                color = accent
+            )
+            CopyContextAction(text = preview, compact = true)
         }
 
         ContextManifestContent(
@@ -4655,119 +4958,131 @@ private fun ContextManifestContent(
     preview: suspend () -> String,
     modifier: Modifier = Modifier
 ) {
-    Column(modifier.fillMaxWidth()) {
-        when (state) {
-            1 -> Column(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(top = 4.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp))
-                    .heightIn(max = 200.dp)
-                    .verticalScroll(rememberScrollState())
-            ) {
-                if (volumeSummaryRows.isNotEmpty()) {
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .background(MaterialTheme.colorScheme.surfaceVariant)
-                            .padding(horizontal = 10.dp, vertical = 6.dp)
-                    ) {
-                        Text("整卷梗概", style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.SemiBold)
-                    }
-                    volumeSummaryRows.forEach { label ->
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                        Text(
-                            label,
-                            style = MaterialTheme.typography.bodySmall,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp)
-                        )
-                    }
-                }
-                if (chapterRows.isNotEmpty()) {
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .background(MaterialTheme.colorScheme.surfaceVariant)
-                            .padding(horizontal = 10.dp, vertical = 6.dp)
-                    ) {
-                        Text("章节", style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                        Text("仅梗概", style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.SemiBold, modifier = Modifier.width(52.dp))
-                        Text("仅正文", style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.SemiBold, modifier = Modifier.width(52.dp))
-                    }
-                    chapterRows.forEach { row ->
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                        Row(
-                            Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                row.title,
-                                style = MaterialTheme.typography.bodySmall,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f)
-                            )
-                            Text(
-                                if (row.summary) "✓" else "—",
-                                style = MaterialTheme.typography.bodySmall,
-                                modifier = Modifier.width(52.dp)
-                            )
-                            Text(
-                                if (row.content) "✓" else "—",
-                                style = MaterialTheme.typography.bodySmall,
-                                modifier = Modifier.width(52.dp)
-                            )
-                        }
-                    }
-                }
-                if (outlineRows.isNotEmpty()) {
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .background(MaterialTheme.colorScheme.surfaceVariant)
-                            .padding(horizontal = 10.dp, vertical = 6.dp)
-                    ) {
-                        Text("大纲", style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.SemiBold)
-                    }
-                    outlineRows.forEach { label ->
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                        Text(
-                            label,
-                            style = MaterialTheme.typography.bodySmall,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp)
-                        )
-                    }
+    val dark = MaterialTheme.colorScheme.surface.luminance() < 0.5f
+    val muted = if (dark) MaterialTheme.colorScheme.onSurfaceVariant else Color(0xFF70798C)
+    val divider = if (dark) MaterialTheme.colorScheme.outlineVariant else Color(0xFFEAECF2)
+    when (state) {
+        1 -> Column(
+            modifier
+                .fillMaxWidth()
+                .padding(start = 7.dp, end = 7.dp, top = 6.dp, bottom = 8.dp)
+                .heightIn(max = 160.dp)
+                .verticalScroll(rememberScrollState())
+        ) {
+            if (volumeSummaryRows.isNotEmpty()) {
+                ManifestTextSection("整卷梗概", volumeSummaryRows, muted, divider)
+            }
+            if (chapterRows.isNotEmpty()) {
+                if (volumeSummaryRows.isNotEmpty()) Spacer(Modifier.height(6.dp))
+                ManifestChapterLine("章节", "仅梗概", "仅正文", muted, muted)
+                chapterRows.forEach { row ->
+                    HorizontalDivider(color = divider)
+                    ManifestChapterLine(
+                        title = row.title,
+                        summary = if (row.summary) "✔" else "—",
+                        content = if (row.content) "✔" else "—",
+                        titleColor = MaterialTheme.colorScheme.onSurface,
+                        statusColor = muted
+                    )
                 }
             }
-
-            2 -> {
-                var text by remember { mutableStateOf("") }
-                LaunchedEffect(chapterRows, outlineRows, volumeSummaryRows) { text = preview() }
-                Text(
-                    if (text.isBlank()) "（暂无可生成的上下文）" else text,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 4.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
-                        .padding(10.dp)
-                        .heightIn(max = 200.dp)
-                        .verticalScroll(rememberScrollState())
-                )
+            if (outlineRows.isNotEmpty()) {
+                if (chapterRows.isNotEmpty() || volumeSummaryRows.isNotEmpty()) Spacer(Modifier.height(6.dp))
+                ManifestTextSection("大纲", outlineRows, muted, divider)
             }
         }
+
+        2 -> {
+            var text by remember(chapterRows, outlineRows, volumeSummaryRows) { mutableStateOf<String?>(null) }
+            LaunchedEffect(chapterRows, outlineRows, volumeSummaryRows) { text = preview() }
+            val shape = RoundedCornerShape(5.dp)
+            Box(
+                modifier
+                    .fillMaxWidth()
+                    .padding(start = 10.dp, end = 10.dp, top = 6.dp, bottom = 12.dp)
+                    .clip(shape)
+                    .background(if (dark) MaterialTheme.colorScheme.surface else Color.White)
+                    .border(1.dp, if (dark) MaterialTheme.colorScheme.outlineVariant else Color(0xFFEFF1F5), shape)
+                    .heightIn(min = 72.dp, max = 160.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                SelectionContainer {
+                    Text(
+                        text = text?.ifBlank { "（暂无可生成的上下文）" } ?: "正在生成TXT…",
+                        fontSize = 10.sp,
+                        lineHeight = 15.sp,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.fillMaxWidth().padding(10.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** 三列共用相同的比例，窄窗口下梗概、正文状态仍与表头对齐。 */
+@Composable
+private fun ManifestChapterLine(
+    title: String,
+    summary: String,
+    content: String,
+    titleColor: Color,
+    statusColor: Color
+) {
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 3.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = title,
+            fontSize = 9.sp,
+            lineHeight = 14.sp,
+            color = titleColor,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(0.65f)
+        )
+        Text(
+            text = summary,
+            fontSize = 9.sp,
+            lineHeight = 14.sp,
+            color = statusColor,
+            maxLines = 1,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            modifier = Modifier.weight(0.175f)
+        )
+        Text(
+            text = content,
+            fontSize = 9.sp,
+            lineHeight = 14.sp,
+            color = statusColor,
+            maxLines = 1,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            modifier = Modifier.weight(0.175f)
+        )
+    }
+}
+
+@Composable
+private fun ManifestTextSection(title: String, rows: List<String>, muted: Color, divider: Color) {
+    Text(
+        title,
+        fontSize = 9.sp,
+        lineHeight = 14.sp,
+        color = muted,
+        modifier = Modifier.padding(horizontal = 3.dp, vertical = 5.dp)
+    )
+    rows.forEach { label ->
+        HorizontalDivider(color = divider)
+        Text(
+            label,
+            fontSize = 9.sp,
+            lineHeight = 14.sp,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 3.dp, vertical = 5.dp)
+        )
     }
 }
 
@@ -4936,107 +5251,183 @@ internal fun BookPickerDialog(
     }
 }
 
-/** 章节多选弹窗：按分卷筛选 + 搜索标题 / 内容 / 梗概 */
+/** 章节上下文选择弹窗：对齐选择章节设计稿，并保留标题 / 内容搜索。 */
 @Composable
 internal fun ChapterPickerDialog(
     chapters: List<Chapter>,
     volumes: List<Volume>,
-    selected: Set<Long>,
-    onToggle: (Long) -> Unit,
+    summarySelected: Set<Long>,
+    contentSelected: Set<Long>,
+    activeVolumeSummaries: List<VolumeSummary>,
+    selectedVolumeSummaryIds: Set<Long>,
+    focusVolumeId: Long?,
     onToggleAll: () -> Unit,
+    onToggleSummary: () -> Unit,
+    onToggleContent: () -> Unit,
+    onToggleVolumeSummaryAll: () -> Unit,
+    onToggleChapterSummary: (Long) -> Unit,
+    onToggleChapterContent: (Long) -> Unit,
+    onToggleVolumeSummary: (Long) -> Unit,
+    onToggleVolumeContent: (Long) -> Unit,
+    onToggleVolumeSummaryAsset: (Long) -> Unit,
     onDismiss: () -> Unit
 ) {
     var search by remember { mutableStateOf("") }
-    // 分卷筛选：null=全部，-1=未分卷
-    var volumeFilter by remember { mutableStateOf<Long?>(null) }
-
-    val filtered = chapters.filter { ch ->
-        val matchVolume = when (volumeFilter) {
-            null -> true
-            -1L -> ch.volumeId == null
-            else -> ch.volumeId == volumeFilter
+    val selected = summarySelected + contentSelected
+    val query = search.trim()
+    val visibleChapters = remember(chapters, query) {
+        if (query.isBlank()) chapters else chapters.filter { chapter ->
+            chapter.title.contains(query, ignoreCase = true) ||
+                chapter.summary.contains(query, ignoreCase = true) ||
+                chapter.content.contains(query, ignoreCase = true)
         }
-        val q = search.trim()
-        val matchSearch = q.isBlank() ||
-            ch.title.contains(q, ignoreCase = true) ||
-            ch.summary.contains(q, ignoreCase = true) ||
-            ch.content.contains(q, ignoreCase = true)
-        matchVolume && matchSearch
     }
+    val allIds = chapters.map { it.id }.toSet()
+    val allSelected = allIds.isNotEmpty() &&
+        allIds.all { it in summarySelected && it in contentSelected }
+    val summaryAll = allIds.isNotEmpty() && allIds.all { it in summarySelected }
+    val contentAll = allIds.isNotEmpty() && allIds.all { it in contentSelected }
+    val volumeSummaryAll = activeVolumeSummaries.isNotEmpty() &&
+        activeVolumeSummaries.all { it.id in selectedVolumeSummaryIds }
 
-    AlertDialog(
+    Dialog(
         onDismissRequest = onDismiss,
-        title = { Text("选择章节（已选 ${selected.size}）") },
-        text = {
-            Column {
-                OutlinedTextField(
-                    value = search,
-                    onValueChange = { search = it },
-                    placeholder = { Text("搜索标题 / 内容 / 梗概") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Spacer(Modifier.height(8.dp))
-                if (volumes.isNotEmpty()) {
-                    Row(
-                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            val maxCardHeight = (maxHeight - 24.dp).coerceAtLeast(240.dp)
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .widthIn(max = 420.dp)
+                    .padding(horizontal = 16.dp)
+                    .heightIn(max = maxCardHeight)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(Color.White)
+                    .border(1.dp, Color(0xFFEBEEF4), RoundedCornerShape(14.dp))
+            ) {
+                Row(
+                    Modifier.fillMaxWidth().padding(start = 18.dp, end = 8.dp, top = 16.dp, bottom = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        Modifier.size(48.dp).clip(RoundedCornerShape(15.dp)).background(PickerSoft),
+                        contentAlignment = Alignment.Center
                     ) {
-                        FilterChip(selected = volumeFilter == null, onClick = { volumeFilter = null },
-                            label = { Text("全部") })
-                        volumes.forEach { v ->
-                            FilterChip(selected = volumeFilter == v.id, onClick = { volumeFilter = v.id },
-                                label = { Text(v.title, maxLines = 1, overflow = TextOverflow.Ellipsis) })
-                        }
-                        if (chapters.any { it.volumeId == null }) {
-                            FilterChip(selected = volumeFilter == -1L, onClick = { volumeFilter = -1L },
-                                label = { Text("未分卷") })
-                        }
+                        Icon(
+                            Icons.AutoMirrored.Filled.MenuBook,
+                            contentDescription = null,
+                            tint = PickerPurple,
+                            modifier = Modifier.size(25.dp)
+                        )
                     }
-                    Spacer(Modifier.height(4.dp))
-                }
-                HorizontalDivider()
-                LazyColumn(Modifier.heightIn(max = 320.dp)) {
-                    if (filtered.isEmpty()) {
-                        item {
-                            Text(
-                                "暂无匹配章节",
-                                Modifier.padding(vertical = 12.dp),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("选择章节", color = Color(0xFF171722), fontSize = 21.sp, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.height(2.dp))
+                        Text("选择需要加入上下文的内容", color = PickerMuted, fontSize = 12.sp)
                     }
-                    items(filtered, key = { it.id }) { ch ->
-                        Row(
-                            Modifier
-                                .fillMaxWidth()
-                                .clickable { onToggle(ch.id) },
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Checkbox(checked = ch.id in selected, onCheckedChange = { onToggle(ch.id) })
-                            Column {
-                                Text(ch.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                volumes.firstOrNull { it.id == ch.volumeId }?.let {
-                                    Text(
-                                        it.title,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                            }
-                        }
+                    Box(
+                        Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color(0xFFF0EFFF))
+                            .border(1.dp, Color(0xFFE5E1FF), RoundedCornerShape(10.dp))
+                            .padding(horizontal = 11.dp, vertical = 7.dp)
+                    ) {
+                        Text("已选 ${selected.size} 章", color = PickerPurple, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                    }
+                    IconButton(onClick = onDismiss, modifier = Modifier.size(38.dp)) {
+                        Icon(Icons.Filled.Close, contentDescription = "关闭", tint = PickerMuted)
                     }
                 }
-            }
-        },
-        confirmButton = {
-            Row {
-                TextButton(onClick = onToggleAll) { Text("全选/取消") }
-                TextButton(onClick = onDismiss) { Text("完成") }
+                HorizontalDivider(color = PickerLine)
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(PickerSearchBg)
+                        .border(1.dp, PickerBorder, RoundedCornerShape(12.dp))
+                        .padding(horizontal = 11.dp, vertical = 9.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Filled.Search, contentDescription = null, tint = PickerMuted, modifier = Modifier.size(17.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Box(Modifier.weight(1f)) {
+                        if (search.isEmpty()) Text("搜索章节标题 / 内容 / 梗概", color = PickerMuted, fontSize = 13.sp)
+                        BasicTextField(
+                            value = search,
+                            onValueChange = { search = it },
+                            singleLine = true,
+                            textStyle = MaterialTheme.typography.bodySmall.copy(color = PickerInk),
+                            cursorBrush = SolidColor(PickerPurple),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                    if (search.isNotEmpty()) {
+                        IconButton(onClick = { search = "" }, modifier = Modifier.size(24.dp)) {
+                            Icon(Icons.Filled.Close, contentDescription = "清空搜索", tint = PickerMuted, modifier = Modifier.size(15.dp))
+                        }
+                    }
+                }
+                ContextPicker(
+                    chapters = visibleChapters,
+                    volumes = volumes,
+                    title = "选择章节",
+                    selected = selected,
+                    summarySelected = summarySelected,
+                    contentSelected = contentSelected,
+                    activeVolumeSummaries = activeVolumeSummaries,
+                    selectedVolumeSummaryIds = selectedVolumeSummaryIds,
+                    onToggleVolumeSummaryAsset = onToggleVolumeSummaryAsset,
+                    focusVolumeId = focusVolumeId,
+                    allSelected = allSelected,
+                    summaryAll = summaryAll,
+                    contentAll = contentAll,
+                    volumeSummaryAll = volumeSummaryAll,
+                    onToggleAll = onToggleAll,
+                    onToggleSummary = onToggleSummary,
+                    onToggleContent = onToggleContent,
+                    onToggleVolumeSummaryAll = onToggleVolumeSummaryAll,
+                    onToggleChapterSummary = onToggleChapterSummary,
+                    onToggleChapterContent = onToggleChapterContent,
+                    onToggleVolumeSummary = onToggleVolumeSummary,
+                    onToggleVolumeContent = onToggleVolumeContent,
+                    showHeader = false,
+                    embedded = true,
+                    modifier = Modifier.weight(1f, fill = false)
+                )
+                Row(
+                    Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 14.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .height(44.dp)
+                            .clip(RoundedCornerShape(13.dp))
+                            .background(Color.White)
+                            .border(1.dp, Color(0xFFE5E8EF), RoundedCornerShape(13.dp))
+                            .clickable(onClick = onDismiss),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("取消", color = Color(0xFF70788A), fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                    }
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .height(44.dp)
+                            .clip(RoundedCornerShape(13.dp))
+                            .background(Brush.horizontalGradient(listOf(Color(0xFF6658E8), Color(0xFF8376F1))))
+                            .clickable(onClick = onDismiss),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("完成（${selected.size}）", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                }
             }
         }
-    )
+    }
 }
 
 /** 大纲多选弹窗（对齐设计稿）：搜索标题 / 内容 + 分类标签筛选 + 全选 + 取消 / 确定 */

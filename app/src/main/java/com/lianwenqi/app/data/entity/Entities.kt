@@ -40,7 +40,15 @@ data class Book(
     val lastChapterTitle: String? = null,
     /** 绑定的文风档案 id；0 表示未绑定（不建外键，引用一致性由 StyleRepository 保证） */
     @ColumnInfo(defaultValue = "0")
-    val styleId: Long = 0
+    val styleId: Long = 0,
+    /** 封面装饰符号；null 表示按 id / 标题自动轮换 */
+    val coverGlyph: String? = null,
+    /** 封面底部英文；空串表示不显示 */
+    @ColumnInfo(defaultValue = "LIANWENLU")
+    val coverEnglish: String = "LIANWENLU",
+    /** 封面书名显示方式：0 完整书名，1 仅前 4 个字 */
+    @ColumnInfo(defaultValue = "0")
+    val coverTitleMode: Int = 0
 )
 
 /** 文风样本来源类型 */
